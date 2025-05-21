@@ -15,7 +15,7 @@ pub fn main() !void {
     }
 
     // ルックアップベンチマーク (100万回)
-    const timer = try std.time.Timer.start();
+    var timer = std.time.Timer.start() catch unreachable;
     var j: u32 = 0;
     var found: i32 = 0;
     while (j < 1000000) : (j += 1) {
