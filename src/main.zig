@@ -10,22 +10,22 @@ const Node = struct {
     prefix_value: usize,
 
     // 子ノードを検索する内部関数 (キーは0〜255)
-fn findChild(self: *Node, key: u8) ?*Node {
-    const chunk_index = key >> 6;
-    const bit_offset = @as(u6, @truncate(key & 0x3F));
-    if (((self.bitmap[chunk_index] >> bit_offset) & 1) == 0) {
-        return null;
+    fn findChild(self: *Node, key: u8) ?*Node {
+        const chunk_index = key >> 6;
+        const bit_offset = @as(u6, @truncate(key & 0x3F));
+        if (((self.bitmap[chunk_index] >> bit_offset) & 1) == 0) {
+            return null;
+        }
+        var index: usize = 0;
+        var i: usize = 0;
+        while (i < chunk_index) : (i += 1) {
+            index += @popCount(self.bitmap[i]);
+        }
+        const mask = if ((key & 0x3F) == 0) 0 else (~(@as(u64, 1) << @as(u6, @truncate(key & 0x3F))));
+        index += @popCount(self.bitmap[chunk_index] & mask);
+        // 修正: ポインタの参照を直接返す
+        return self.children.?[index];
     }
-    var index: usize = 0;
-    var i: usize = 0;
-    while (i < chunk_index) : (i += 1) {
-        index += @popCount(self.bitmap[i]);
-    }
-    const mask = if ((key & 0x3F) == 0) 0 else (~(@as(u64, 1) << @as(u6, @truncate(key & 0x3F))));
-    index += @popCount(self.bitmap[chunk_index] & mask);
-    // 修正: ポインタの参照を直接返す
-    return self.children.?[index];
-}
 };
 
 // ルーティングテーブル構造体 (C互換構造体)
@@ -80,18 +80,17 @@ fn insertChild(parent: *Node, key: u8, child: *Node) !void {
     const mask = if (bit_offset == 0) 0 else ((@as(u64, 1) << bit_offset) - 1);
     index +%= @popCount(parent.bitmap[chunk_index] & mask);
 
-
     // 古い配列の内容をコピー
     if (parent.children) |old_children| {
         if (old_count > 0) {
             // 修正: ポインタを直接コピー
             var i: usize = 0;
             while (i < index) : (i += 1) {
-                new_children[i] = old_children[i];  // &を削除
+                new_children[i] = old_children[i]; // &を削除
             }
             i = index;
             while (i < old_count) : (i += 1) {
-                new_children[i + 1] = old_children[i];  // &を削除
+                new_children[i + 1] = old_children[i]; // &を削除
             }
             // 古い配列を解放
             c_allocator.free(parent.children.?);
@@ -102,7 +101,7 @@ fn insertChild(parent: *Node, key: u8, child: *Node) !void {
     new_children[index] = child;
 
     // 新しい配列を設定
-    parent.children = new_children;  // スライスとして設定する必要はない
+    parent.children = new_children; // スライスとして設定する必要はない
 }
 
 fn freeNode(node: *Node) void {
