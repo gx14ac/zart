@@ -4,7 +4,9 @@ const bart = @import("main.zig");
 pub fn main() !void {
     // ベンチマーク用ルーティングテーブルを作成
     const table = bart.bart_create();
-    defer bart.bart_destroy(table);
+    defer {
+        bart.bart_destroy(table);
+    }
 
     // 1000個の/16プレフィックスを登録
     var i: u32 = 0;
