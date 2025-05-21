@@ -1,7 +1,7 @@
 const std = @import("std");
 const c_allocator = std.heap.c_allocator;
 
-// Node構造体: 256ビットのビットマップと子ポインタ配列、プレフィックス値を持つ
+// 256ビットのビットマップと子ポインタ配列、プレフィックス値を持つ
 const Node = struct {
     bitmap: [4]u64, // 各ビットが子ノードの存在を示す256ビット(4 * 64)
     children: ?[]*Node, // 子ノードへのポインタ配列 (bitmapの1の数と同数)
@@ -31,7 +31,7 @@ const Node = struct {
 // ルーティングテーブル構造体 (C互換構造体)
 pub const BartTable = extern struct { root4: ?*Node, root6: ?*Node };
 
-// 内部ヘルパー: 新しいNodeを確保して初期化 (c_allocatorを使用)
+// 新しいNodeを確保して初期化 (c_allocatorを使用)
 fn allocNode() !*Node {
     const node_ptr = try c_allocator.create(Node);
     node_ptr.* = Node{ .bitmap = [_]u64{ 0, 0, 0, 0 }, .children = null, .prefix_set = false, .prefix_value = 0 };
@@ -51,7 +51,6 @@ fn insertChild(parent: *Node, key: u8, child: *Node) !void {
         index +%= @popCount(parent.bitmap[chunk_index] & mask);
 
         if (parent.children) |old_children| {
-            // 修正: ポインタを直接渡す
             freeNode(old_children[index]);
         }
         return;
@@ -110,7 +109,6 @@ fn freeNode(node: *Node) void {
         for (children) |child_ptr| {
             freeNode(child_ptr);
         }
-        // 修正: スライスのptrフィールドにアクセスする代わりに、スライスを直接渡す
         c_allocator.free(children);
         node.children = null;
     }
@@ -173,7 +171,7 @@ fn insert4Internal(table: *BartTable, ip: u32, prefix_len: u8, value: usize) !vo
         }
         const key = addr_bytes[byte_index];
         var next = node.findChild(key);
-        if (next == null) { // !next から変更
+        if (next == null) {
             next = try allocNode();
             try insertChild(node, key, next.?);
         }
