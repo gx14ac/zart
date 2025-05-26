@@ -41,7 +41,6 @@
             name = "bart";
             src = ./.;
             nativeBuildInputs = with pkgs; [
-              zig.master
               pkg-config
               gcc
             ];
