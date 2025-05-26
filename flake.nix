@@ -20,6 +20,7 @@
           npmDepsHash = "sha256-PNfd3/suM2c+A5gKGBorGqApL0APoti/9UB857V4GjA=";
           npmInstallFlags = [ "--frozen-lockfile" ];
           dontNpmBuild = true;
+          dontBuild = true;
           postPatch = ''
             if [ ! -f package-lock.json ]; then
               echo "Error: package-lock.json not found"
@@ -62,6 +63,12 @@
 
             buildPhase = ''
               zig build
+            '';
+
+            installPhase = ''
+              mkdir -p $out/lib $out/include
+              cp zig-out/lib/libbart.a $out/lib/
+              cp zig-out/include/bart.h $out/include/
             '';
           };
 
