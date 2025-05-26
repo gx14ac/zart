@@ -19,6 +19,7 @@
           src = ./.;
           npmDepsHash = "sha256-PNfd3/suM2c+A5gKGBorGqApL0APoti/9UB857V4GjA=";
           npmInstallFlags = [ "--frozen-lockfile" ];
+          dontNpmBuild = true;
           postPatch = ''
             if [ ! -f package-lock.json ]; then
               echo "Error: package-lock.json not found"
