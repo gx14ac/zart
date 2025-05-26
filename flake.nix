@@ -63,12 +63,6 @@
             buildPhase = ''
               zig build
             '';
-
-            installPhase = ''
-              mkdir -p $out/lib $out/include
-              cp zig-out/lib/libbart.a $out/lib/
-              cp zig-out/include/bart.h $out/include/
-            '';
           };
 
           codex-cli = codex-pkg;
