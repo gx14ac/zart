@@ -4,7 +4,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    zig.url = "github:mitchellh/zig-overlay";
   };
 
   outputs = { self, nixpkgs, flake-utils, zig }:
@@ -12,14 +11,12 @@
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ zig.overlays.default ];
         };
       in
       {
         devShells.default = pkgs.mkShell {
           name = "bart-dev";
           buildInputs = with pkgs; [
-            zig.master
             pkg-config
             gcc
             nodejs_20
