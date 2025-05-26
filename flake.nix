@@ -6,12 +6,32 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils  }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
         };
+
+        codex-pkg = pkgs.buildNpmPackage {
+          pname = "codex-cli";
+          version = "0.1.0";
+          src = ./.;
+          npmDepsHash = "";
+          npmInstallFlags = [ "--frozen-lockfile" ];
+          postPatch = ''
+            if [ ! -f package-lock.json ]; then
+              echo "Error: package-lock.json not found"
+              exit 1
+            fi
+          '';
+          meta = with pkgs.lib; {
+            description = "OpenAI Codex command-line interface";
+            license = licenses.asl20;
+            homepage = "https://github.com/openai/codex";
+          };
+        };
+
       in
       {
         devShells.default = pkgs.mkShell {
@@ -19,20 +39,14 @@
           buildInputs = with pkgs; [
             pkg-config
             gcc
-            nodejs_20
-            nodePackages.npm
+            nodejs_22
+            codex-pkg
           ];
 
           shellHook = ''
             echo "BART development environment"
-            echo "Zig version: $(zig version)"
             echo "Node.js version: $(node --version)"
-            echo "npm version: $(npm --version)"
-            
-            if ! command -v codex &> /dev/null; then
-              echo "Installing Codex..."
-              npm install -g @openai/codex
-            fi
+            echo "Codex version: $(codex --version)"
           '';
         };
 
@@ -56,13 +70,13 @@
             '';
           };
 
-          codex = pkgs.nodePackages."@openai/codex";
+          codex-cli = codex-pkg;
         };
 
         apps = {
           codex = {
             type = "app";
-            program = "${pkgs.nodePackages."@openai/codex"}/bin/codex";
+            program = "${codex-pkg}/bin/codex";
           };
         };
       }

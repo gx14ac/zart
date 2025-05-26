@@ -1,0 +1,20 @@
+{
+    "name": "codex-cli",
+    "version": "0.1.0",
+    "description": "OpenAI Codex command-line interface",
+    "main": "dist/cli.js",
+    "bin": {
+        "codex": "./dist/cli.js"
+    },
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/cli.js"
+    },
+    "dependencies": {
+        "@openai/codex": "latest"
+    },
+    "devDependencies": {
+        "typescript": "^5.0.0"
+    },
+    "license": "Apache-2.0"
+}
