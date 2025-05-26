@@ -60,13 +60,13 @@
             '';
           };
 
-          codex = pkgs.nodePackages.@openai/codex;
+          codex = pkgs.nodePackages."@openai/codex";
         };
 
         apps = {
           codex = {
             type = "app";
-            program = "${pkgs.nodePackages.@openai/codex}/bin/codex";
+            program = "${pkgs.nodePackages."@openai/codex"}/bin/codex";
           };
         };
       }
