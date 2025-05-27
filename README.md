@@ -4,7 +4,6 @@ bitmap based art table.
 ## Setup
 `nix develop`
 
-
 ## CGO
 
 ## Ref
