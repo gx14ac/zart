@@ -1,1 +1,4 @@
 .zig-cache/
+.txt
+.DS_Store
+.csv

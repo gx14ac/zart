@@ -1,80 +1,64 @@
 const std = @import("std");
+const bitset256 = @import("bitset256.zig");
 
-// メモリ管理の最適化: ノードプールの実装
-// ============================================
-// ノードプールは、ノードのメモリを事前に確保し、再利用することで
-// 以下の最適化を実現します：
-// 1. アロケーション回数の削減
-// 2. メモリの局所性の向上
-// 3. キャッシュの効率的な利用
-// 4. メモリフラグメンテーションの防止
+// ノードプールによるメモリ管理の最適化
+// 
+// ノードプールは、ノードのメモリを事前に確保して再利用することで
+// メモリ管理を効率化します。主なメリット：
+// - メモリ確保の回数を減らせる
+// - メモリの局所性が向上する
+// - キャッシュの効率が良くなる
+// - メモリの断片化を防げる
 
-// ノードプールの設定
-// ------------------
-// NODE_POOL_SIZE: プール内のノード数
-// NODE_POOL_ALIGN: キャッシュラインサイズに合わせたアライメント
-//                  (一般的なx86_64では64バイト)
+// プールの設定
+// - NODE_POOL_SIZE: プールに確保するノード数
+// - NODE_POOL_ALIGN: キャッシュラインサイズ（x86_64なら64バイト）
+
 pub const NODE_POOL_SIZE = 1024;
 pub const NODE_POOL_ALIGN = 64;
 
-// ノードの基本構造
-// ---------------
-// キャッシュフレンドリーなレイアウトを考慮した構造体
+// ノードの構造
+// キャッシュ効率を考慮したレイアウト
 pub const Node = struct {
     // ビットマップ（256ビット = 4 * 64ビット）
-    // キャッシュラインサイズにアライメント
-    // 各ビットが子ノードの存在を示す
+    // キャッシュラインに合わせてアライメント
+    // 各ビットは子ノードの有無を示す
     bitmap: [4]u64 align(NODE_POOL_ALIGN),
 
     // 子ノードへのポインタ配列
-    // ビットマップの1の数と同数の要素を持つ
+    // ビットマップの1の数と同じ要素数
     children: ?[]*Node,
 
-    // プレフィックス終端フラグ
-    // このノードがプレフィックスの終端かどうか
+    // プレフィックスの終端かどうか
     prefix_set: bool,
 
-    // プレフィックス値
-    // プレフィックス終端の場合の値
+    // プレフィックスが終端の場合の値
     prefix_value: usize,
 
     // 子ノードの検索
-    // -------------
-    // 1. キーに対応するビットをチェック
-    // 2. ビットが1の場合、対応する子ノードを返す
-    // 3. ビットが0の場合、nullを返す
+    // 1. キーに対応するビットを確認
+    // 2. ビットが1なら対応する子ノードを返す
+    // 3. ビットが0ならnullを返す
     //
     // ビットマップの構造（4個のu64、合計256ビット）
-    // [chunk_index=0] [chunk_index=1] [chunk_index=2] [chunk_index=3]
-    // [0..63]         [64..127]       [128..191]      [192..255]
+    // [0..63] [64..127] [128..191] [192..255]
     pub fn findChild(self: *const Node, key: u8) ?*Node {
-        // キーをビットマップのインデックスに変換
-        // 例: key=65の場合
-        // chunk_index = 65 >> 6 = 1 (2番目のu64)
-        // bit_offset = 65 & 0x3F = 1 (2番目のビット)
-        const chunk_index = key >> 6;
-        const bit_offset = @as(u6, @truncate(key & 0x3F));
-
-        // 該当するビットをチェック
-        if (((self.bitmap[chunk_index] >> bit_offset) & 1) == 0) {
-            return null;
+        // LPM探索: key以下で最大の子ノードを返す
+        const idx = bitset256.lpmSearch(&self.bitmap, key);
+        if (idx) |i| {
+            // 子ノードのインデックスを計算
+            var index: usize = 0;
+            const chunk_index: usize = i >> 6;
+            const bit_offset: u6 = @as(u6, @truncate(i & 0x3F));
+            var j: usize = 0;
+            while (j < chunk_index) : (j += 1) {
+                index += @popCount(self.bitmap[j]);
+            }
+            const mask = if (bit_offset == 0) 0 else (~(@as(u64, 1) << bit_offset));
+            index += @popCount(self.bitmap[chunk_index] & mask);
+            return self.children.?[index];
         }
-
-        // 子ノードのインデックスを計算
-        // 1. 前のチャンクの1のビット数を合計
-        // 2. 現在のチャンクで、該当ビットより前の1のビット数を加算
-        var index: usize = 0;
-        var i: usize = 0;
-        while (i < chunk_index) : (i += 1) {
-            index += @popCount(self.bitmap[i]);
-        }
-
-        // マスクを作成して、該当ビットより前の1のビット数を計算
-        const mask = if (bit_offset == 0) 0 else (~(@as(u64, 1) << bit_offset));
-        index += @popCount(self.bitmap[chunk_index] & mask);
-
-        // 対応する子ノードを返す
-        return self.children.?[index];
+        return null;
     }
 };
 
