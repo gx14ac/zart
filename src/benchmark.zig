@@ -1,5 +1,7 @@
 const std = @import("std");
 const bart = @import("main.zig");
+const time = std.time;
+const Timer = time.Timer;
 
 // Global buffers
 var ip_buf: [16]u8 = undefined;
@@ -29,65 +31,105 @@ fn formatDuration(ns: u64) []const u8 {
     }
 }
 
+// Benchmark configuration
+const Config = struct {
+    prefix_count: u32,
+    lookup_count: u32,
+    prefix_length: u8,
+    random_seed: u64,
+};
+
+// Run a single benchmark with given configuration
+fn runBenchmark(config: Config) !void {
+    const stdout = std.io.getStdOut().writer();
+    var prng = std.rand.DefaultPrng.init(config.random_seed);
+    const random = prng.random();
+
+    // Create and initialize table
+    const table = bart.bart_create();
+    defer bart.bart_destroy(table);
+
+    // Insert prefixes
+    try stdout.print("\nInserting {d} prefixes (/{d}):\n", .{ config.prefix_count, config.prefix_length });
+    var insert_timer = try Timer.start();
+    var i: u32 = 0;
+    while (i < config.prefix_count) : (i += 1) {
+        const ip_net = random.int(u32);
+        const res = bart.bart_insert4(table, ip_net, config.prefix_length, 1);
+        std.debug.assert(res == 0);
+
+        if (i < 3 or i >= config.prefix_count - 3) {
+            try stdout.print("  {s}/{d}\n", .{ ip4ToString(ip_net), config.prefix_length });
+        } else if (i == 3) {
+            try stdout.print("  ...\n", .{});
+        }
+    }
+    const insert_time = insert_timer.read();
+    const insert_per_sec = @as(f64, @floatFromInt(config.prefix_count)) / (@as(f64, @floatFromInt(insert_time)) / 1_000_000_000.0);
+    try stdout.print("Insert Performance: {d:.2} prefixes/sec\n", .{insert_per_sec});
+
+    // Lookup benchmark
+    try stdout.print("\nRunning {d} lookups:\n", .{config.lookup_count});
+    var lookup_timer = try Timer.start();
+    var j: u32 = 0;
+    var found: i32 = 0;
+    var match_count: u32 = 0;
+    while (j < config.lookup_count) : (j += 1) {
+        const ip_addr = random.int(u32);
+        _ = bart.bart_lookup4(table, ip_addr, &found);
+        if (found != 0) match_count += 1;
+
+        if (j < 3 or j >= config.lookup_count - 3) {
+            try stdout.print("  Lookup: {s} -> {s}\n", .{ 
+                ip4ToString(ip_addr), 
+                if (found != 0) "Match" else "No Match" 
+            });
+        } else if (j == 3) {
+            try stdout.print("  ...\n", .{});
+        }
+    }
+    const lookup_time = lookup_timer.read();
+    const lookup_per_sec = @as(f64, @floatFromInt(config.lookup_count)) / (@as(f64, @floatFromInt(lookup_time)) / 1_000_000_000.0);
+    const match_rate = @as(f64, @floatFromInt(match_count)) / @as(f64, @floatFromInt(config.lookup_count)) * 100.0;
+
+    try stdout.print("\nBenchmark Results:\n", .{});
+    try stdout.print("  Insert Time: {s}\n", .{formatDuration(insert_time)});
+    try stdout.print("  Insert Rate: {d:.2} prefixes/sec\n", .{insert_per_sec});
+    try stdout.print("  Lookup Time: {s}\n", .{formatDuration(lookup_time)});
+    try stdout.print("  Lookup Rate: {d:.2} lookups/sec\n", .{lookup_per_sec});
+    try stdout.print("  Match Rate: {d:.2}%\n", .{match_rate});
+}
+
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("ZART Routing Table Benchmark\n", .{});
     try stdout.print("===========================\n", .{});
 
-    // Create routing table for benchmark
-    const table = bart.bart_create();
-    defer {
-        bart.bart_destroy(table);
+    // Run benchmarks with different configurations
+    const configs = [_]Config{
+        .{
+            .prefix_count = 1000,
+            .lookup_count = 1_000_000,
+            .prefix_length = 16,
+            .random_seed = 42,
+        },
+        .{
+            .prefix_count = 10000,
+            .lookup_count = 1_000_000,
+            .prefix_length = 24,
+            .random_seed = 42,
+        },
+        .{
+            .prefix_count = 100000,
+            .lookup_count = 1_000_000,
+            .prefix_length = 32,
+            .random_seed = 42,
+        },
+    };
+
+    for (configs, 0..) |config, i| {
+        try stdout.print("\nBenchmark Configuration {d}:\n", .{i + 1});
+        try stdout.print("------------------------\n", .{});
+        try runBenchmark(config);
     }
-
-    // Register prefixes
-    const prefix_count = 1000;
-    try stdout.print("\nPrefix Registration:\n", .{});
-    try stdout.print("  Count: {d} prefixes (/16)\n", .{prefix_count});
-
-    // Display first 3 and last 3 prefixes
-    try stdout.print("  Examples:\n", .{});
-    var i: u32 = 0;
-    while (i < prefix_count) : (i += 1) {
-        const ip_net = i << 16;
-        const res = bart.bart_insert4(table, ip_net, 16, 1);
-        std.debug.assert(res == 0);
-
-        // Display first 3 and last 3 prefixes
-        if (i < 3 or i >= prefix_count - 3) {
-            try stdout.print("    {s}/16\n", .{ip4ToString(ip_net)});
-        } else if (i == 3) {
-            try stdout.print("    ...\n", .{});
-        }
-    }
-
-    // Lookup benchmark
-    const lookup_count = 1000000;
-    try stdout.print("\nLookup Benchmark:\n", .{});
-    try stdout.print("  Iterations: {d}\n", .{lookup_count});
-
-    var timer = std.time.Timer.start() catch unreachable;
-    var j: u32 = 0;
-    var found: i32 = 0;
-    while (j < lookup_count) : (j += 1) {
-        const prefix_index = j % prefix_count;
-        const ip_addr = (prefix_index << 16) | (j & 0xFFFF);
-        _ = bart.bart_lookup4(table, ip_addr, &found);
-        std.debug.assert(found != 0);
-
-        // Display first 3 and last 3 lookups
-        if (j < 3 or j >= lookup_count - 3) {
-            try stdout.print("    Lookup: {s} -> Match\n", .{ip4ToString(ip_addr)});
-        } else if (j == 3) {
-            try stdout.print("    ...\n", .{});
-        }
-    }
-
-    const total_ns = timer.read();
-    const avg_ns = total_ns / lookup_count;
-
-    try stdout.print("\nBenchmark Results:\n", .{});
-    try stdout.print("  Total Time: {s}\n", .{formatDuration(total_ns)});
-    try stdout.print("  Average Time: {s}/lookup\n", .{formatDuration(avg_ns)});
-    try stdout.print("  Throughput: {d:.2} lookups/sec\n", .{@as(f64, @floatFromInt(lookup_count)) / (@as(f64, @floatFromInt(total_ns)) / 1_000_000_000.0)});
 }

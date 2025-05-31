@@ -1,44 +1,41 @@
 const std = @import("std");
 const c_allocator = std.heap.c_allocator;
-
-// 256ビットのビットマップと子ポインタ配列、プレフィックス値を持つ
-const Node = struct {
-    bitmap: [4]u64, // 各ビットが子ノードの存在を示す256ビット(4 * 64)
-    children: ?[]*Node, // 子ノードへのポインタ配列 (bitmapの1の数と同数)
-    // prefixフラグと値: このノード自体がプレフィックス終端ならprefix_set=true, prefix_valueに値を保持
-    prefix_set: bool,
-    prefix_value: usize,
-
-    // 子ノードを検索する内部関数 (キーは0〜255)
-    fn findChild(self: *Node, key: u8) ?*Node {
-        const chunk_index = key >> 6;
-        const bit_offset = @as(u6, @truncate(key & 0x3F));
-        if (((self.bitmap[chunk_index] >> bit_offset) & 1) == 0) {
-            return null;
-        }
-        var index: usize = 0;
-        var i: usize = 0;
-        while (i < chunk_index) : (i += 1) {
-            index += @popCount(self.bitmap[i]);
-        }
-        const mask = if ((key & 0x3F) == 0) 0 else (~(@as(u64, 1) << @as(u6, @truncate(key & 0x3F))));
-        index += @popCount(self.bitmap[chunk_index] & mask);
-        // 修正: ポインタの参照を直接返す
-        return self.children.?[index];
-    }
-};
+const node_pool = @import("node_pool.zig");
+const Node = node_pool.Node;
+const NodePool = node_pool.NodePool;
 
 // ルーティングテーブル構造体 (C互換構造体)
-pub const BartTable = extern struct { root4: ?*Node, root6: ?*Node };
+pub const BartTable = extern struct {
+    root4: ?*Node,
+    root6: ?*Node,
+    pool: *NodePool,  // ノードプールへの参照を追加
+};
 
-// 新しいNodeを確保して初期化 (c_allocatorを使用)
-fn allocNode() !*Node {
-    const node_ptr = try c_allocator.create(Node);
-    node_ptr.* = Node{ .bitmap = [_]u64{ 0, 0, 0, 0 }, .children = null, .prefix_set = false, .prefix_value = 0 };
-    return node_ptr;
+// ルーティングテーブルを初期化 (ヒープ上に確保)
+pub export fn bart_create() callconv(.C) *BartTable {
+    const table = c_allocator.create(BartTable) catch unreachable;
+    table.root4 = null;
+    table.root6 = null;
+    // ノードプールを初期化
+    table.pool = NodePool.init(c_allocator) catch unreachable;
+    return table;
 }
 
-fn insertChild(parent: *Node, key: u8, child: *Node) !void {
+// ルーティングテーブルを解放 (全ノードを再帰的に解放)
+pub export fn bart_destroy(table: *BartTable) callconv(.C) void {
+    if (table.root4) |r4| {
+        table.pool.freeNodeRecursive(r4);
+    }
+    if (table.root6) |r6| {
+        table.pool.freeNodeRecursive(r6);
+    }
+    // ノードプールを解放
+    table.pool.deinit(c_allocator);
+    _ = c_allocator.destroy(table);
+}
+
+// 子ノードの挿入（最適化版）
+fn insertChild(parent: *Node, key: u8, child: *Node, pool: *NodePool) !void {
     const chunk_index = key >> 6;
     const bit_offset = @as(u6, @truncate(key & 0x3F));
     if (((parent.bitmap[chunk_index] >> bit_offset) & 1) != 0) {
@@ -51,7 +48,7 @@ fn insertChild(parent: *Node, key: u8, child: *Node) !void {
         index +%= @popCount(parent.bitmap[chunk_index] & mask);
 
         if (parent.children) |old_children| {
-            freeNode(old_children[index]);
+            pool.freeNodeRecursive(old_children[index]);
         }
         return;
     }
@@ -103,45 +100,14 @@ fn insertChild(parent: *Node, key: u8, child: *Node) !void {
     parent.children = new_children; // スライスとして設定する必要はない
 }
 
-fn freeNode(node: *Node) void {
-    if (node.children) |children| {
-        // 子ノードを再帰的に解放
-        for (children) |child_ptr| {
-            freeNode(child_ptr);
-        }
-        c_allocator.free(children);
-        node.children = null;
-    }
-    _ = c_allocator.destroy(node);
-}
-
 // 内部ヘルパー: IPv4アドレス(32bit整数)からバイト配列(長さ4)を取得 (ネットワークバイトオーダー)
 fn ip4ToBytes(ip: u32) [4]u8 {
     return [4]u8{ @as(u8, @truncate((ip >> 24) & 0xFF)), @as(u8, @truncate((ip >> 16) & 0xFF)), @as(u8, @truncate((ip >> 8) & 0xFF)), @as(u8, @truncate(ip & 0xFF)) };
 }
 
-// ルーティングテーブルを初期化 (ヒープ上に確保)
-pub export fn bart_create() callconv(.C) *BartTable {
-    const table = c_allocator.create(BartTable) catch unreachable;
-    table.root4 = null;
-    table.root6 = null;
-    return table;
-}
-
-// ルーティングテーブルを解放 (全ノードを再帰的に解放)
-pub export fn bart_destroy(table: *BartTable) callconv(.C) void {
-    if (table.root4) |r4| {
-        freeNode(r4);
-    }
-    if (table.root6) |r6| {
-        freeNode(r6);
-    }
-    _ = c_allocator.destroy(table);
-}
-
 fn insert4Internal(table: *BartTable, ip: u32, prefix_len: u8, value: usize) !void {
     if (table.root4 == null) {
-        table.root4 = try allocNode();
+        table.root4 = table.pool.allocate() orelse return error.OutOfMemory;
     }
     var node = table.root4.?;
     const addr_bytes = ip4ToBytes(ip);
@@ -161,10 +127,10 @@ fn insert4Internal(table: *BartTable, ip: u32, prefix_len: u8, value: usize) !vo
             while (k <= end_key) : (k += 1) {
                 const kb = @as(u8, @truncate(k));
                 if (((node.bitmap[kb >> 6] >> @as(u6, @truncate(kb & 0x3F))) & 1) == 0) {
-                    var prefix_node = try allocNode(); // 各キーに対して新しいノードを作成
+                    var prefix_node = table.pool.allocate() orelse return error.OutOfMemory;
                     prefix_node.prefix_set = true;
                     prefix_node.prefix_value = value;
-                    try insertChild(node, kb, prefix_node);
+                    try insertChild(node, kb, prefix_node, table.pool);
                 }
             }
             return;
@@ -172,8 +138,8 @@ fn insert4Internal(table: *BartTable, ip: u32, prefix_len: u8, value: usize) !vo
         const key = addr_bytes[byte_index];
         var next = node.findChild(key);
         if (next == null) {
-            next = try allocNode();
-            try insertChild(node, key, next.?);
+            next = table.pool.allocate() orelse return error.OutOfMemory;
+            try insertChild(node, key, next.?, table.pool);
         }
         bit_index += 8;
     }
@@ -183,7 +149,7 @@ fn insert4Internal(table: *BartTable, ip: u32, prefix_len: u8, value: usize) !vo
 
 fn insert6Internal(table: *BartTable, addr_ptr: [*]const u8, prefix_len: u8, value: usize) !void {
     if (table.root6 == null) {
-        table.root6 = try allocNode();
+        table.root6 = table.pool.allocate() orelse return error.OutOfMemory;
     }
     var node = table.root6.?;
     var bit_index: u8 = 0;
@@ -202,10 +168,10 @@ fn insert6Internal(table: *BartTable, addr_ptr: [*]const u8, prefix_len: u8, val
             while (k <= end_key) : (k += 1) {
                 const kb = @as(u8, @truncate(k));
                 if (((node.bitmap[kb >> 6] >> @as(u6, @truncate(kb & 0x3F))) & 1) == 0) {
-                    var prefix_node = try allocNode(); // 各キーに対して新しいノードを作成
+                    var prefix_node = table.pool.allocate() orelse return error.OutOfMemory;
                     prefix_node.prefix_set = true;
                     prefix_node.prefix_value = value;
-                    try insertChild(node, kb, prefix_node);
+                    try insertChild(node, kb, prefix_node, table.pool);
                 }
             }
             return;
@@ -213,8 +179,8 @@ fn insert6Internal(table: *BartTable, addr_ptr: [*]const u8, prefix_len: u8, val
         const key = addr_ptr[byte_index];
         var next = node.findChild(key);
         if (next == null) {
-            next = try allocNode();
-            try insertChild(node, key, next.?);
+            next = table.pool.allocate() orelse return error.OutOfMemory;
+            try insertChild(node, key, next.?, table.pool);
         }
         bit_index += 8;
     }
