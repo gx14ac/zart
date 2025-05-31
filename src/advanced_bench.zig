@@ -229,6 +229,54 @@ fn threadLookupTest(
 /// 
 /// 戻り値：
 /// - BenchmarkResult: テスト結果（ルックアップ数、マッチ数、実行時間など）
+fn printBenchmarkResult(result: BenchmarkResult, thread_results: []const ThreadResult) void {
+    const stdout = std.io.getStdOut().writer();
+    stdout.print("\n=== Benchmark Results ===\n", .{}) catch return;
+    stdout.print("Thread Count: {d}\n", .{result.thread_count}) catch return;
+    stdout.print("Prefix Count: {d}\n", .{result.prefix_count}) catch return;
+    stdout.print("\n--- Performance Metrics ---\n", .{}) catch return;
+    stdout.print("Lookup Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(result.lookup_time)) / 1_000_000.0}) catch return;
+    stdout.print("Lookup Rate: {d:.2} ops/sec\n", .{result.lookup_rate}) catch return;
+    stdout.print("Match Rate: {d:.2}%\n", .{result.match_rate}) catch return;
+    stdout.print("Memory Usage: {d:.2} MB\n", .{@as(f64, @floatFromInt(result.memory_usage)) / (1024.0 * 1024.0)}) catch return;
+    stdout.print("Fragmentation Impact: {d:.2}%\n", .{result.fragmentation_impact}) catch return;
+
+    stdout.print("\n--- Per-Thread Details ---\n", .{}) catch return;
+    for (thread_results, 0..) |thread_result, i| {
+        const thread_time_ms = @as(f64, @floatFromInt(thread_result.time_ns)) / 1_000_000.0;
+        const thread_rate = @as(f64, @floatFromInt(thread_result.lookups)) / (thread_time_ms / 1000.0);
+        const thread_match_rate = @as(f64, @floatFromInt(thread_result.matches)) / @as(f64, @floatFromInt(thread_result.lookups)) * 100.0;
+
+        stdout.print("Thread {d}:\n", .{i}) catch return;
+        stdout.print("  Lookups: {d}\n", .{thread_result.lookups}) catch return;
+        stdout.print("  Matches: {d}\n", .{thread_result.matches}) catch return;
+        stdout.print("  Execution Time: {d:.2} ms\n", .{thread_time_ms}) catch return;
+        stdout.print("  Throughput: {d:.2} ops/sec\n", .{thread_rate}) catch return;
+        stdout.print("  Match Rate: {d:.2}%\n", .{thread_match_rate}) catch return;
+    }
+
+    // Calculate performance variance between threads
+    var min_rate: f64 = std.math.floatMax(f64);
+    var max_rate: f64 = 0;
+    var total_rate: f64 = 0;
+    for (thread_results) |thread_result| {
+        const thread_time_ms = @as(f64, @floatFromInt(thread_result.time_ns)) / 1_000_000.0;
+        const thread_rate = @as(f64, @floatFromInt(thread_result.lookups)) / (thread_time_ms / 1000.0);
+        min_rate = @min(min_rate, thread_rate);
+        max_rate = @max(max_rate, thread_rate);
+        total_rate += thread_rate;
+    }
+    const avg_rate = total_rate / @as(f64, @floatFromInt(thread_results.len));
+    const rate_variance = (max_rate - min_rate) / avg_rate * 100.0;
+
+    stdout.print("\n--- Thread Performance Analysis ---\n", .{}) catch return;
+    stdout.print("Min Throughput: {d:.2} ops/sec\n", .{min_rate}) catch return;
+    stdout.print("Max Throughput: {d:.2} ops/sec\n", .{max_rate}) catch return;
+    stdout.print("Average Throughput: {d:.2} ops/sec\n", .{avg_rate}) catch return;
+    stdout.print("Throughput Variance: {d:.2}%\n", .{rate_variance}) catch return;
+    stdout.print("===========================\n\n", .{}) catch return;
+}
+
 fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
     const stdout = std.io.getStdOut().writer();
     var prng = std.rand.DefaultPrng.init(config.random_seed);
@@ -305,28 +353,29 @@ fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
         total_matches += result.matches;
     }
 
-    // グローバル変数のクリーンアップ
-    global_thread_errors = null;
-    global_thread_results = null;
-
-    // エラー情報配列の解放
-    std.heap.page_allocator.free(thread_errors);
-
-    const lookup_rate = @as(f64, @floatFromInt(total_lookups)) / (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-    const match_rate = @as(f64, @floatFromInt(total_matches)) / @as(f64, @floatFromInt(total_lookups)) * 100.0;
-
-    return BenchmarkResult{
+    // 結果の表示
+    const result = BenchmarkResult{
         .prefix_count = config.prefix_count,
-        .insert_time = 0,  // マルチスレッドテストでは挿入時間は計測しない
-        .insert_rate = 0,  // マルチスレッドテストでは挿入レートは計測しない
+        .insert_time = 0,
+        .insert_rate = 0,
         .lookup_time = total_time,
-        .lookup_rate = lookup_rate,
-        .match_rate = match_rate,
+        .lookup_rate = @as(f64, @floatFromInt(total_lookups)) / (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0),
+        .match_rate = @as(f64, @floatFromInt(total_matches)) / @as(f64, @floatFromInt(total_lookups)) * 100.0,
         .memory_usage = final_mem,
-        .cache_hit_rate = 0.0,  // キャッシュテストは実装していない
+        .cache_hit_rate = 0.0,
         .thread_count = config.thread_count,
         .fragmentation_impact = fragmentation_impact,
     };
+
+    // 詳細な結果を表示
+    printBenchmarkResult(result, thread_results);
+
+    // グローバル変数のクリーンアップ
+    global_thread_errors = null;
+    global_thread_results = null;
+    std.heap.page_allocator.free(thread_errors);
+
+    return result;
 }
 
 /// メモリ使用量の計測
@@ -397,6 +446,11 @@ pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("ZART Advanced Benchmark Tests\n", .{});
     try stdout.print("===========================\n", .{});
+    try stdout.print("System Information:\n", .{});
+    try stdout.print("- CPU Architecture: {s}\n", .{@tagName(builtin.cpu.arch)});
+    try stdout.print("- OS: {s}\n", .{@tagName(builtin.os.tag)});
+    try stdout.print("- Build Mode: {s}\n", .{@tagName(builtin.mode)});
+    try stdout.print("===========================\n\n", .{});
 
     // テスト設定
     const configs = [_]TestConfig{
@@ -440,7 +494,14 @@ pub fn main() !void {
 
     // 各設定でベンチマークを実行
     for (configs) |config| {
-        try stdout.print("\nRunning benchmark with {d} threads...\n", .{config.thread_count});
+        try stdout.print("\n=== Benchmark Configuration ===\n", .{});
+        try stdout.print("Thread Count: {d}\n", .{config.thread_count});
+        try stdout.print("Prefix Count: {d}\n", .{config.prefix_count});
+        try stdout.print("Lookup Count: {d}\n", .{config.lookup_count});
+        try stdout.print("Test Duration: {d} seconds\n", .{config.test_duration_sec});
+        try stdout.print("Fragmentation Cycles: {d}\n", .{config.fragmentation_cycles});
+        try stdout.print("===========================\n", .{});
+
         const result = try runMultiThreadedBenchmark(config);
         try benchmark_results.append(result);
     }
