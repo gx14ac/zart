@@ -97,7 +97,7 @@ fn runBenchmark(numPrefixes: usize, prefixLen: u8) !BenchmarkResult {
     const memBefore = measureMemoryUsage();
     const startTime = std.time.milliTimestamp();
     // プレフィックスの挿入
-    var prng = std.rand.DefaultPrng.init(42);
+    var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
     var i: usize = 0;
     while (i < numPrefixes) : (i += 1) {
