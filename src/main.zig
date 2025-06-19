@@ -4,24 +4,24 @@ const node_pool = @import("node_pool.zig");
 const Node = node_pool.Node;
 const NodePool = node_pool.NodePool;
 
-// ルーティングテーブル構造体 (C互換構造体)
+// Routing table structure (C-compatible)
 pub const BartTable = extern struct {
     root4: ?*Node,
     root6: ?*Node,
-    pool: *NodePool,  // ノードプールへの参照を追加
+    pool: *NodePool,  // Reference to node pool
 };
 
-// ルーティングテーブルを初期化 (ヒープ上に確保)
+// Initialize routing table (allocated on heap)
 pub export fn bart_create() callconv(.C) *BartTable {
     const table = c_allocator.create(BartTable) catch unreachable;
     table.root4 = null;
     table.root6 = null;
-    // ノードプールを初期化
+    // Initialize node pool
     table.pool = NodePool.init(c_allocator) catch unreachable;
     return table;
 }
 
-// ルーティングテーブルを解放 (全ノードを再帰的に解放)
+// Free routing table (recursively free all nodes)
 pub export fn bart_destroy(table: *BartTable) callconv(.C) void {
     if (table.root4) |r4| {
         table.pool.freeNodeRecursive(r4);
@@ -29,12 +29,12 @@ pub export fn bart_destroy(table: *BartTable) callconv(.C) void {
     if (table.root6) |r6| {
         table.pool.freeNodeRecursive(r6);
     }
-    // ノードプールを解放
+    // Free node pool
     table.pool.deinit(c_allocator);
     _ = c_allocator.destroy(table);
 }
 
-// 子ノードの挿入（最適化版）
+// Insert child node (optimized version)
 fn insertChild(parent: *Node, key: u8, child: *Node, pool: *NodePool) !void {
     const chunk_index = key >> 6;
     const bit_offset = @as(u6, @truncate(key & 0x3F));
@@ -53,7 +53,7 @@ fn insertChild(parent: *Node, key: u8, child: *Node, pool: *NodePool) !void {
         return;
     }
 
-    // ビットを立てる
+    // Set bit
     parent.bitmap[chunk_index] |= (@as(u64, 1) << bit_offset);
 
     var new_count: usize = 0;
@@ -67,7 +67,7 @@ fn insertChild(parent: *Node, key: u8, child: *Node, pool: *NodePool) !void {
     var new_children = try c_allocator.alloc(*Node, new_count);
     errdefer c_allocator.free(new_children);
 
-    // 挿入位置indexを計算
+    // Calculate insertion index
     var index: usize = 0;
     var j: usize = 0;
     while (j < chunk_index) : (j += 1) {
@@ -76,31 +76,31 @@ fn insertChild(parent: *Node, key: u8, child: *Node, pool: *NodePool) !void {
     const mask = if (bit_offset == 0) 0 else ((@as(u64, 1) << bit_offset) - 1);
     index +%= @popCount(parent.bitmap[chunk_index] & mask);
 
-    // 古い配列の内容をコピー
+    // Copy old array contents
     if (parent.children) |old_children| {
         if (old_count > 0) {
-            // 修正: ポインタを直接コピー
+            // Fix: copy pointers directly
             var i: usize = 0;
             while (i < index) : (i += 1) {
-                new_children[i] = old_children[i]; // &を削除
+                new_children[i] = old_children[i]; // Remove &
             }
             i = index;
             while (i < old_count) : (i += 1) {
-                new_children[i + 1] = old_children[i]; // &を削除
+                new_children[i + 1] = old_children[i]; // Remove &
             }
-            // 古い配列を解放
+            // Free old array
             c_allocator.free(parent.children.?);
         }
     }
 
-    // 新しいノードを挿入
+    // Insert new node
     new_children[index] = child;
 
-    // 新しい配列を設定
-    parent.children = new_children; // スライスとして設定する必要はない
+    // Set new array
+    parent.children = new_children; // No need to set as slice
 }
 
-// 内部ヘルパー: IPv4アドレス(32bit整数)からバイト配列(長さ4)を取得 (ネットワークバイトオーダー)
+// Internal helper: convert IPv4 address (32bit int) to byte array (length 4) (network byte order)
 fn ip4ToBytes(ip: u32) [4]u8 {
     return [4]u8{ @as(u8, @truncate((ip >> 24) & 0xFF)), @as(u8, @truncate((ip >> 16) & 0xFF)), @as(u8, @truncate((ip >> 8) & 0xFF)), @as(u8, @truncate(ip & 0xFF)) };
 }
@@ -122,7 +122,7 @@ fn insert4Internal(table: *BartTable, ip: u32, prefix_len: u8, value: usize) !vo
             const start_key = byte_val & ~@as(u8, @truncate(mask));
             const end_key = byte_val | @as(u8, @truncate(mask));
 
-            // 各キーに対して新しいノードを作成
+            // Create new node for each key
             var k: u16 = start_key;
             while (k <= end_key) : (k += 1) {
                 const kb = @as(u8, @truncate(k));
@@ -163,7 +163,7 @@ fn insert6Internal(table: *BartTable, addr_ptr: [*]const u8, prefix_len: u8, val
             const start_key = byte_val & ~@as(u8, @truncate(mask));
             const end_key = byte_val | @as(u8, @truncate(mask));
 
-            // 各キーに対して新しいノードを作成
+            // Create new node for each key
             var k: u16 = start_key;
             while (k <= end_key) : (k += 1) {
                 const kb = @as(u8, @truncate(k));
@@ -188,21 +188,21 @@ fn insert6Internal(table: *BartTable, addr_ptr: [*]const u8, prefix_len: u8, val
     node.prefix_value = value;
 }
 
-// IPv4プレフィックスをテーブルに挿入 (C API関数)
+// Insert IPv4 prefix into table (C API function)
 pub export fn bart_insert4(table: *BartTable, ip: u32, prefix_len: u8, value: usize) callconv(.C) i32 {
-    insert4Internal(table, ip, prefix_len, value) catch return -1; // if (insert4Internal(...)) |_| から変更
+    insert4Internal(table, ip, prefix_len, value) catch return -1; // Changed from if (insert4Internal(...)) |_|
     return 0;
 }
 
-// IPv6プレフィックスをテーブルに挿入
+// Insert IPv6 prefix into table
 pub export fn bart_insert6(table: *BartTable, addr_ptr: [*]const u8, prefix_len: u8, value: usize) callconv(.C) i32 {
-    insert6Internal(table, addr_ptr, prefix_len, value) catch return -1; // if (insert6Internal(...)) |_| から変更
+    insert6Internal(table, addr_ptr, prefix_len, value) catch return -1; // Changed from if (insert6Internal(...)) |_|
     return 0;
 }
 
-// IPv4アドレスでルックアップ (最長一致検索)
+// Lookup IPv4 address (longest prefix match)
 pub export fn bart_lookup4(table: *BartTable, ip: u32, found: *i32) callconv(.C) usize {
-    if (table.root4 == null) { // !table.root4 から変更
+    if (table.root4 == null) { // Changed from !table.root4
         found.* = 0;
         return 0;
     }
@@ -210,17 +210,17 @@ pub export fn bart_lookup4(table: *BartTable, ip: u32, found: *i32) callconv(.C)
     var node = table.root4.?;
     var best_value: usize = 0;
     var have_value = false;
-    // 各バイト毎に子ノードを辿り、prefix値があれば更新
+    // Traverse child nodes for each byte, update prefix value if exists
     for (addr_bytes) |byte| {
         if (node.prefix_set) {
             have_value = true;
             best_value = node.prefix_value;
         }
         const next = node.findChild(byte);
-        if (next == null) break; // !next から変更
+        if (next == null) break; // Changed from !next
         node = next.?;
     }
-    // ループ外でも終端ノードにprefixがあれば確認
+    // Check if terminal node has prefix outside loop
     if (node.prefix_set) {
         have_value = true;
         best_value = node.prefix_value;
@@ -229,16 +229,16 @@ pub export fn bart_lookup4(table: *BartTable, ip: u32, found: *i32) callconv(.C)
     return best_value;
 }
 
-// IPv6アドレスでルックアップ
+// Lookup IPv6 address
 pub export fn bart_lookup6(table: *BartTable, addr_ptr: [*]const u8, found: *i32) callconv(.C) usize {
-    if (table.root6 == null) { // !table.root6 から変更
+    if (table.root6 == null) { // Changed from !table.root6
         found.* = 0;
         return 0;
     }
     var node = table.root6.?;
     var best_value: usize = 0;
     var have_value = false;
-    // 16バイトを順次辿る
+    // Traverse 16 bytes sequentially
     var i: usize = 0;
     while (i < 16) : (i += 1) {
         if (node.prefix_set) {
@@ -246,7 +246,7 @@ pub export fn bart_lookup6(table: *BartTable, addr_ptr: [*]const u8, found: *i32
             best_value = node.prefix_value;
         }
         const next = node.findChild(addr_ptr[i]);
-        if (next == null) break; // !next から変更
+        if (next == null) break; // Changed from !next
         node = next.?;
     }
     if (node.prefix_set) {

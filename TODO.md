@@ -1,22 +1,22 @@
 ## TODO
-- プレフィックス削除機能の実装
-- イテレーション機能の追加（全プレフィックスの走査）
-- プレフィックスの更新機能
-- メモリ使用量の最適化（現在の実装よりも効率的なメモリレイアウト）
-- エラーハンドリングの強化
-- キャッシュラインの最適化
-- SIMD命令の活用（特にビットマップ操作部分）
-- メモリアライメントの最適化
-- アトミック操作の最適化
-- メモリプールの導入によるアロケーションの最適化
-- より細粒度なロック機構の実装
-- ロックフリーアルゴリズムの検討
-- スレッドローカルストレージの活用
-- 並行処理時のメモリ断片化対策の強化
-- 並行処理時の競合状態のテスト
-- エッジケースのテスト強化
-- ドキュメントとツール:
-- APIドキュメントの充実
-- 使用例の追加
-- デバッグツールの開発
-- プロファイリングツールの統合
+- Implement prefix deletion functionality
+- Add iteration functionality (traverse all prefixes)
+- Prefix update functionality
+- Memory usage optimization (more efficient memory layout than current implementation)
+- Enhanced error handling
+- Cache line optimization
+- SIMD instruction utilization (especially bitmap operations)
+- Memory alignment optimization
+- Atomic operation optimization
+- Memory pool introduction for allocation optimization
+- More fine-grained locking mechanism implementation
+- Consider lock-free algorithms
+- Thread-local storage utilization
+- Enhanced memory fragmentation countermeasures for concurrent processing
+- Race condition testing for concurrent processing
+- Edge case testing enhancement
+- Documentation and tools:
+- Comprehensive API documentation
+- Usage examples addition
+- Debug tool development
+- Profiling tool integration

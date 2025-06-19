@@ -1,52 +1,52 @@
 const std = @import("std");
 const bitset256 = @import("bitset256.zig");
 
-// ノードプールによるメモリ管理の最適化
+// Node pool for memory management optimization
 // 
-// ノードプールは、ノードのメモリを事前に確保して再利用することで
-// メモリ管理を効率化します。主なメリット：
-// - メモリ確保の回数を減らせる
-// - メモリの局所性が向上する
-// - キャッシュの効率が良くなる
-// - メモリの断片化を防げる
+// Node pool pre-allocates node memory and reuses it to
+// improve memory management efficiency. Main benefits:
+// - Reduce memory allocation calls
+// - Improve memory locality
+// - Better cache efficiency
+// - Prevent memory fragmentation
 
-// プールの設定
-// - NODE_POOL_SIZE: プールに確保するノード数
-// - NODE_POOL_ALIGN: キャッシュラインサイズ（x86_64なら64バイト）
+// Pool configuration
+// - NODE_POOL_SIZE: number of nodes to allocate in pool
+// - NODE_POOL_ALIGN: cache line size (64 bytes for x86_64)
 
 pub const NODE_POOL_SIZE = 1024;
 pub const NODE_POOL_ALIGN = 64;
 
-// ノードの構造
-// キャッシュ効率を考慮したレイアウト
+// Node structure
+// Cache-efficient layout
 pub const Node = struct {
-    // ビットマップ（256ビット = 4 * 64ビット）
-    // キャッシュラインに合わせてアライメント
-    // 各ビットは子ノードの有無を示す
+    // Bitmap (256 bits = 4 * 64 bits)
+    // Aligned to cache line size
+    // Each bit indicates presence of child node
     bitmap: [4]u64 align(NODE_POOL_ALIGN),
 
-    // 子ノードへのポインタ配列
-    // ビットマップの1の数と同じ要素数
+    // Array of pointers to child nodes
+    // Same number of elements as 1s in bitmap
     children: ?[]*Node,
 
-    // プレフィックスの終端かどうか
+    // Whether this is a prefix terminal
     prefix_set: bool,
 
-    // プレフィックスが終端の場合の値
+    // Value when this is a prefix terminal
     prefix_value: usize,
 
-    // 子ノードの検索
-    // 1. キーに対応するビットを確認
-    // 2. ビットが1なら対応する子ノードを返す
-    // 3. ビットが0ならnullを返す
+    // Find child node
+    // 1. Check bit corresponding to key
+    // 2. If bit is 1, return corresponding child node
+    // 3. If bit is 0, return null
     //
-    // ビットマップの構造（4個のu64、合計256ビット）
+    // Bitmap structure (4 u64s, total 256 bits)
     // [0..63] [64..127] [128..191] [192..255]
     pub fn findChild(self: *const Node, key: u8) ?*Node {
-        // LPM探索: key以下で最大の子ノードを返す
+        // LPM search: return largest child node <= key
         const idx = bitset256.lpmSearch(&self.bitmap, key);
         if (idx) |i| {
-            // 子ノードのインデックスを計算
+            // Calculate child node index
             var index: usize = 0;
             const chunk_index: usize = i >> 6;
             const bit_offset: u6 = @as(u6, @truncate(i & 0x3F));
@@ -62,110 +62,110 @@ pub const Node = struct {
     }
 };
 
-// ノードプールの構造体
+// Node pool structure
 // -------------------
-// nodes: 事前に確保されたノードの配列
-// free_list: 未使用ノードへのポインタの配列
-// free_count: 未使用ノードの数
+// nodes: pre-allocated array of nodes
+// free_list: array of pointers to unused nodes
+// free_count: number of unused nodes
 pub const NodePool = struct {
-    // アライメントされたノード配列
-    // キャッシュラインサイズに合わせることで、false sharingを防止
+    // Aligned node array
+    // Aligned to cache line size to prevent false sharing
     nodes: []Node align(NODE_POOL_ALIGN),
     
-    // 未使用ノードへのポインタ配列
-    // スタックとして使用し、O(1)でノードの割り当て/解放を実現
+    // Array of pointers to unused nodes
+    // Used as stack for O(1) node allocation/deallocation
     free_list: []?*Node,
     
-    // 未使用ノードの数
-    // free_listの有効な要素数を管理
+    // Number of unused nodes
+    // Manages valid elements in free_list
     free_count: usize,
 
-    // プールの初期化
+    // Initialize pool
     // --------------
-    // 1. プール自体のメモリを確保
-    // 2. ノード配列を確保（キャッシュラインサイズにアライメント）
-    // 3. フリーリストを初期化
-    // 4. 各ノードを初期状態に設定
+    // 1. Allocate memory for pool itself
+    // 2. Allocate node array (aligned to cache line size)
+    // 3. Initialize free list
+    // 4. Set each node to initial state
     pub fn init(allocator: std.mem.Allocator) !*NodePool {
-        // プール自体のメモリを確保
+        // Allocate memory for pool itself
         const pool = try allocator.create(NodePool);
         errdefer allocator.destroy(pool);
 
-        // アライメントされたノード配列を確保
+        // Allocate aligned node array
         pool.nodes = try allocator.alignedAlloc(Node, NODE_POOL_ALIGN, NODE_POOL_SIZE);
         errdefer allocator.free(pool.nodes);
 
-        // フリーリストを確保
+        // Allocate free list
         pool.free_list = try allocator.alloc(?*Node, NODE_POOL_SIZE);
         errdefer allocator.free(pool.free_list);
 
-        // 初期状態の設定
+        // Set initial state
         pool.free_count = NODE_POOL_SIZE;
 
-        // フリーリストの初期化
-        // 各ノードを未使用状態として登録
+        // Initialize free list
+        // Register each node as unused
         for (0..NODE_POOL_SIZE) |i| {
-            // ノードを初期化
+            // Initialize node
             pool.nodes[i] = Node{
                 .bitmap = [_]u64{ 0, 0, 0, 0 },
                 .children = null,
                 .prefix_set = false,
                 .prefix_value = 0,
             };
-            // フリーリストに登録
+            // Add to free list
             pool.free_list[i] = &pool.nodes[i];
         }
 
         return pool;
     }
 
-    // プールの解放
+    // Free pool
     // -----------
-    // 確保した全てのメモリを解放
+    // Free all allocated memory
     pub fn deinit(self: *NodePool, allocator: std.mem.Allocator) void {
         allocator.free(self.free_list);
         allocator.free(self.nodes);
         allocator.destroy(self);
     }
 
-    // ノードの割り当て
+    // Allocate node
     // ---------------
-    // 1. フリーリストから未使用ノードを取得
-    // 2. 未使用ノードがなければnullを返す
-    // 3. 取得したノードは使用中としてマーク
+    // 1. Get unused node from free list
+    // 2. Return null if no unused nodes
+    // 3. Mark obtained node as in use
     pub fn allocate(self: *NodePool) ?*Node {
         if (self.free_count == 0) return null;
         self.free_count -= 1;
         return self.free_list[self.free_count];
     }
 
-    // ノードの解放
+    // Free node
     // -----------
-    // 1. 使用済みノードをフリーリストに戻す
-    // 2. プールが満杯の場合は何もしない
-    // 注意: ノードの内容はクリアせず、再利用時に上書き
+    // 1. Return used node to free list
+    // 2. Do nothing if pool is full
+    // Note: node contents not cleared, overwritten on reuse
     pub fn free(self: *NodePool, node: *Node) void {
         if (self.free_count >= NODE_POOL_SIZE) return;
         self.free_list[self.free_count] = node;
         self.free_count += 1;
     }
 
-    // ノードの再帰的な解放
+    // Recursively free node
     // ------------------
-    // 1. 子ノードを再帰的に解放
-    // 2. 子ノード配列を解放
-    // 3. ノード自体をフリーリストに戻す
+    // 1. Recursively free child nodes
+    // 2. Free child node array
+    // 3. Return node itself to free list
     pub fn freeNodeRecursive(self: *NodePool, node: *Node) void {
         if (node.children) |children| {
-            // 子ノードを再帰的に解放
+            // Recursively free child nodes
             for (children) |child| {
                 self.freeNodeRecursive(child);
             }
-            // 子ノード配列を解放
+            // Free child node array
             std.heap.c_allocator.free(children);
             node.children = null;
         }
-        // ノードをフリーリストに戻す
+        // Return node to free list
         self.free(node);
     }
 }; 

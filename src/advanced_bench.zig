@@ -1,23 +1,23 @@
-// マルチスレッド環境での性能評価用ベンチマーク
+// Multithreaded performance evaluation benchmark
 // 
-// 測定項目：
-// - スレッド数に応じた性能スケーリング
-// - 実際のルーティングテーブルに近いIPアドレスパターンでの性能
-// - スレッドごとの性能分析
-// - メモリ断片化の影響
+// Measurement items:
+// - Performance scaling based on thread count
+// - Performance with IP address patterns close to real routing tables
+// - Per-thread performance analysis
+// - Impact of memory fragmentation
 // 
-// 使い方：
-// - マルチスレッド環境での性能確認
-// - スレッド数による性能変化の測定
-// - 実環境に近い条件での性能評価
-// - スレッド間の性能差の分析
+// Usage:
+// - Performance verification in multithreaded environments
+// - Measurement of performance changes by thread count
+// - Performance evaluation under conditions close to real environments
+// - Analysis of performance differences between threads
 // 
-// 特徴：
-// - スレッド数は可変
-// - 実環境に近いIPアドレスパターン
-// - スレッドごとの詳細な性能データ
-// - メモリ断片化の測定
-// - エラー処理の強化
+// Features:
+// - Variable thread count
+// - IP address patterns close to real environments
+// - Detailed performance data per thread
+// - Memory fragmentation measurement
+// - Enhanced error handling
 
 const std = @import("std");
 const bart = @import("main.zig");
@@ -31,7 +31,7 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-// テスト設定
+// Test configuration
 const TestConfig = struct {
     prefix_count: u32,
     lookup_count: u32,
@@ -41,14 +41,14 @@ const TestConfig = struct {
     fragmentation_cycles: u32,
 };
 
-// スレッドごとの結果を格納する構造体
+// Structure to store results per thread
 const ThreadResult = struct {
     lookups: u64,
     matches: u64,
     time_ns: u64,
 };
 
-// テスト結果
+// Test results
 const BenchmarkResult = struct {
     prefix_count: usize,
     insert_time: u64,
@@ -58,58 +58,58 @@ const BenchmarkResult = struct {
     match_rate: f64,
     memory_usage: usize,
     cache_hit_rate: f64,
-    thread_count: u32,  // 追加：スレッド数
-    fragmentation_impact: f64,  // 追加：断片化の影響
+    thread_count: u32,  // Added: thread count
+    fragmentation_impact: f64,  // Added: fragmentation impact
 };
 
-// グローバルにスレッドごとの結果を格納する配列を用意
+// Global array to store results per thread
 var global_thread_results: ?[]ThreadResult = null;
 var global_thread_errors: ?[]?[]const u8 = null;
 
-/// より多様なIPアドレスパターンを生成
+/// Generate diverse IP address patterns
 /// 
-/// この関数は以下のパターンのIPアドレスを生成します：
-/// 1. 完全ランダム
-/// 2. 連続したIP
-/// 3. サブネット内のIP
-/// 4. 特定のASのIP範囲
-/// 5. マルチキャスト範囲
+/// This function generates IP addresses in the following patterns:
+/// 1. Completely random
+/// 2. Consecutive IPs
+/// 3. IPs within subnet
+/// 4. IP ranges of specific AS
+/// 5. Multicast ranges
 /// 
-/// パラメータ：
-/// - random: 乱数生成器
-/// - count: 生成するIPアドレスの数
+/// Parameters:
+/// - random: random number generator
+/// - count: number of IP addresses to generate
 fn generateDiverseIPs(random: std.Random, count: u32) ![]u32 {
     var ips = try std.heap.page_allocator.alloc(u32, count);
     errdefer std.heap.page_allocator.free(ips);
 
-    // 異なるパターンのIPアドレスを生成
+    // Generate IP addresses in different patterns
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        const pattern = random.uintAtMost(u8, 4); // 0から4までの5つのパターン
+        const pattern = random.uintAtMost(u8, 4); // 5 patterns from 0 to 4
         switch (pattern) {
-            0 => { // ランダム
+            0 => { // Random
                 ips[i] = random.int(u32);
             },
-            1 => { // 連続したIP
+            1 => { // Consecutive IPs
                 if (i > 0) {
                     ips[i] = ips[i - 1] + 1;
                 } else {
                     ips[i] = random.int(u32);
                 }
             },
-            2 => { // サブネット内のIP
-                const base = random.int(u32) & 0xFFFFFF00; // /24のベース
+            2 => { // IPs within subnet
+                const base = random.int(u32) & 0xFFFFFF00; // /24 base
                 ips[i] = base | random.uintAtMost(u8, 255);
             },
-            3 => { // 特定のASのIP範囲
+            3 => { // IP ranges of specific AS
                 const as_base = @as(u32, random.uintAtMost(u16, 65535)) << 16;
                 ips[i] = as_base | random.uintAtMost(u16, 65535);
             },
-            4 => { // マルチキャスト範囲
+            4 => { // Multicast ranges
                 const multicast_base = 0xE0000000;
                 ips[i] = multicast_base | random.uintAtMost(u32, 0x0FFFFFFF);
             },
-            else => { // 予期しないパターンの場合はランダムなIPを生成
+            else => { // Generate random IP for unexpected patterns
                 ips[i] = random.int(u32);
             },
         }
@@ -117,12 +117,12 @@ fn generateDiverseIPs(random: std.Random, count: u32) ![]u32 {
     return ips;
 }
 
-/// メモリ断片化のシミュレーション
+/// Memory fragmentation simulation
 /// 
-/// この関数はメモリ断片化をシミュレートします：
-/// 1. ランダムなサイズのメモリブロックを割り当て
-/// 2. 定期的にブロックを解放
-/// 3. 断片化の影響を測定
+/// This function simulates memory fragmentation:
+/// 1. Allocate memory blocks of random sizes
+/// 2. Periodically free blocks
+/// 3. Measure fragmentation impact
 fn simulateFragmentation(allocator: std.mem.Allocator, cycles: u32) !void {
     var blocks = std.ArrayList([]u8).init(allocator);
     defer {
@@ -134,12 +134,12 @@ fn simulateFragmentation(allocator: std.mem.Allocator, cycles: u32) !void {
 
     var i: u32 = 0;
     while (i < cycles) : (i += 1) {
-        // ランダムなサイズのメモリブロックを割り当て
-        const size = 1024 + (i % 10) * 1024; // 1KBから10KB
+        // Allocate memory blocks of random sizes
+        const size = 1024 + (i % 10) * 1024; // 1KB to 10KB
         const block = try allocator.alloc(u8, size);
         try blocks.append(block);
 
-        // 時々ブロックを解放して断片化を促進
+        // Occasionally free blocks to promote fragmentation
         if (i % 3 == 0 and blocks.items.len > 0) {
             const idx = i % blocks.items.len;
             allocator.free(blocks.orderedRemove(idx));
@@ -147,29 +147,29 @@ fn simulateFragmentation(allocator: std.mem.Allocator, cycles: u32) !void {
     }
 }
 
-/// スレッドごとのルックアップテスト
+/// Per-thread lookup test
 /// 
-/// この関数は各スレッドで実行され、以下の項目を測定します：
-/// 1. スレッドごとのルックアップ速度
-/// 2. スレッドごとのマッチ率
-/// 3. スレッドごとの実行時間
+/// This function runs in each thread and measures:
+/// 1. Lookup speed per thread
+/// 2. Match rate per thread
+/// 3. Execution time per thread
 /// 
-/// パラメータ：
-/// - table: ルックアップテーブル
-/// - ips: テスト用IPアドレス配列
-/// - iterations: 実行するルックアップの数
-/// - thread_id: スレッドID
+/// Parameters:
+/// - table: lookup table
+/// - ips: test IP address array
+/// - iterations: number of lookups to execute
+/// - thread_id: thread ID
 fn threadLookupTest(
     table: *bart.BartTable,
     ips: []const u32,
     iterations: u32,
     thread_id: u32,
 ) void {
-    // エラー情報を格納するバッファ
+    // Buffer to store error information
     var error_buf: [256]u8 = undefined;
     var error_message: ?[]const u8 = null;
 
-    // Timerの初期化
+    // Initialize Timer
     var timer = Timer.start() catch |err| {
         const msg = std.fmt.bufPrint(&error_buf, "Timer.start() failed: {}", .{err}) catch "Timer.start() failed";
         error_message = msg;
@@ -179,12 +179,12 @@ fn threadLookupTest(
         return;
     };
 
-    // 乱数生成器の初期化
+    // Initialize random number generator
     var prng = std.rand.DefaultPrng.init(42 + thread_id);
     const random = prng.random();
     var matches: u64 = 0;
 
-    // ルックアップテストの実行
+    // Execute lookup test
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
         if (ips.len == 0) {
@@ -199,7 +199,7 @@ fn threadLookupTest(
         if (found != 0) matches += 1;
     }
 
-    // 結果の保存
+    // Save results
     if (global_thread_results) |results| {
         results[thread_id] = ThreadResult{
             .lookups = iterations,
@@ -208,7 +208,7 @@ fn threadLookupTest(
         };
     }
 
-    // エラー情報の保存
+    // Save error information
     if (error_message != null) {
         if (global_thread_errors) |errors| {
             errors[thread_id] = error_message;
@@ -216,19 +216,19 @@ fn threadLookupTest(
     }
 }
 
-/// マルチスレッドベンチマーク
+/// Multithreaded benchmark
 /// 
-/// このテストは以下の項目を測定します：
-/// 1. マルチスレッド環境での総合性能
-/// 2. スレッドごとの詳細な性能
-/// 3. メモリ断片化の影響
-/// 4. 全体のメモリ使用量
+/// This test measures:
+/// 1. Overall performance in multithreaded environment
+/// 2. Detailed performance per thread
+/// 3. Memory fragmentation impact
+/// 4. Overall memory usage
 /// 
-/// パラメータ：
-/// - config: テスト設定（プレフィックス数、ルックアップ数、スレッド数など）
+/// Parameters:
+/// - config: test configuration (prefix count, lookup count, thread count, etc.)
 /// 
-/// 戻り値：
-/// - BenchmarkResult: テスト結果（ルックアップ数、マッチ数、実行時間など）
+/// Returns:
+/// - BenchmarkResult: test results (lookup count, match count, execution time, etc.)
 fn printBenchmarkResult(result: BenchmarkResult, thread_results: []const ThreadResult) void {
     const stdout = std.io.getStdOut().writer();
     stdout.print("\n=== Benchmark Results ===\n", .{}) catch return;
@@ -282,39 +282,39 @@ fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
     var prng = std.rand.DefaultPrng.init(config.random_seed);
     const random = prng.random();
 
-    // テーブルの作成
+    // Create table
     const table = bart.bart_create();
     defer bart.bart_destroy(table);
 
-    // 多様なIPアドレスの生成
+    // Generate diverse IP addresses
     const test_ips = try generateDiverseIPs(random, config.lookup_count);
     defer std.heap.page_allocator.free(test_ips);
 
-    // プレフィックスの挿入
+    // Insert prefixes
     try stdout.print("\nInserting prefixes...\n", .{});
     var i: u32 = 0;
     while (i < config.prefix_count) : (i += 1) {
         const ip = random.int(u32);
-        const length = 8 + random.uintAtMost(u8, 24); // /8から/32
+        const length = 8 + random.uintAtMost(u8, 24); // /8 to /32
         _ = bart.bart_insert4(@constCast(table), ip, length, 1);
     }
 
-    // メモリ断片化の影響を測定
+    // Measure fragmentation impact
     try stdout.print("\nMeasuring fragmentation impact...\n", .{});
     const initial_mem = try measureMemoryUsage();
     try simulateFragmentation(std.heap.page_allocator, config.fragmentation_cycles);
     const final_mem = try measureMemoryUsage();
     const fragmentation_impact = @as(f64, @floatFromInt(final_mem - initial_mem)) / @as(f64, @floatFromInt(initial_mem)) * 100.0;
 
-    // スレッドごとの結果配列をグローバルにセット
+    // Set global array for thread results
     const thread_results = try std.heap.page_allocator.alloc(ThreadResult, config.thread_count);
     global_thread_results = thread_results;
 
-    // スレッドごとのエラー情報配列をグローバルにセット
+    // Set global array for thread error information
     const thread_errors = try std.heap.page_allocator.alloc(?[]const u8, config.thread_count);
     global_thread_errors = thread_errors;
 
-    // スレッドの作成と実行
+    // Create and run threads
     try stdout.print("\nRunning multi-threaded test with {d} threads...\n", .{config.thread_count});
     const threads = try std.heap.page_allocator.alloc(std.Thread, config.thread_count);
     defer std.heap.page_allocator.free(threads);
@@ -330,13 +330,13 @@ fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
         });
     }
 
-    // スレッドの終了を待つ
+    // Wait for threads to finish
     for (threads) |thread| {
         thread.join();
     }
     const total_time = timer.read();
 
-    // エラーチェック
+    // Error check
     if (global_thread_errors) |errors| {
         for (errors, 0..) |err, tid| {
             if (err) |msg| {
@@ -345,7 +345,7 @@ fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
         }
     }
 
-    // 結果の集計
+    // Aggregate results
     var total_lookups: u64 = 0;
     var total_matches: u64 = 0;
     for (thread_results) |result| {
@@ -353,7 +353,7 @@ fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
         total_matches += result.matches;
     }
 
-    // 結果の表示
+    // Display results
     const result = BenchmarkResult{
         .prefix_count = config.prefix_count,
         .insert_time = 0,
@@ -367,10 +367,10 @@ fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
         .fragmentation_impact = fragmentation_impact,
     };
 
-    // 詳細な結果を表示
+    // Display detailed results
     printBenchmarkResult(result, thread_results);
 
-    // グローバル変数のクリーンアップ
+    // Global variable cleanup
     global_thread_errors = null;
     global_thread_results = null;
     std.heap.page_allocator.free(thread_errors);
@@ -378,12 +378,12 @@ fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
     return result;
 }
 
-/// メモリ使用量の計測
+/// Memory usage measurement
 /// 
-/// この関数は現在のプロセスのメモリ使用量を計測します。
-/// OSに応じて異なる方法を使用：
-/// - macOS: psコマンドを使用
-/// - Linux: /proc/self/statmを読み取り
+/// This function measures current process memory usage.
+/// Uses different methods based on OS:
+/// - macOS: uses ps command
+/// - Linux: reads /proc/self/statm
 fn measureMemoryUsage() !usize {
     if (comptime builtin.os.tag == .macos) {
         var argv_buf: [32]u8 = undefined;
@@ -417,7 +417,7 @@ fn measureMemoryUsage() !usize {
     return error.UnsupportedOS;
 }
 
-// ベンチマーク結果をCSVに出力する関数
+// Function to output benchmark results to CSV
 fn writeBenchmarkResultsToCSV(
     results: []const BenchmarkResult,
     filename: []const u8,
@@ -452,7 +452,7 @@ pub fn main() !void {
     try stdout.print("- Build Mode: {s}\n", .{@tagName(builtin.mode)});
     try stdout.print("===========================\n\n", .{});
 
-    // テスト設定
+    // Test configuration
     const configs = [_]TestConfig{
         .{
             .prefix_count = 1_000_000,
@@ -488,11 +488,11 @@ pub fn main() !void {
         },
     };
 
-    // ベンチマーク結果を格納する配列
+    // Array to store benchmark results
     var benchmark_results = std.ArrayList(BenchmarkResult).init(std.heap.page_allocator);
     defer benchmark_results.deinit();
 
-    // 各設定でベンチマークを実行
+    // Run benchmark for each configuration
     for (configs) |config| {
         try stdout.print("\n=== Benchmark Configuration ===\n", .{});
         try stdout.print("Thread Count: {d}\n", .{config.thread_count});
@@ -506,13 +506,13 @@ pub fn main() !void {
         try benchmark_results.append(result);
     }
 
-    // assetsディレクトリの作成（存在しない場合）
+    // Create assets directory if it doesn't exist
     std.fs.cwd().makeDir("assets") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    // 結果をCSVファイルに出力
+    // Output results to CSV file
     try writeBenchmarkResultsToCSV(benchmark_results.items, "assets/advanced_bench_results.csv");
     try stdout.print("\nBenchmark results have been written to assets/advanced_bench_results.csv\n", .{});
 } 

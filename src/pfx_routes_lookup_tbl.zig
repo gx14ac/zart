@@ -1,6 +1,6 @@
 const BitSet256 = @import("bitset256.zig").BitSet256;
 
-// GoのlookupPrefixRoutes.goの内容をZigで動的生成
+// Dynamically generate Go's lookupPrefixRoutes.go content in Zig
 pub const pfxRoutesLookupTbl = blk: {
     var arr: [256]BitSet256 = undefined;
     var i: usize = 0;

@@ -1,20 +1,20 @@
-//! リアルタイムベンチマークテスト
+//! Realistic benchmark tests
 //! 
-//! このベンチマークは以下の項目をテストします：
-//! 1. より現実的な使用パターンでの性能
-//! 2. メモリ断片化の影響
-//! 3. 詳細なメモリ使用量の計測
+//! This benchmark tests the following items:
+//! 1. Performance in more realistic usage patterns
+//! 2. Impact of memory fragmentation
+//! 3. Detailed memory usage measurement
 //! 
-//! 主な用途：
-//! - 実運用環境に近い条件での性能評価
-//! - メモリ断片化が性能に与える影響の測定
-//! - 長時間運用時のメモリ使用量の分析
+//! Main purposes:
+//! - Performance evaluation under conditions close to production
+//! - Measurement of memory fragmentation impact on performance
+//! - Analysis of memory usage during long-term operation
 //! 
-//! 特徴：
-//! - より現実的なIPアドレスパターンを使用
-//! - メモリ断片化をシミュレート
-//! - 詳細なメモリ使用量の計測
-//! - 長時間のテスト実行が可能
+//! Features:
+//! - Uses more realistic IP address patterns
+//! - Simulates memory fragmentation
+//! - Detailed memory usage measurement
+//! - Supports long-running tests
 
 const std = @import("std");
 const bart = @import("main.zig");
@@ -32,7 +32,7 @@ const c = @cImport({
 var ip_buf: [16]u8 = undefined;
 var duration_buf: [32]u8 = undefined;
 
-// IPアドレスを文字列形式に変換する関数
+// Function to convert IP address to string format
 fn ip4ToString(ip: u32) []const u8 {
     const bytes = [_]u8{
         @as(u8, @truncate((ip >> 24) & 0xFF)),
@@ -43,7 +43,7 @@ fn ip4ToString(ip: u32) []const u8 {
     return std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch "error";
 }
 
-// 時間を適切な単位で表示する関数
+// Function to display time in appropriate units
 fn formatDuration(ns: u64) []const u8 {
     if (ns < 1000) {
         return std.fmt.bufPrint(&duration_buf, "{d}ns", .{ns}) catch "error";
@@ -56,10 +56,10 @@ fn formatDuration(ns: u64) []const u8 {
     }
 }
 
-// プレフィックス長の分布を定義する構造体
+// Structure to define prefix length distribution
 const PrefixLengthDistribution = struct {
-    length: u8,  // プレフィックス長
-    weight: u32, // 重み（出現頻度）
+    length: u8,  // Prefix length
+    weight: u32, // Weight (frequency of occurrence)
 };
 
 // Benchmark configuration
@@ -70,15 +70,15 @@ const Config = struct {
     prefix_length_distribution: []const PrefixLengthDistribution,
 };
 
-/// メモリ使用量の計測
+/// Memory usage measurement
 /// 
-/// この関数は現在のプロセスのメモリ使用量を計測します。
-/// OSに応じて異なる方法を使用：
-/// - macOS: psコマンドを使用
-/// - Linux: /proc/self/statmを読み取り
+/// This function measures the current process memory usage.
+/// Uses different methods depending on OS:
+/// - macOS: uses ps command
+/// - Linux: reads /proc/self/statm
 fn measureMemoryUsage() !usize {
     if (comptime builtin.os.tag == .macos) {
-        // macOS: psコマンドでRSSを取得
+        // macOS: get RSS using ps command
         var argv_buf: [32]u8 = undefined;
         const pid_str = try std.fmt.bufPrint(&argv_buf, "{d}", .{c.getpid()});
         var child = std.process.Child.init(&[_][]const u8{
@@ -94,7 +94,7 @@ fn measureMemoryUsage() !usize {
         const rss_kb = try std.fmt.parseInt(usize, trimmed, 10);
         return rss_kb * 1024;
     } else if (comptime builtin.os.tag == .linux) {
-        // Linux: /proc/self/statmからRSSを取得
+        // Linux: get RSS from /proc/self/statm
         const file = try std.fs.openFileAbsolute("/proc/self/statm", .{});
         defer file.close();
         
@@ -102,9 +102,9 @@ fn measureMemoryUsage() !usize {
         const bytes_read = try file.read(&buf);
         const content = buf[0..bytes_read];
         
-        // statmの形式: "total_pages resident_pages shared_pages text_pages lib_pages data_pages dirty_pages"
+        // statm format: "total_pages resident_pages shared_pages text_pages lib_pages data_pages dirty_pages"
         var it = std.mem.splitScalar(u8, content, ' ');
-        _ = it.next(); // total_pagesをスキップ
+        _ = it.next(); // Skip total_pages
         if (it.next()) |resident_pages_str| {
             const resident_pages = try std.fmt.parseInt(usize, resident_pages_str, 10);
             return resident_pages * std.os.system.sysconf(.PAGE_SIZE);
@@ -114,7 +114,7 @@ fn measureMemoryUsage() !usize {
     return error.UnsupportedOS;
 }
 
-// プレフィックス長を重みに基づいてランダムに選択する関数
+// Function to randomly select prefix length based on weights
 fn selectRandomPrefixLength(random: std.Random, distribution: []const PrefixLengthDistribution) u8 {
     var total_weight: u32 = 0;
     for (distribution) |item| {
@@ -130,7 +130,7 @@ fn selectRandomPrefixLength(random: std.Random, distribution: []const PrefixLeng
     return distribution[distribution.len - 1].length;
 }
 
-// メモリ使用量の詳細な分析用の構造体
+// Structure for detailed memory usage analysis
 const MemoryStats = struct {
     total_bytes: usize,
     prefix_length_stats: [33]struct {
@@ -139,7 +139,7 @@ const MemoryStats = struct {
     },
 };
 
-// メモリ使用量の詳細な分析を行う関数
+// Function to perform detailed memory usage analysis
 fn analyzeMemoryUsage(prefixes: []const PrefixEntry) !MemoryStats {
     var stats = MemoryStats{
         .total_bytes = 0,
@@ -149,20 +149,20 @@ fn analyzeMemoryUsage(prefixes: []const PrefixEntry) !MemoryStats {
         stat.* = .{ .count = 0, .bytes = 0 };
     }
 
-    // 実際のメモリ使用量を取得
+    // Get actual memory usage
     const mem_usage = try measureMemoryUsage();
     stats.total_bytes = mem_usage;
 
-    // プレフィックス長ごとの統計を取得
-    // 現時点では、プレフィックス長ごとの統計は取得できないため、
-    // メモリ使用量をプレフィックス数で割って概算値を表示
+    // Get statistics by prefix length
+    // Currently, statistics by prefix length cannot be obtained,
+    // so display estimated values by dividing memory usage by prefix count
     const prefix_count = prefixes.len;
     const avg_bytes_per_prefix = if (prefix_count > 0)
         @divTrunc(mem_usage, prefix_count)
     else
         0;
 
-    // プレフィックス長ごとの統計を概算
+    // Estimate statistics by prefix length
     for (prefixes) |prefix| {
         stats.prefix_length_stats[prefix.length].count += 1;
         stats.prefix_length_stats[prefix.length].bytes += avg_bytes_per_prefix;
@@ -171,14 +171,14 @@ fn analyzeMemoryUsage(prefixes: []const PrefixEntry) !MemoryStats {
     return stats;
 }
 
-// キャッシュの影響を考慮したテスト用の構造体
+// Structure for cache-aware testing
 const CacheTestConfig = struct {
     warmup_iterations: u32,
     test_iterations: u32,
     cache_size: usize,
 };
 
-// キャッシュの影響を考慮したテストを実行する関数
+// Function to run cache-aware tests
 fn runCacheTest(
     table: *bart.BartTable,
     config: CacheTestConfig,
@@ -216,19 +216,19 @@ fn runCacheTest(
     };
 }
 
-// プレフィックスエントリの構造体を定義
+// Prefix entry structure
 const PrefixEntry = struct {
     ip: u32,
     length: u8,
 };
 
-// プレフィックスデータの構造体を定義
+// Prefix data structure
 const PrefixData = struct {
     prefixes: []PrefixEntry,
     allocator: ?std.mem.Allocator,
 };
 
-// 実際のBGPルーティングテーブルのデータを読み込む関数
+// Function to load actual BGP routing table data
 fn loadBGPData(allocator: std.mem.Allocator, path: []const u8) !PrefixData {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
@@ -269,7 +269,7 @@ fn loadBGPData(allocator: std.mem.Allocator, path: []const u8) !PrefixData {
             continue;
         };
 
-        // IPv6アドレスをスキップ（':'が含まれている場合）
+        // Skip IPv6 addresses (if ':' is present)
         if (std.mem.indexOfScalar(u8, ip_str, ':')) |_| {
             if (line_number <= 5) {
                 std.debug.print("  Skipping IPv6 address: {s}\n", .{ip_str});
@@ -321,7 +321,7 @@ fn loadBGPData(allocator: std.mem.Allocator, path: []const u8) !PrefixData {
     };
 }
 
-// IPv4アドレスをパースする関数
+// Function to parse IPv4 address
 fn parseIPv4(str: []const u8) !u32 {
     var result: u32 = 0;
     var it = std.mem.splitScalar(u8, str, '.');
@@ -348,7 +348,7 @@ fn parseIPv4(str: []const u8) !u32 {
     return result;
 }
 
-// ベンチマーク結果の構造体を共通の型として定義
+// Benchmark result structure as common type
 const BenchmarkResult = struct {
     prefix_count: u32,
     insert_time: u64,
@@ -360,7 +360,7 @@ const BenchmarkResult = struct {
     cache_hit_rate: f64,
 };
 
-// ベンチマーク結果をCSVに出力する関数
+// Function to write benchmark results to CSV
 fn writeBenchmarkResultsToCSV(
     results: []const BenchmarkResult,
     filename: []const u8,
@@ -385,29 +385,29 @@ fn writeBenchmarkResultsToCSV(
     }
 }
 
-// より現実的なベンチマークを実行する関数
+// Function to run more realistic benchmark
 fn runRealisticBenchmark(config: Config) !BenchmarkResult {
     const stdout = std.io.getStdOut().writer();
     var prng = std.rand.DefaultPrng.init(config.random_seed);
     const random = prng.random();
 
-    // 初期メモリ使用量を計測
+    // Measure initial memory usage
     const initial_mem = try measureMemoryUsage();
 
     // Create and initialize table
     const table = bart.bart_create();
     defer bart.bart_destroy(table);
 
-    // テーブル作成後のメモリ使用量を計測
+    // Measure memory usage after table creation
     const table_mem = try measureMemoryUsage();
     const table_overhead = table_mem - initial_mem;
 
-    // 実際のBGPデータを読み込む（または、ランダムデータを生成）
+    // Load actual BGP data (or generate random data)
     const prefixes = blk: {
         if (std.fs.cwd().openFile("testdata/prefixes.txt", .{})) |file| {
             defer file.close();
             const bgp_data = try loadBGPData(std.heap.page_allocator, "testdata/prefixes.txt");
-            // データセットを制限
+            // Limit dataset
             if (bgp_data.prefixes.len > config.prefix_count) {
                 const limited_prefixes = try std.heap.page_allocator.alloc(PrefixEntry, config.prefix_count);
                 for (limited_prefixes, 0..) |*prefix, i| {
@@ -423,7 +423,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
             }
             break :blk bgp_data;
         } else |_| {
-            // ランダムデータを生成
+            // Generate random data
             const random_prefixes = try std.heap.page_allocator.alloc(PrefixEntry, config.prefix_count);
             defer std.heap.page_allocator.free(random_prefixes);
 
@@ -458,7 +458,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
     const insert_per_sec = @as(f64, @floatFromInt(prefixes.prefixes.len)) / (@as(f64, @floatFromInt(insert_time)) / 1_000_000_000.0);
     try stdout.print("Insert Performance: {d:.2} prefixes/sec\n", .{insert_per_sec});
 
-    // プレフィックス長の分布を表示
+    // Display prefix length distribution
     try stdout.print("\nPrefix Length Distribution:\n", .{});
     for (prefix_length_counts, 0..) |count, len| {
         if (count > 0) {
@@ -467,7 +467,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
         }
     }
 
-    // メモリ使用量の詳細な分析
+    // Detailed memory usage analysis
     const mem_stats = try analyzeMemoryUsage(prefixes.prefixes);
     try stdout.print("\nDetailed Memory Usage:\n", .{});
     try stdout.print("  Total: {d:.2} MB\n", .{@as(f64, @floatFromInt(mem_stats.total_bytes)) / (1024.0 * 1024.0)});
@@ -483,7 +483,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
         }
     }
 
-    // キャッシュの影響を考慮したテスト
+    // Cache-aware tests
     const cache_test_config = CacheTestConfig{
         .warmup_iterations = 1_000_000,
         .test_iterations = 10_000_000,
@@ -495,7 +495,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
     try stdout.print("  Test Time: {s}\n", .{formatDuration(cache_test_results.test_time)});
     try stdout.print("  Hit Rate: {d:.2}%\n", .{cache_test_results.hit_rate});
 
-    // マッチしないIPアドレスを含めたルックアップテスト
+    // Lookup test including non-matching IPs
     try stdout.print("\nRunning {d} lookups (including non-matching IPs):\n", .{config.lookup_count});
     var lookup_timer = try Timer.start();
     var match_count: u32 = 0;
@@ -526,7 +526,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
     try stdout.print("  Lookup Rate: {d:.2} lookups/sec\n", .{lookup_per_sec});
     try stdout.print("  Match Rate: {d:.2}%\n", .{match_rate});
 
-    // 関数の最後で結果を返す
+    // Return result at the end of the function
     return .{
         .prefix_count = config.prefix_count,
         .insert_time = insert_time,
@@ -544,7 +544,7 @@ pub fn main() !void {
     try stdout.print("ZART Routing Table Benchmark (Realistic)\n", .{});
     try stdout.print("=====================================\n", .{});
 
-    // BGPルーティングテーブルに近い分布を定義
+    // Define distribution close to BGP routing table
     const bgp_like_distribution = [_]PrefixLengthDistribution{
         .{ .length = 8, .weight = 1 },    // /8
         .{ .length = 9, .weight = 2 },    // /9
@@ -573,29 +573,29 @@ pub fn main() !void {
         .{ .length = 32, .weight = 256 },   // /32
     };
 
-    // より現実的なベンチマーク設定（データセットサイズを調整）
+    // More realistic benchmark configuration (adjust dataset size)
     const configs = [_]Config{
         .{
-            .prefix_count = 100,    // 100エントリから開始
+            .prefix_count = 100,    // Start from 100 entries
             .lookup_count = 100_000,
             .random_seed = 42,
             .prefix_length_distribution = &bgp_like_distribution,
         },
         .{
-            .prefix_count = 1000,   // 1,000エントリ
+            .prefix_count = 1000,   // 1,000 entries
             .lookup_count = 100_000,
             .random_seed = 42,
             .prefix_length_distribution = &bgp_like_distribution,
         },
         .{
-            .prefix_count = 10000,  // 10,000エントリ
+            .prefix_count = 10000,  // 10,000 entries
             .lookup_count = 100_000,
             .random_seed = 42,
             .prefix_length_distribution = &bgp_like_distribution,
         },
     };
 
-    // ベンチマーク結果を格納する配列
+    // Array to store benchmark results
     var benchmark_results = std.ArrayList(BenchmarkResult).init(std.heap.page_allocator);
     defer benchmark_results.deinit();
 
@@ -604,18 +604,18 @@ pub fn main() !void {
         try stdout.print("------------------------\n", .{});
         try stdout.print("Random Seed: {d}\n", .{config.random_seed});
 
-        // ベンチマークを実行し、結果を保存
+        // Run benchmark and save result
         const result = try runRealisticBenchmark(config);
         try benchmark_results.append(result);
     }
 
-    // assetsディレクトリの作成（存在しない場合）
+    // Create assets directory (if it doesn't exist)
     std.fs.cwd().makeDir("assets") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    // 結果をCSVファイルに出力
+    // Output results to CSV file
     try writeBenchmarkResultsToCSV(benchmark_results.items, "assets/realistic_bench_results.csv");
     try stdout.print("\nBenchmark results have been written to assets/realistic_bench_results.csv\n", .{});
 }

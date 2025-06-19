@@ -1,30 +1,30 @@
 const std = @import("std");
 const lookupTbl = @import("lookup_tbl.zig").lookupTbl;
 
-// 0〜255までのビットを管理するビットセット
-// キャッシュ効率を考慮して4個のu64で実装
-// CPUのビット操作命令を活用
+// BitSet for managing 0-255 bits
+// Implemented with 4 u64s for cache efficiency
+// Leverages CPU bit manipulation instructions
 
 pub const BitSet256 = struct {
-    // キャッシュライン（64バイト）に合わせてアライメント
+    // Aligned to cache line (64 bytes)
     data: [4]u64 align(64),
 
-    // ビットを1にセット
+    // Set bit to 1
     pub fn set(self: *BitSet256, bit: u8) void {
         self.data[bit >> 6] |= (@as(u64, 1) << (bit & 63));
     }
 
-    // ビットをクリアします。
+    // Clear bit
     pub fn clear(self: *BitSet256, bit: u8) void {
         self.data[bit >> 6] &= ~(@as(u64, 1) << (bit & 63));
     }
 
-    // ビットが立っているかチェックします。
+    // Check if bit is set
     pub fn isSet(self: *const BitSet256, bit: u8) bool {
         return (self.data[bit >> 6] & (@as(u64, 1) << (bit & 63))) != 0;
     }
 
-    // 最初に立っているビットを返します。立っているビットがない場合はnullを返します。
+    // Return first set bit. Returns null if no bits are set.
     pub fn firstSet(self: *const BitSet256) ?u8 {
         var i: usize = 0;
         while (i < 4) : (i += 1) {
@@ -36,7 +36,7 @@ pub const BitSet256 = struct {
         return null;
     }
 
-    // 指定したビット以降で最初に立っているビットを返します。立っているビットがない場合はnullを返します。
+    // Return first set bit after specified bit. Returns null if no bits are set.
     pub fn nextSet(self: *const BitSet256, bit: u8) ?u8 {
         var wIdx: usize = bit >> 6;
         const first: u64 = self.data[wIdx] >> (bit & 63);
@@ -54,7 +54,7 @@ pub const BitSet256 = struct {
         return null;
     }
 
-    // 立っているビットの数を返します（popcount）。
+    // Return count of set bits (popcount)
     pub fn popcnt(self: *const BitSet256) u8 {
         var cnt: u8 = 0;
         cnt += @popCount(self.data[0]);
@@ -64,7 +64,7 @@ pub const BitSet256 = struct {
         return cnt;
     }
 
-    // 指定したビット位置までの立っているビットの数を返します（rank）。
+    // Return count of set bits up to specified position (rank)
     pub fn rank(self: *const BitSet256, idx: u8) u8 {
         var rnk: u8 = 0;
         rnk += @popCount(self.data[0] & rankMask[idx].data[0]);
@@ -74,12 +74,12 @@ pub const BitSet256 = struct {
         return rnk;
     }
 
-    // ビットセットが空かどうかを返します。
+    // Return whether bitset is empty
     pub fn isEmpty(self: *const BitSet256) bool {
         return (self.data[0] | self.data[1] | self.data[2] | self.data[3]) == 0;
     }
 
-    // 2つのビットセットの積（intersection）を計算します。
+    // Calculate intersection of two bitsets
     pub fn intersection(self: *const BitSet256, other: *const BitSet256) BitSet256 {
         var bs = BitSet256{ .data = .{0,0,0,0} };
         bs.data[0] = self.data[0] & other.data[0];
@@ -89,7 +89,7 @@ pub const BitSet256 = struct {
         return bs;
     }
 
-    // 2つのビットセットの和（union）を計算します。
+    // Calculate union of two bitsets
     pub fn bitUnion(self: *const BitSet256, other: *const BitSet256) BitSet256 {
         var bs = BitSet256{ .data = .{0,0,0,0} };
         bs.data[0] = self.data[0] | other.data[0];
@@ -99,7 +99,7 @@ pub const BitSet256 = struct {
         return bs;
     }
 
-    // 2つのビットセットの積（intersection）の立っているビットの数を返します。
+    // Return count of set bits in intersection of two bitsets
     pub fn intersectionCardinality(self: *const BitSet256, other: *const BitSet256) u8 {
         var cnt: u8 = 0;
         cnt += @popCount(self.data[0] & other.data[0]);
@@ -109,7 +109,7 @@ pub const BitSet256 = struct {
         return cnt;
     }
 
-    // 2つのビットセットの積（intersection）が空でないかどうかを返します。
+    // Return whether intersection of two bitsets is non-empty
     pub fn intersectsAny(self: *const BitSet256, other: *const BitSet256) bool {
         return (self.data[0] & other.data[0] != 0) ||
                (self.data[1] & other.data[1] != 0) ||
@@ -117,7 +117,7 @@ pub const BitSet256 = struct {
                (self.data[3] & other.data[3] != 0);
     }
 
-    // 2つのビットセットの積（intersection）の最上位ビットを返します。積が空の場合はnullを返します。
+    // Return highest bit in intersection of two bitsets. Returns null if intersection is empty.
     pub fn intersectionTop(self: *const BitSet256, other: *const BitSet256) ?u8 {
         var i: usize = 4;
         while (i > 0) : (i -= 1) {
@@ -132,7 +132,7 @@ pub const BitSet256 = struct {
         return null;
     }
 
-    // 立っているビットをスライスとして返します。bufは256個のu8のバッファです。
+    // Return set bits as slice. buf is a buffer of 256 u8s.
     pub fn asSlice(self: *const BitSet256, buf: *[256]u8) []u8 {
         var size: usize = 0;
         var wIdx: usize = 0;
@@ -141,19 +141,19 @@ pub const BitSet256 = struct {
             while (word != 0) : (size += 1) {
                 const trailing = @ctz(word);
                 buf[size] = @as(u8, (wIdx << 6) + trailing);
-                word &= (word - 1); // 最下位ビットをクリア
+                word &= (word - 1); // Clear least significant bit
             }
         }
         return buf[0..size];
     }
 
-    // 立っているビットをスライスとして返します。内部でバッファを確保します。
+    // Return set bits as slice. Allocates buffer internally.
     pub fn all(self: *const BitSet256) []u8 {
         var buf: [256]u8 = undefined;
         return self.asSlice(&buf);
     }
 
-    // デバッグ用の文字列を返します。
+    // Return debug string
     pub fn string(self: *const BitSet256) []const u8 {
         var buf: [256]u8 = undefined;
         const slice = self.asSlice(&buf);
@@ -166,8 +166,8 @@ pub const BitSet256 = struct {
     }
 };
 
-// rankMaskは、0〜255までのビットが立ったBitSet256の配列です。
-// 例：rankMask[7]は、0〜7までのビットが立ったBitSet256です。
+// rankMask is an array of BitSet256 with bits 0-255 set.
+// Example: rankMask[7] is a BitSet256 with bits 0-7 set.
 pub const rankMask = blk: {
     var arr: [256]BitSet256 = undefined;
     var i: usize = 0;
@@ -182,17 +182,17 @@ pub const rankMask = blk: {
     break :blk arr;
 };
 
-/// LPM（最長一致）検索: bitmap内でkey以下の最大ビット位置を返す（なければnull）
+/// LPM (Longest Prefix Match) search: return maximum bit position <= key in bitmap (null if none)
 pub fn lpmSearch(bitmap: *const [4]u64, key: u8) ?u8 {
-    // key + 1が256を超えないように制限
+    // Limit key + 1 to not exceed 256
     const safe_key = if (key == 255) 255 else key + 1;
-    const mask = lookupTbl[safe_key]; // key以下を全て1にしたマスク
+    const mask = lookupTbl[safe_key]; // Mask with all bits <= key set to 1
     var masked = BitSet256{ .data = .{
         bitmap[0] & mask.data[0],
         bitmap[1] & mask.data[1],
         bitmap[2] & mask.data[2],
         bitmap[3] & mask.data[3],
     }};
-    // 最上位ビット（key以下で最大のビット）を返す
+    // Return highest bit (maximum bit <= key)
     return masked.intersectionTop(&masked);
 } 

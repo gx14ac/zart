@@ -1,20 +1,74 @@
-ZIG ?= zig
-TARGET ?= aarch64-macos
+# BART (Binary Art) Routing Table - Makefile
+# Build and test automation for the BART routing table implementation
 
-all: libbart.a
+# Default target
+.PHONY: all
+all: build
 
-libbart.a: bart.zig bart.h
-	$(ZIG) build-lib -OReleaseFast -target $(TARGET) bart.zig
+# Build the library
+.PHONY: build
+build:
+	zig build -Doptimize=ReleaseFast
 
+# Build with debug information
+.PHONY: debug
+debug:
+	zig build
+
+# Run tests
+.PHONY: test
+test:
+	zig build test
+
+# Run tests with debug information
+.PHONY: test-debug
+test-debug:
+	zig build test -Doptimize=Debug
+
+# Clean build artifacts
+.PHONY: clean
 clean:
-	rm -f libbart.a
+	zig build clean
+	rm -rf zig-out/
+	rm -rf zig-cache/
 
-bench-csv:
-	$(ZIG) build bench
-	$(ZIG) build rt_bench
-	$(ZIG) build advanced_bench
+# Run benchmarks
+.PHONY: bench
+bench:
+	zig build bench -Doptimize=ReleaseFast
 
-plot:
+# Run realistic benchmarks
+.PHONY: rt-bench
+rt-bench:
+	zig build rt_bench -Doptimize=ReleaseFast
+
+# Run advanced benchmarks
+.PHONY: advanced-bench
+advanced-bench:
+	zig build advanced_bench -Doptimize=ReleaseFast
+
+# Run all benchmarks and generate graphs
+.PHONY: all-bench
+all-bench: bench rt-bench advanced-bench
 	python3 scripts/plot_benchmarks.py
 
-all-bench: bench-csv plot
+# Install dependencies (if using nix)
+.PHONY: deps
+deps:
+	nix develop
+
+# Help target
+.PHONY: help
+help:
+	@echo "Available targets:"
+	@echo "  build        - Build the library (ReleaseFast)"
+	@echo "  debug        - Build with debug information"
+	@echo "  test         - Run tests"
+	@echo "  test-debug   - Run tests with debug information"
+	@echo "  clean        - Clean build artifacts"
+	@echo "  bench        - Run basic benchmarks"
+	@echo "  rt-bench     - Run realistic benchmarks"
+	@echo "  advanced-bench - Run advanced benchmarks"
+	@echo "  all-bench    - Run all benchmarks and generate graphs"
+	@echo "  deps         - Install dependencies (nix)"
+	@echo "  help         - Show this help message"

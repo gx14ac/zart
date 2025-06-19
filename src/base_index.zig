@@ -1,26 +1,26 @@
-//! プレフィックスとベースインデックスの相互変換機能
+//! Prefix and base index conversion functionality
 //! 
-//! このモジュールは、プレフィックス（オクテットとプレフィックス長）と
-//! ベースインデックスの間の変換を提供します。
+//! This module provides conversion between prefixes (octet and prefix length)
+//! and base indices.
 //! 
-//! 主な機能：
-//! - プレフィックスからインデックスへの変換
-//! - インデックスからプレフィックスへの変換
-//! - ホストアドレスのインデックス計算
-//! - プレフィックス長と範囲の計算
+//! Main features:
+//! - Convert prefix to index
+//! - Convert index to prefix
+//! - Calculate host address index
+//! - Calculate prefix length and range
 
 const std = @import("std");
 
-/// ホストアドレスのインデックスを計算
-/// これはPfxToIdx(octet/8)の高速版です。
+/// Calculate host address index
+/// This is a fast version of PfxToIdx(octet/8).
 pub fn hostIdx(octet: u8) usize {
     return @as(usize, octet) + 256;
 }
 
-/// 8ビットプレフィックスを数値にマッピング
-/// プレフィックスは0/0から255/8の範囲で、マッピングされた値は1から511の範囲です。
+/// Map 8-bit prefix to numeric value
+/// Prefixes range from 0/0 to 255/8, mapped values range from 1 to 511.
 /// 
-/// 例：octet/pfxLen: 160/3 = 0b1010_0000/3 => idxToPfx(160/3) => 13
+/// Example: octet/pfxLen: 160/3 = 0b1010_0000/3 => idxToPfx(160/3) => 13
 /// 
 ///     0b1010_0000 => 0b0000_0101
 ///      ^^^ >> (8-3)         ^^^
@@ -36,8 +36,8 @@ fn pfxToIdx(octet: u8, pfx_len: u8) usize {
     return (@as(usize, octet) >> right_shift) + (@as(usize, 1) << shift);
 }
 
-/// 8ビットプレフィックスを数値にマッピング（256バージョン）
-/// 値の範囲は[1..255]です。255より大きい値は>>1でシフトされます。
+/// Map 8-bit prefix to numeric value (256 version)
+/// Value range is [1..255]. Values greater than 255 are shifted by >>1.
 pub fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
     const idx = pfxToIdx(octet, pfx_len);
     if (idx > 255) {
@@ -46,10 +46,10 @@ pub fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
     return @as(u8, @intCast(idx));
 }
 
-/// ベースインデックスからオクテットとプレフィックス長を返す
-/// pfxToIdx256の逆関数です。
+/// Return octet and prefix length from base index
+/// Inverse function of pfxToIdx256.
 /// 
-/// 無効な入力の場合はエラーを返します。
+/// Returns error for invalid input.
 pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
     if (idx == 0) {
         return error.InvalidIndex;
@@ -66,7 +66,7 @@ pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
     };
 }
 
-/// 深さとインデックスからプレフィックス長を計算
+/// Calculate prefix length from depth and index
 pub fn pfxLen256(depth: i32, idx: u8) !u8 {
     if (idx == 0) {
         return error.InvalidIndex;
@@ -74,7 +74,7 @@ pub fn pfxLen256(depth: i32, idx: u8) !u8 {
     return @as(u8, @intCast(depth * 8 + std.math.log2_int(u8, idx)));
 }
 
-/// プレフィックスインデックスから範囲（最初と最後のオクテット）を返す
+/// Return range (first and last octet) from prefix index
 pub fn idxToRange256(idx: u8) !struct { first: u8, last: u8 } {
     const pfx = try idxToPfx256(idx);
     const last = pfx.octet | ~netMask(pfx.pfx_len);
@@ -84,7 +84,7 @@ pub fn idxToRange256(idx: u8) !struct { first: u8, last: u8 } {
     };
 }
 
-/// ビット数に基づくネットワークマスクを生成
+/// Generate network mask based on bit count
 /// 
 /// 0b0000_0000, // bits == 0
 /// 0b1000_0000, // bits == 1
@@ -102,33 +102,33 @@ pub fn netMask(bits: u8) u8 {
     return @as(u8, 0xff) << shift;
 }
 
-// テスト
+// Tests
 test "base_index" {
-    // HostIdxのテスト
+    // Test HostIdx
     try std.testing.expectEqual(@as(usize, 256), hostIdx(0));
     try std.testing.expectEqual(@as(usize, 257), hostIdx(1));
     try std.testing.expectEqual(@as(usize, 511), hostIdx(255));
 
-    // PfxToIdx256のテスト
+    // Test PfxToIdx256
     try std.testing.expectEqual(@as(u8, 13), pfxToIdx256(160, 3));
     try std.testing.expectEqual(@as(u8, 1), pfxToIdx256(0, 0));
     try std.testing.expectEqual(@as(u8, 255), pfxToIdx256(255, 8));
 
-    // IdxToPfx256のテスト
+    // Test IdxToPfx256
     const pfx1 = try idxToPfx256(13);
     try std.testing.expectEqual(@as(u8, 160), pfx1.octet);
     try std.testing.expectEqual(@as(u8, 3), pfx1.pfx_len);
 
-    // PfxLen256のテスト
+    // Test PfxLen256
     try std.testing.expectEqual(@as(u8, 3), try pfxLen256(0, 13));
     try std.testing.expectEqual(@as(u8, 11), try pfxLen256(1, 13));
 
-    // IdxToRange256のテスト
+    // Test IdxToRange256
     const range1 = try idxToRange256(13);
     try std.testing.expectEqual(@as(u8, 160), range1.first);
     try std.testing.expectEqual(@as(u8, 191), range1.last);
 
-    // NetMaskのテスト
+    // Test NetMask
     try std.testing.expectEqual(@as(u8, 0b0000_0000), netMask(0));
     try std.testing.expectEqual(@as(u8, 0b1000_0000), netMask(1));
     try std.testing.expectEqual(@as(u8, 0b1111_1111), netMask(8));

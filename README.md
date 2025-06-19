@@ -6,42 +6,42 @@ bitmap based art table.
 ### Basic bench
 ![Basic Benchmark Results](assets/basic_benchmark.png)
 
-基本性能評価では、以下の3つの観点から性能を測定しています。
-- プレフィックス数に応じた挿入・検索性能
-- メモリ使用量の推移
-- マッチ率の確認
+Basic performance evaluation measures performance from three perspectives:
+- Insert and search performance based on prefix count
+- Memory usage trends
+- Match rate verification
 
 ### Realistic bench
 ![Realistic Benchmark Results](assets/realistic_benchmark.png)
 
-実運用環境を想定した評価では、以下の点に注目しています。
-- パフォーマンスとメモリ使用量の関係
-- キャッシュヒット率とマッチ率の推移
+Production environment evaluation focuses on:
+- Relationship between performance and memory usage
+- Cache hit rate and match rate trends
 
 ### Multithreading bench
 ![Advanced Benchmark Results](assets/advanced_benchmark.png)
 
-マルチスレッド環境での性能評価では、以下を測定しています。
-- スレッド数に応じたスケーラビリティ
-- メモリ断片化の影響
+Multithreaded performance evaluation measures:
+- Scalability based on thread count
+- Impact of memory fragmentation
 
-## ベンチマークの実行方法
+## Running Benchmarks
 
-全体のベンチマークテストを確認したい場合。
+To run all benchmark tests:
 ```bash
 make all-bench
 ```
-`/assets`ディレクトリにcsvと画像が作成されます。
+CSV files and images will be created in `/assets` directory.
 
-単体のベンチマークテストを実行する場合。
+To run individual benchmark tests:
 ```bash
-# 基本性能評価
+# Basic performance evaluation
 zig build bench -Doptimize=ReleaseFast
 
-# 実運用環境に近い性能評価
+# Production-like performance evaluation
 zig build rt_bench -Doptimize=ReleaseFast
 
-# マルチスレッド性能評価
+# Multithreaded performance evaluation
 zig build advanced_bench -Doptimize=ReleaseFast
 ```
 

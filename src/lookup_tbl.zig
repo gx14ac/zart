@@ -1,17 +1,17 @@
 const std = @import("std");
 const BitSet256 = @import("bitset256.zig").BitSet256;
 
-// Goのlookuptbl.goの内容をZigで動的生成
+// Dynamically generate Go's lookuptbl.go content in Zig
 pub const lookupTbl = blk: {
-    // comptime評価の分岐上限を引き上げる
+    // Increase comptime evaluation branch limit
     @setEvalBranchQuota(10000);
     
     var arr: [256]BitSet256 = undefined;
     var i: usize = 0;
     while (i < 256) : (i += 1) {
-        // iビット目までのマスクを直接計算
+        // Directly calculate mask up to i-th bit
         var data: [4]u64 = .{0, 0, 0, 0};
-        const chunk = @min(i >> 6, 3); // 最大でも3（4要素の配列の範囲内）に制限
+        const chunk = @min(i >> 6, 3); // Limit to maximum 3 (within 4-element array range)
         const bit = i & 0x3F;
         var j: usize = 0;
         while (j < chunk) : (j += 1) {

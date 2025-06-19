@@ -1,19 +1,19 @@
-//! 基本的なベンチマークテスト
+//! Basic benchmark tests
 //! 
-//! このベンチマークは以下の項目をテストします：
-//! 1. 基本的なルックアップ性能（単一スレッド）
-//! 2. シンプルな使用パターンでの性能
-//! 3. 基本的なメモリ使用量
+//! This benchmark tests the following items:
+//! 1. Basic lookup performance (single-threaded)
+//! 2. Performance in simple usage patterns
+//! 3. Basic memory usage
 //! 
-//! 主な用途：
-//! - 基本的な性能のベースライン測定
-//! - 単一スレッド環境での性能評価
-//! - シンプルな使用パターンでの最適化の検証
+//! Main purposes:
+//! - Measure baseline performance
+//! - Evaluate performance in single-threaded environments
+//! - Verify optimization in simple usage patterns
 //! 
-//! 注意点：
-//! - 単一スレッドのみのテスト
-//! - 比較的単純なIPアドレスパターンを使用
-//! - メモリ断片化の影響は考慮しない
+//! Notes:
+//! - Single-threaded testing only
+//! - Uses relatively simple IP address patterns
+//! - Does not consider memory fragmentation effects
 
 const std = @import("std");
 const bart = @import("main.zig");
@@ -22,7 +22,7 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-// メモリ使用量を計測する関数
+// Function to measure memory usage
 fn measureMemoryUsage() usize {
     if (comptime builtin.target.os.tag == .linux) {
         var usage: usize = 0;
@@ -30,7 +30,7 @@ fn measureMemoryUsage() usize {
             return usage;
         }
     } else if (comptime builtin.target.os.tag == .macos) {
-        // macOS: psコマンドでRSSを取得
+        // macOS: get RSS using ps command
         var argv_buf: [32]u8 = undefined;
         const pid_str = std.fmt.bufPrint(&argv_buf, "{d}", .{c.getpid()}) catch return 0;
         var child = std.process.Child.init(&[_][]const u8{
@@ -49,7 +49,7 @@ fn measureMemoryUsage() usize {
     return 0;
 }
 
-// ベンチマーク結果の構造体を共通の型として定義
+// Define benchmark result structure as common type
 const BenchmarkResult = struct {
     prefix_count: usize,
     insert_time: u64,
@@ -58,10 +58,10 @@ const BenchmarkResult = struct {
     lookup_rate: f64,
     match_rate: f64,
     memory_usage: usize,
-    cache_hit_rate: f64, // benchではキャッシュテストしないので0固定
+    cache_hit_rate: f64, // Fixed at 0 for bench since no cache testing
 };
 
-// ベンチマーク結果をCSVに出力する関数
+// Function to write benchmark results to CSV
 fn writeBenchmarkResultsToCSV(
     results: []const BenchmarkResult,
     filename: []const u8,
@@ -84,19 +84,19 @@ fn writeBenchmarkResultsToCSV(
     }
 }
 
-// runBenchmarkの戻り値をBenchmarkResultに変更
+// Change runBenchmark return value to BenchmarkResult
 fn runBenchmark(numPrefixes: usize, prefixLen: u8) !BenchmarkResult {
-    // ルーティングテーブルの作成
+    // Create routing table
     const table = bart.bart_create();
     defer bart.bart_destroy(table);
     const stdout = std.io.getStdOut().writer();
     try stdout.print("\nBenchmark Configuration:\n", .{});
     try stdout.print("------------------------\n\n", .{});
     try stdout.print("Inserting {d} prefixes (/{d}):\n", .{ numPrefixes, prefixLen });
-    // メモリ使用量の計測開始
+    // Start memory usage measurement
     const memBefore = measureMemoryUsage();
     const startTime = std.time.milliTimestamp();
-    // プレフィックスの挿入
+    // Insert prefixes
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
     var i: usize = 0;
@@ -125,7 +125,7 @@ fn runBenchmark(numPrefixes: usize, prefixLen: u8) !BenchmarkResult {
     try stdout.print("  Delta:  {d} bytes\n", .{memAfter - memBefore});
     try stdout.print("  Per Entry: {d:.2} bytes\n", .{@as(f64, @floatFromInt(memAfter - memBefore)) / @as(f64, @floatFromInt(numPrefixes))});
     try stdout.print("\nInsert Performance: {d:.2} prefixes/sec\n\n", .{insertRate});
-    // ルックアップテスト
+    // Lookup test
     const numLookups: usize = 1000000;
     try stdout.print("Running {d} lookups:\n", .{numLookups});
     var matches: usize = 0;
@@ -158,12 +158,12 @@ fn runBenchmark(numPrefixes: usize, prefixLen: u8) !BenchmarkResult {
     try stdout.print("  Lookup Time: {d:.2}ms\n", .{lookupTime * 1000.0});
     try stdout.print("  Lookup Rate: {d:.2} lookups/sec\n", .{lookupRate});
     try stdout.print("  Match Rate: {d:.2}%\n", .{matchRate});
-    // BenchmarkResultで返す
+    // Return BenchmarkResult
     return BenchmarkResult{
         .prefix_count = numPrefixes,
-        .insert_time = @as(u64, @intCast(@abs(endTime - startTime) * 1000000)), // 安全な変換
+        .insert_time = @as(u64, @intCast(@abs(endTime - startTime) * 1000000)), // Safe conversion
         .insert_rate = insertRate,
-        .lookup_time = @as(u64, @intCast(@abs(lookupEndTime - lookupStartTime) * 1000000)), // 安全な変換
+        .lookup_time = @as(u64, @intCast(@abs(lookupEndTime - lookupStartTime) * 1000000)), // Safe conversion
         .lookup_rate = lookupRate,
         .match_rate = matchRate,
         .memory_usage = memAfter,
@@ -171,27 +171,27 @@ fn runBenchmark(numPrefixes: usize, prefixLen: u8) !BenchmarkResult {
     };
 }
 
-// main関数で複数回のベンチマーク結果を集約し、CSV出力
+// Main function aggregates multiple benchmark results and outputs CSV
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("ZART Routing Table Benchmark\n", .{});
     try stdout.print("===========================\n\n", .{});
     var benchmark_results = std.ArrayList(BenchmarkResult).init(std.heap.page_allocator);
     defer benchmark_results.deinit();
-    // 既存のテストケース
+    // Existing test cases
     try benchmark_results.append(try runBenchmark(1000, 16));
     try benchmark_results.append(try runBenchmark(10000, 24));
     try benchmark_results.append(try runBenchmark(100000, 32));
-    // 新しい大規模テストケース
+    // New large-scale test cases
     try stdout.print("\nLarge Scale Benchmark:\n", .{});
     try stdout.print("=====================\n", .{});
     try benchmark_results.append(try runBenchmark(1000000, 24));
-    // assetsディレクトリの作成（存在しない場合）
+    // Create assets directory (if it doesn't exist)
     std.fs.cwd().makeDir("assets") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    // CSV出力
+    // CSV output
     try writeBenchmarkResultsToCSV(benchmark_results.items, "assets/basic_bench_results.csv");
     try stdout.print("\nBenchmark results have been written to assets/basic_bench_results.csv\n", .{});
 } 
