@@ -256,3 +256,24 @@ pub export fn bart_lookup6(table: *BartTable, addr_ptr: [*]const u8, found: *i32
     found.* = if (have_value) 1 else 0;
     return best_value;
 }
+
+// Test main function
+pub fn main() !void {
+    std.debug.print("BART (Binary Art Routing Table) - Zig Implementation\n", .{});
+    std.debug.print("Testing basic functionality...\n", .{});
+    
+    // Create a test table
+    const table = bart_create();
+    defer bart_destroy(table);
+    
+    // Test IPv4 insertion
+    const test_ip: u32 = 0x0A000001; // 10.0.0.1
+    const result = bart_insert4(table, test_ip, 24, 42);
+    if (result == 0) {
+        std.debug.print("IPv4 insertion successful\n", .{});
+    } else {
+        std.debug.print("IPv4 insertion failed\n", .{});
+    }
+    
+    std.debug.print("Test completed\n", .{});
+}

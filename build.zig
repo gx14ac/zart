@@ -82,10 +82,3 @@ pub fn build(b: *std.Build) void {
     const test_basic_test_step = b.step("test_basic_test", "Run test_basic tests");
     test_basic_test_step.dependOn(&run_test_basic_tests.step);
 }
-
-pub fn asSlice(self: IPAddr) []const u8 {
-    return switch (self) {
-        .v4 => |*v4| v4[0..],
-        .v6 => |*v6| v6[0..],
-    };
-}

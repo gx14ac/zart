@@ -1,5 +1,5 @@
 const std = @import("std");
-const lookupTbl = @import("lookup_tbl.zig").lookupTbl;
+const lookup_tbl = @import("lookup_tbl.zig");
 
 // BitSet for managing 0-255 bits
 // Implemented with 4 u64s for cache efficiency
@@ -120,10 +120,19 @@ pub const BitSet256 = struct {
 
     // Return whether intersection of two bitsets is non-empty
     pub fn intersectsAny(self: *const BitSet256, other: *const BitSet256) bool {
-        return (self.data[0] & other.data[0] != 0) ||
-               (self.data[1] & other.data[1] != 0) ||
-               (self.data[2] & other.data[2] != 0) ||
-               (self.data[3] & other.data[3] != 0);
+        // 演算結果を一時変数に代入してランタイム値として扱う
+        const result0 = self.data[0] & other.data[0];
+        const result1 = self.data[1] & other.data[1];
+        const result2 = self.data[2] & other.data[2];
+        const result3 = self.data[3] & other.data[3];
+        
+        // 比較結果も一時変数に代入
+        const check0 = result0 != 0;
+        const check1 = result1 != 0;
+        const check2 = result2 != 0;
+        const check3 = result3 != 0;
+        
+        return check0 or check1 or check2 or check3;
     }
 
     // Return highest bit in intersection of two bitsets. Returns null if intersection is empty.
@@ -174,6 +183,15 @@ pub const BitSet256 = struct {
         }
         return buf[0..j];
     }
+
+    // Create BitSet256 from slice of bits to set
+    pub fn fromSlice(bits: []const u8) BitSet256 {
+        var bs = BitSet256.init();
+        for (bits) |bit| {
+            bs.set(bit);
+        }
+        return bs;
+    }
 };
 
 // rankMask is an array of BitSet256 with bits 0-255 set.
@@ -197,7 +215,7 @@ pub const rankMask = blk: {
 pub fn lpmSearch(bitmap: *const [4]u64, key: u8) ?u8 {
     // Limit key + 1 to not exceed 256
     const safe_key = if (key == 255) 255 else key + 1;
-    const mask = lookupTbl[safe_key]; // Mask with all bits <= key set to 1
+    const mask = lookup_tbl.lookupTbl[safe_key]; // Mask with all bits <= key set to 1
     var masked = BitSet256{ .data = .{
         bitmap[0] & mask.data[0],
         bitmap[1] & mask.data[1],

@@ -162,6 +162,18 @@ pub fn Array256(comptime T: type) type {
             return self.bitset.isSet(i);
         }
         
+        /// IntersectsAny returns true if the intersection of this array's bitset with the compare bitset
+        /// is not the empty set.
+        pub fn intersectsAny(self: *const Self, other: *const BitSet256) bool {
+            return self.bitset.intersectsAny(other);
+        }
+        
+        /// IntersectionTop returns the top (highest) bit in the intersection of this array's bitset
+        /// with the compare bitset, if any intersection exists.
+        pub fn intersectionTop(self: *const Self, other: *const BitSet256) ?u8 {
+            return self.bitset.intersectionTop(other);
+        }
+        
         /// insertItem inserts the item at index i, shift the rest one pos right
         ///
         /// It panics if i is out of range.

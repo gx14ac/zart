@@ -150,7 +150,7 @@ pub fn Table(comptime V: type) type {
         
         /// Get gets the value at pfx.
         pub fn get(self: *const Self, pfx: *const Prefix) ?V {
-            std.debug.print("GET START: pfx={any}\n", .{pfx.*});
+            std.debug.print("GET START: pfx={s}\n", .{pfx.*});
             if (!pfx.isValid()) {
                 return null;
             }

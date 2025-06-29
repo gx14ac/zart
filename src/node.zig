@@ -61,13 +61,11 @@ pub fn Node(comptime V: type) type {
         /// insertAtDepth insert a prefix/val into a node tree at depth.
         /// n must not be nil, prefix must be valid and already in canonical form.
         pub fn insertAtDepth(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator) bool {
-            // ここではpfxは既にmaskedされている前提
             const ip = &pfx.addr;
             const bits = pfx.bits;
             const octets = ip.asSlice();
             const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
             const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            std.debug.print("insertAtDepth: bits={}, max_depth={}, last_bits={}, octets={any}\n", .{bits, max_depth, last_bits, octets});
             var current_depth = depth;
             var current_node = self;
             while (current_depth < max_depth) : (current_depth += 1) {
@@ -89,56 +87,29 @@ pub fn Node(comptime V: type) type {
                     else => unreachable,
                 }
             }
-            std.debug.print("insertAtDepth: end current_node ptr={*}\n", .{current_node});
-            // ここでprefixesに格納（prefixのbitsに対応するdepthで）
-            var octet_idx: usize = 0;
-            if (current_depth == 0 or max_depth == 0) {
-                octet_idx = 0;
-            } else {
-                octet_idx = current_depth - 1;
+            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
             }
-            const octet_val: u8 = if (current_depth == 0 or max_depth == 0) 0 else (if (octets.len > octet_idx) octets[octet_idx] else 0);
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
-            std.debug.print("INSERT: last_bits={}, idx={}, val={} (octet={})\n", .{last_bits, idx, val, octet_val});
             const inserted = current_node.prefixes.insertAt(idx, val);
-            std.debug.print("insertAtDepth: final octet_val={}, idx={}, isSet={}, prefixes.len={} (inserted={})\n", .{octet_val, idx, current_node.prefixes.isSet(idx), current_node.prefixes.len(), inserted});
             return inserted;
         }
         
-        /// lpmGet gets the longest prefix match for idx
-        pub fn lpmGet(self: *const Self, idx: u8) ?struct { base_idx: u8, val: V } {
-            const prefixes = self.prefixes;
-            if (prefixes.isSet(idx)) {
-                return .{ .base_idx = idx, .val = prefixes.mustGet(idx) };
-            }
-            
-            // find the longest prefix match
-            var i: u8 = idx;
-            while (i > 0) : (i -= 1) {
-                if (prefixes.isSet(i)) {
-                    return .{ .base_idx = i, .val = prefixes.mustGet(i) };
-                }
-            }
-            
-            return null;
-        }
-        
         /// lpmTest tests if there is a longest prefix match for idx
-        pub fn lpmTest(self: *const Self, idx: u8) bool {
-            const prefixes = self.prefixes;
-            if (prefixes.isSet(idx)) {
-                return true;
+        pub fn lpmTest(self: *const Self, idx: usize) bool {
+            var bs: bitset256.BitSet256 = @as(bitset256.BitSet256, lookup_tbl.backTrackingBitset(idx));
+            return self.prefixes.intersectsAny(&bs);
+        }
+
+        /// lpmGet returns the longest prefix match for idx
+        pub fn lpmGet(self: *const Self, idx: usize) struct { base_idx: u8, val: V, ok: bool } {
+            var bs: bitset256.BitSet256 = @as(bitset256.BitSet256, lookup_tbl.backTrackingBitset(idx));
+            if (self.prefixes.intersectionTop(&bs)) |top| {
+                return .{ .base_idx = top, .val = self.prefixes.mustGet(top), .ok = true };
             }
-            
-            // find the longest prefix match
-            var i: u8 = idx;
-            while (i > 0) : (i -= 1) {
-                if (prefixes.isSet(i)) {
-                    return true;
-                }
-            }
-            
-            return false;
+            return .{ .base_idx = 0, .val = undefined, .ok = false };
         }
 
         pub fn get(self: *const Self, pfx: *const Prefix) ?V {
@@ -148,7 +119,6 @@ pub fn Node(comptime V: type) type {
             const octets = ip.asSlice();
             const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
             const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            std.debug.print("get: bits={}, max_depth={}, last_bits={}, octets={any}\n", .{bits, max_depth, last_bits, octets});
             var current_depth: usize = 0;
             var current_node = self;
             while (current_depth < max_depth) : (current_depth += 1) {
@@ -156,7 +126,6 @@ pub fn Node(comptime V: type) type {
                 if (current_depth < octets.len) {
                     octet = octets[current_depth];
                 }
-                std.debug.print("get: current_depth={}, octet={}, isSet={}\n", .{current_depth, octet, current_node.children.isSet(octet)});
                 if (!current_node.children.isSet(octet)) {
                     break;
                 }
@@ -168,22 +137,16 @@ pub fn Node(comptime V: type) type {
                     else => return null,
                 }
             }
-            // ループ終了後にprefixesから取得
-            var octet: u8 = 0;
-            if (current_depth == 0 or max_depth == 0) {
-                octet = 0;
-            } else if (octets.len > current_depth - 1) {
-                octet = octets[current_depth - 1];
-            } else {
-                octet = 0;
+            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
             }
-            const idx = base_index.pfxToIdx256(octet, last_bits);
+            const idx = base_index.pfxToIdx256(octet_val, last_bits);
             if (current_node.prefixes.isSet(idx)) {
                 const val = current_node.prefixes.get(idx);
                 return val;
             }
-            
-            // prefixesにない場合はchildren側を再帰的に探索
             if (current_node.children.isSet(idx)) {
                 if (current_node.children.get(idx)) |child| {
                     switch (child) {
@@ -196,7 +159,6 @@ pub fn Node(comptime V: type) type {
                             return fringe.value;
                         },
                         .node => |node| {
-                            // nodeの場合は再帰的に探索
                             const val = node.get(pfx);
                             if (val) |v| {
                                 return v;
@@ -205,56 +167,116 @@ pub fn Node(comptime V: type) type {
                     }
                 }
             }
-            
             return null;
         }
 
         pub fn lookup(self: *const Self, pfx: *const Prefix) ?V {
-            // Go実装準拠: stackでノードを記録し、backtrackしながらLPM探索
-            const octets = pfx.addr.asSlice();
-            const bits = pfx.bits;
+            const masked_pfx = pfx.masked();
+            const ip = &masked_pfx.addr;
+            const bits = masked_pfx.bits;
+            const octets = ip.asSlice();
             const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
             const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            var stack: [16]*const Self = undefined;
-            var current_node: *const Self = self;
-            var depth: u8 = 0;
+            var stack: [16]*const Node(V) = undefined;
+            var depth: usize = 0;
+            var current_node = self;
             while (depth < octets.len) : (depth += 1) {
-                const octet = octets[depth];
                 stack[depth] = current_node;
-                if (depth == max_depth) break;
-                if (!current_node.children.isSet(octet)) break;
-                const child = current_node.children.mustGet(octet);
-                switch (child) {
-                    .node => |node| current_node = node,
-                    .fringe => |fringe| return fringe.value,
+                const octet: u8 = octets[depth];
+                if (depth >= max_depth) {
+                    break;
+                }
+                if (!current_node.children.isSet(octet)) {
+                    break;
+                }
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                    },
                     .leaf => |leaf| {
-                        if (leaf.prefix.containsAddr(pfx.addr)) return leaf.value;
-                        break;
+                        if (leaf.prefix.eql(masked_pfx)) {
+                            return leaf.value;
+                        }
+                        return null;
+                    },
+                    .fringe => |fringe| {
+                        if (isFringe(depth, bits)) {
+                            return fringe.value;
+                        }
+                        return null;
                     },
                 }
             }
-            var d: usize = depth;
-            while (true) {
-                current_node = stack[d];
-                var idx: u8 = 0;
-                const octet_val: u8 = if (d < octets.len) @as(u8, octets[d]) else 0;
-                if (d == max_depth) {
-                    idx = base_index.pfxToIdx256(octet_val, last_bits);
+            if (depth == max_depth) {
+                const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+                var octet: u8 = 0;
+                if (octets.len > prefix_byte_idx) {
+                    octet = octets[prefix_byte_idx];
+                }
+                const idx = base_index.pfxToIdx256(octet, last_bits);
+                if (current_node.prefixes.isSet(idx)) {
+                    const val = current_node.prefixes.mustGet(idx);
+                    return val;
+                }
+            }
+            var d: isize = @as(isize, @intCast(depth)) - 1;
+            while (d >= 0) : (d -= 1) {
+                const stack_idx = @as(usize, @intCast(d));
+                if (stack_idx >= stack.len) break;
+                current_node = stack[stack_idx];
+                const actual_depth = @as(usize, @intCast(d)) + 1;
+                const octet: u8 = if (actual_depth <= octets.len) octets[actual_depth - 1] else 0;
+                const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+                var prefix_octet: u8 = 0;
+                if (octets.len > prefix_byte_idx) {
+                    prefix_octet = octets[prefix_byte_idx];
+                }
+                const idx = if (actual_depth == max_depth)
+                    base_index.pfxToIdx256(prefix_octet, last_bits)
+                else
+                    base_index.hostIdx(octet);
+                if (actual_depth == max_depth) {
+                    if (current_node.prefixes.isSet(@as(u8, @intCast(idx)))) {
+                        const val = current_node.prefixes.mustGet(@as(u8, @intCast(idx)));
+                        return val;
+                    }
                 } else {
-                    // Go実装準拠: HostIdx(octet) = octet + 256
-                    const host_idx = base_index.hostIdx(octet_val);
-                    // host_idxは256-511の範囲なので、u8に収まらない場合は調整
-                    if (host_idx > 255) {
-                        idx = @as(u8, @intCast(host_idx >> 1));
-                    } else {
-                        idx = @as(u8, @intCast(host_idx));
+                    if (current_node.lpmTest(idx)) {
+                        const result = current_node.lpmGet(idx);
+                        if (result.ok) {
+                            return result.val;
+                        }
                     }
                 }
-                if (current_node.prefixes.isSet(idx)) {
-                    return current_node.prefixes.mustGet(idx);
+            }
+            if (depth < max_depth) {
+                var max_depth_node = self;
+                var i: usize = 0;
+                while (i < max_depth) : (i += 1) {
+                    const octet: u8 = if (i < octets.len) octets[i] else 0;
+                    if (max_depth_node.children.isSet(octet)) {
+                        const kid = max_depth_node.children.mustGet(octet);
+                        switch (kid) {
+                            .node => |node| {
+                                max_depth_node = node;
+                            },
+                            else => break,
+                        }
+                    } else {
+                        break;
+                    }
                 }
-                if (d == 0) break;
-                d -= 1;
+                const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+                var octet: u8 = 0;
+                if (octets.len > prefix_byte_idx) {
+                    octet = octets[prefix_byte_idx];
+                }
+                const idx = base_index.pfxToIdx256(octet, last_bits);
+                if (max_depth_node.prefixes.isSet(idx)) {
+                    const val = max_depth_node.prefixes.mustGet(idx);
+                    return val;
+                }
             }
             return null;
         }
@@ -296,16 +318,12 @@ pub fn Node(comptime V: type) type {
                     },
                 }
             }
-            // 末端もinsertAtDepth/lookupと同じロジック
-            var octet: u8 = 0;
-            if (current_depth == 0 or max_depth == 0) {
-                octet = 0;
-            } else if (octets.len > current_depth - 1) {
-                octet = octets[current_depth - 1];
-            } else {
-                octet = 0;
+            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
             }
-            const idx = base_index.pfxToIdx256(octet, last_bits);
+            const idx = base_index.pfxToIdx256(octet_val, last_bits);
             if (current_node.prefixes.isSet(idx)) {
                 found = true;
             }
@@ -326,42 +344,22 @@ pub fn Node(comptime V: type) type {
                 if (current_depth < octets.len) {
                     octet = octets[current_depth];
                 }
-                // 各depthでprefixesを確認（既存値の更新）
-                var octet_idx: usize = 0;
-                if (current_depth == 0 or max_depth == 0) {
-                    octet_idx = 0;
-                } else {
-                    octet_idx = current_depth - 1;
-                }
-                const octet_val: u8 = if (current_depth == 0 or max_depth == 0) 0 else (if (octets.len > octet_idx) octets[octet_idx] else 0);
-                const idx = base_index.pfxToIdx256(octet_val, last_bits);
-                if (current_node.prefixes.isSet(idx)) {
-                    const result = current_node.prefixes.updateAt(idx, cb);
-                    return .{ .value = result.new_value, .was_present = result.was_present };
-                }
                 if (!current_node.children.isSet(octet)) {
-                    const new_node = std.heap.page_allocator.create(Node(V)) catch unreachable;
-                    new_node.* = Node(V).init(std.heap.page_allocator);
-                    const child = Child(V){ .node = new_node };
-                    _ = (&current_node.children).insertAt(octet, child);
+                    break;
                 }
                 const kid = current_node.children.mustGet(octet);
                 switch (kid) {
                     .node => |node| {
                         current_node = node;
                     },
-                    else => unreachable,
+                    else => break,
                 }
             }
-            std.debug.print("update: end current_node ptr={*}\n", .{current_node});
-            // ループ終了後にprefixesを更新
-            var octet_idx: usize = 0;
-            if (current_depth == 0 or max_depth == 0) {
-                octet_idx = 0;
-            } else {
-                octet_idx = current_depth - 1;
+            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
             }
-            const octet_val: u8 = if (current_depth == 0 or max_depth == 0) 0 else (if (octets.len > octet_idx) octets[octet_idx] else 0);
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
             const result = current_node.prefixes.updateAt(idx, cb);
             return .{ .value = result.new_value, .was_present = result.was_present };
@@ -405,21 +403,13 @@ pub fn Node(comptime V: type) type {
                     },
                 }
             }
-            // ループ終了後にprefixesから削除
-            var octet_idx: usize = 0;
-            if (current_depth == 0 or max_depth == 0) {
-                octet_idx = 0;
-            } else {
-                octet_idx = current_depth - 1;
+            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
             }
-            const octet_val: u8 = if (current_depth == 0 or max_depth == 0) 0 else (if (octets.len > octet_idx) octets[octet_idx] else 0);
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
-            if (current_node.prefixes.isSet(idx)) {
-                const val = current_node.prefixes.get(idx);
-                _ = current_node.prefixes.deleteAt(idx);
-                return val;
-            }
-            return null;
+            return current_node.prefixes.deleteAt(idx);
         }
     };
 }
@@ -501,7 +491,6 @@ pub const Prefix = struct {
     
     pub fn init(addr: *const IPAddr, bits: u8) Prefix {
         const pfx = Prefix{ .addr = addr.*, .bits = bits };
-        std.debug.print("Prefix.init: addr={any}, bits={}\n", .{addr.*, bits});
         return pfx;
     }
     
@@ -521,7 +510,6 @@ pub const Prefix = struct {
     pub fn masked(self: *const Prefix) Prefix {
         if (!self.isValid()) return self.*;
         const masked_addr = self.addr.masked(self.bits);
-        std.debug.print("Prefix.masked: masked_addr={any}, bits={}\n", .{masked_addr, self.bits});
         return Prefix.init(&masked_addr, self.bits);
     }
 
@@ -530,6 +518,13 @@ pub const Prefix = struct {
         // bits長でマスクして比較
         const masked_addr = addr.masked(self.bits);
         return self.addr.eql(masked_addr);
+    }
+
+    /// Format function for std.debug.print
+    pub fn format(self: Prefix, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("Prefix{{addr={s}, bits={}}}", .{self.addr, self.bits});
     }
 };
 
@@ -569,17 +564,31 @@ pub const IPAddr = union(enum) {
         };
     }
     
+    /// Format function for std.debug.print
+    pub fn format(self: IPAddr, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            .v4 => |v4| {
+                try writer.print("IPv4({}.{}.{}.{})", .{v4[0], v4[1], v4[2], v4[3]});
+            },
+            .v6 => |v6| {
+                try writer.print("IPv6({x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2})", .{
+                    v6[0], v6[1], v6[2], v6[3], v6[4], v6[5], v6[6], v6[7],
+                    v6[8], v6[9], v6[10], v6[11], v6[12], v6[13], v6[14], v6[15]
+                });
+            },
+        }
+    }
+    
     /// masked applies a network mask to the address
     pub fn masked(self: IPAddr, bits: u8) IPAddr {
         switch (self) {
             .v4 => |v4| {
-                std.debug.print("IPAddr.masked: v4(before)={any}, bits={}\n", .{v4, bits});
                 if (bits == 0) {
-                    std.debug.print("IPAddr.masked: v4(bits==0)={any}\n", .{v4});
                     return IPAddr{ .v4 = .{ 0, 0, 0, 0 } };
                 }
                 if (bits >= 32) {
-                    std.debug.print("IPAddr.masked: v4(bits>=32)={any}\n", .{v4});
                     return IPAddr{ .v4 = v4 };
                 }
                 const mask = @as(u32, 0xffffffff) << @as(u5, @intCast(32 - bits));
@@ -587,32 +596,35 @@ pub const IPAddr = union(enum) {
                 const masked_addr = addr & mask;
                 var result: [4]u8 = undefined;
                 std.mem.writeInt(u32, &result, masked_addr, .big);
-                std.debug.print("IPAddr.masked: v4(masked)={any}\n", .{result});
                 return IPAddr{ .v4 = result };
             },
             .v6 => |v6| {
-                std.debug.print("IPAddr.masked: v6(before)={any}, bits={}\n", .{v6, bits});
                 if (bits == 0) {
-                    std.debug.print("IPAddr.masked: v6(bits==0)={any}\n", .{v6});
                     return IPAddr{ .v6 = .{0} ** 16 };
                 }
                 if (bits >= 128) {
-                    std.debug.print("IPAddr.masked: v6(bits>=128)={any}\n", .{v6});
                     return IPAddr{ .v6 = v6 };
                 }
+                
+                // IPv6のマスク処理を実装
                 var result: [16]u8 = v6;
                 const full_bytes = bits / 8;
                 const remaining_bits = bits % 8;
-                if (full_bytes < 16) {
-                    @memset(result[full_bytes..], 0);
+                
+                // 完全なバイトのマスク
+                var i: usize = full_bytes;
+                while (i < 16) : (i += 1) {
+                    result[i] = 0;
                 }
+                
+                // 部分的なバイトのマスク
                 if (remaining_bits > 0 and full_bytes < 16) {
                     const mask = @as(u8, 0xff) << @as(u3, @intCast(8 - remaining_bits));
                     result[full_bytes] &= mask;
                 }
-                std.debug.print("IPAddr.masked: v6(masked)={any}\n", .{result});
+                
                 return IPAddr{ .v6 = result };
             },
         }
     }
-}; 
+};

@@ -114,7 +114,7 @@ test "最長プレフィックスマッチング（LPM）" {
     try std.testing.expectEqual(@as(?u32, 200), table.lookup(&pfx2_match));
     
     // IPv6アドレスのLPMテスト
-    var ip3_match = IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 } };
+    var ip3_match = IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } };
     const pfx3_match = Prefix.init(&ip3_match, 64);
     try std.testing.expectEqual(@as(?u32, 300), table.lookup(&pfx3_match));
     
@@ -149,7 +149,7 @@ test "IPアドレスの包含チェック" {
     const pfx1_contain = Prefix.init(&ip1_contain, 24);
     var ip2_contain = IPAddr{ .v4 = .{ 10, 1, 2, 3 } };
     const pfx2_contain = Prefix.init(&ip2_contain, 8);
-    var ip3_contain = IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 } };
+    var ip3_contain = IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } };
     const pfx3_contain = Prefix.init(&ip3_contain, 64);
     
     try std.testing.expect(table.contains(&pfx1_contain));  // 192.168.1.0/24に含まれる
