@@ -102,6 +102,13 @@ pub fn netMask(bits: u8) u8 {
     return @as(u8, 0xff) << shift;
 }
 
+/// Return max_depth (stride数) と last_bits (最後のstride未満のビット数)
+pub fn maxDepthAndLastBits(bits: u8) struct { max_depth: usize, last_bits: u8 } {
+    const max_depth = bits / 8;
+    const last_bits = bits % 8;
+    return .{ .max_depth = max_depth, .last_bits = last_bits };
+}
+
 // Tests
 test "base_index" {
     // Test HostIdx

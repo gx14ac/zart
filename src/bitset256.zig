@@ -9,19 +9,24 @@ pub const BitSet256 = struct {
     // Aligned to cache line (64 bytes)
     data: [4]u64 align(64),
 
+    // Initialize a new BitSet256
+    pub fn init() BitSet256 {
+        return BitSet256{ .data = .{0, 0, 0, 0} };
+    }
+
     // Set bit to 1
     pub fn set(self: *BitSet256, bit: u8) void {
-        self.data[bit >> 6] |= (@as(u64, 1) << (bit & 63));
+        self.data[bit >> 6] |= (@as(u64, 1) << @as(u6, @intCast(bit & 63)));
     }
 
     // Clear bit
     pub fn clear(self: *BitSet256, bit: u8) void {
-        self.data[bit >> 6] &= ~(@as(u64, 1) << (bit & 63));
+        self.data[bit >> 6] &= ~(@as(u64, 1) << @as(u6, @intCast(bit & 63)));
     }
 
     // Check if bit is set
     pub fn isSet(self: *const BitSet256, bit: u8) bool {
-        return (self.data[bit >> 6] & (@as(u64, 1) << (bit & 63))) != 0;
+        return (self.data[bit >> 6] & (@as(u64, 1) << @as(u6, @intCast(bit & 63)))) != 0;
     }
 
     // Return first set bit. Returns null if no bits are set.
@@ -38,17 +43,21 @@ pub const BitSet256 = struct {
 
     // Return first set bit after specified bit. Returns null if no bits are set.
     pub fn nextSet(self: *const BitSet256, bit: u8) ?u8 {
+        if (bit >= 255) return null;
         var wIdx: usize = bit >> 6;
-        const first: u64 = self.data[wIdx] >> (bit & 63);
-        if (first != 0) {
-            const trailing = @ctz(first);
-            return @as(u8, bit + trailing);
+        const bit_in_word = bit & 63;
+        if (bit_in_word < 63) {
+            const first: u64 = self.data[wIdx] >> @as(u6, @intCast(bit_in_word + 1));
+            if (first != 0) {
+                const trailing = @ctz(first);
+                return @as(u8, @intCast((wIdx << 6) + bit_in_word + 1 + @as(u8, @intCast(trailing))));
+            }
         }
         wIdx += 1;
         while (wIdx < 4) : (wIdx += 1) {
             if (self.data[wIdx] != 0) {
                 const trailing = @ctz(self.data[wIdx]);
-                return @as(u8, (wIdx << 6) + trailing);
+                return @as(u8, @intCast((wIdx << 6) + trailing));
             }
         }
         return null;
@@ -140,7 +149,8 @@ pub const BitSet256 = struct {
             var word = self.data[wIdx];
             while (word != 0) : (size += 1) {
                 const trailing = @ctz(word);
-                buf[size] = @as(u8, (wIdx << 6) + trailing);
+                // wIdx: 0-3, trailing: 0-63, 最大値: 3*64+63 = 255
+                buf[size] = @as(u8, @intCast((wIdx << 6) + trailing));
                 word &= (word - 1); // Clear least significant bit
             }
         }
@@ -169,6 +179,7 @@ pub const BitSet256 = struct {
 // rankMask is an array of BitSet256 with bits 0-255 set.
 // Example: rankMask[7] is a BitSet256 with bits 0-7 set.
 pub const rankMask = blk: {
+    @setEvalBranchQuota(100000);
     var arr: [256]BitSet256 = undefined;
     var i: usize = 0;
     while (i < 256) : (i += 1) {
@@ -195,4 +206,43 @@ pub fn lpmSearch(bitmap: *const [4]u64, key: u8) ?u8 {
     }};
     // Return highest bit (maximum bit <= key)
     return masked.intersectionTop(&masked);
+}
+
+test "BitSet256 basic operations" {
+    @setEvalBranchQuota(10000);
+    
+    var bs = BitSet256.init();
+    
+    // Test set and isSet
+    bs.set(0);
+    try std.testing.expect(bs.isSet(0));
+    try std.testing.expect(!bs.isSet(1));
+    
+    bs.set(63);
+    try std.testing.expect(bs.isSet(63));
+    
+    bs.set(64);
+    try std.testing.expect(bs.isSet(64));
+    
+    bs.set(255);
+    try std.testing.expect(bs.isSet(255));
+    
+    // Test clear
+    bs.clear(0);
+    try std.testing.expect(!bs.isSet(0));
+    try std.testing.expect(bs.isSet(63));
+    try std.testing.expect(bs.isSet(64));
+    try std.testing.expect(bs.isSet(255));
+    
+    // Test rank
+    try std.testing.expectEqual(@as(usize, 0), bs.rank(0));
+    try std.testing.expectEqual(@as(usize, 1), bs.rank(63));
+    try std.testing.expectEqual(@as(usize, 2), bs.rank(64));
+    try std.testing.expectEqual(@as(usize, 3), bs.rank(255));
+    
+    // Test nextSet
+    try std.testing.expectEqual(@as(u8, 63), bs.nextSet(0).?);
+    try std.testing.expectEqual(@as(u8, 64), bs.nextSet(63).?);
+    try std.testing.expectEqual(@as(u8, 255), bs.nextSet(64).?);
+    try std.testing.expect(bs.nextSet(255) == null);
 } 

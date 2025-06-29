@@ -47,7 +47,7 @@ def plot_basic_benchmark():
     ax3.set_title('Match Rate vs Prefix Count\nMatch Rate by Prefix Count')
     ax3.grid(True)
     
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Reserve space for title
+    plt.tight_layout(rect=(0, 0, 1, 0.96))  # Reserve space for title
     plt.savefig('assets/basic_benchmark.png', dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -84,7 +84,7 @@ def plot_realistic_benchmark():
     ax2.grid(True)
     ax2.legend()
     
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Reserve space for title
+    plt.tight_layout(rect=(0, 0, 1, 0.96))  # Reserve space for title
     plt.savefig('assets/realistic_benchmark.png', dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -111,7 +111,7 @@ def plot_advanced_benchmark():
     ax2.set_title('Memory Fragmentation Impact\nMemory Fragmentation Impact')
     ax2.grid(True)
     
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Reserve space for title
+    plt.tight_layout(rect=(0, 0, 1, 0.96))  # Reserve space for title
     plt.savefig('assets/advanced_benchmark.png', dpi=300, bbox_inches='tight')
     plt.close()
 
