@@ -119,6 +119,18 @@ pub fn Array256(comptime T: type) type {
             };
         }
         
+        /// deepCopy: ディープコピー（要素がポインタや構造体の場合も再帰的にコピー）
+        pub fn deepCopy(self: *const Self, allocator: std.mem.Allocator, cloneFn: fn (*const T, std.mem.Allocator) T) Self {
+            var new_items = std.ArrayList(T).init(allocator);
+            for (self.items.items) |*item| {
+                new_items.append(cloneFn(item, allocator)) catch unreachable;
+            }
+            return Self{
+                .bitset = self.bitset,
+                .items = new_items,
+            };
+        }
+        
         /// InsertAt a value at i into the sparse array.
         /// If the value already exists, overwrite it with val and return false.
         /// If the value is new, insert it and return true.
@@ -136,6 +148,25 @@ pub fn Array256(comptime T: type) type {
             self.insertItem(self.bitset.rank(i) - 1, value);
             
             return true;  // 新規挿入時はtrue
+        }
+        
+        /// ReplaceAt replaces the value at i and returns the old value if it existed.
+        /// If the value didn't exist, inserts the new value and returns null.
+        pub fn replaceAt(self: *Self, i: u8, value: T) ?T {
+            // slot exists, replace value and return old
+            if (self.bitset.isSet(i)) {
+                const old_value = self.items.items[self.bitset.rank(i) - 1];
+                self.items.items[self.bitset.rank(i) - 1] = value;
+                return old_value;
+            }
+            
+            // new, insert into bitset ...
+            self.bitset.set(i);
+            
+            // ... and slice
+            self.insertItem(self.bitset.rank(i) - 1, value);
+            
+            return null;  // 新規挿入時はnull
         }
         
         /// DeleteAt a value at i from the sparse array, zeroes the tail.

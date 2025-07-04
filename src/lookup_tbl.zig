@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const BitSet256 = @import("bitset256.zig").BitSet256;
+const base_index = @import("base_index.zig");
 
 /// BackTrackingBitset returns the backtracking bitset for the given index
 /// This allows a one shot bitset intersection algorithm instead of
@@ -33,6 +34,57 @@ pub const lookupTbl = blk: {
     }
     break :blk arr;
 };
+
+/// IdxToPrefixRoutes: インデックスに対して、そのプレフィックスによってカバーされる
+/// より長いプレフィックスのビットセットを返す
+pub fn idxToPrefixRoutes(idx: u8) BitSet256 {
+    var result = BitSet256.init();
+    
+    if (idx == 0) return result; // invalid
+    
+    // このプレフィックスがカバーする範囲のより具体的なプレフィックスを設定
+    // 2*idx と 2*idx+1 が子ノードのインデックス
+    const left_child = 2 * idx;
+    const right_child = 2 * idx + 1;
+    
+    if (left_child <= 255) {
+        result.set(left_child);
+    }
+    if (right_child <= 255) {
+        result.set(right_child);
+    }
+    
+    return result;
+}
+
+/// IdxToFringeRoutes: インデックスに対して、そのプレフィックスによってカバーされる
+/// 子ノードアドレスのビットセットを返す
+pub fn idxToFringeRoutes(idx: u8) BitSet256 {
+    // 簡略化実装: プレフィックスがカバーするアドレス範囲を計算
+    var result = BitSet256.init();
+    
+    if (idx == 0) return result; // invalid
+    
+    // プレフィックスの範囲を計算
+    const pfx = base_index.idxToPfx256(idx) catch return result;
+    if (pfx.pfx_len >= 8) {
+        // ホストルート - 単一アドレス
+        result.set(pfx.octet);
+    } else {
+        // ネットワークルート - 範囲
+        const mask = base_index.netMask(pfx.pfx_len);
+        const network = pfx.octet & mask;
+        const range_size = @as(u16, 1) << @intCast(8 - pfx.pfx_len);
+        
+        var addr: u16 = network;
+        while (addr < network + range_size and addr <= 255) {
+            result.set(@intCast(addr));
+            addr += 1;
+        }
+    }
+    
+    return result;
+}
 
 test "backTrackingBitset basic" {
     var bs1 = backTrackingBitset(1);
@@ -80,4 +132,23 @@ test "lookupTbl consistency" {
             bit += 1;
         }
     }
+}
+
+test "idxToPrefixRoutes basic" {
+    // 基本的なプレフィックスルートテスト
+    const result1 = idxToPrefixRoutes(1);
+    try std.testing.expect(result1.isSet(2));
+    try std.testing.expect(result1.isSet(3));
+    
+    const result0 = idxToPrefixRoutes(0);
+    try std.testing.expect(result0.isEmpty());
+}
+
+test "idxToFringeRoutes basic" {
+    // 基本的なフリンジルートテスト
+    const result1 = idxToFringeRoutes(1);
+    try std.testing.expect(!result1.isEmpty());
+    
+    const result0 = idxToFringeRoutes(0);
+    try std.testing.expect(result0.isEmpty());
 } 
