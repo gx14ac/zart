@@ -49,6 +49,21 @@ pub fn Node(comptime V: type) type {
         }
         
         pub fn deinit(self: *Self) void {
+            // 子ノードの再帰的解放
+            var i: usize = 0;
+            while (i < 256) : (i += 1) {
+                const idx = std.math.cast(u8, i) orelse break;
+                if (self.children.isSet(idx)) {
+                    const child = self.children.mustGet(idx);
+                    switch (child) {
+                        .node => |node_ptr| {
+                            node_ptr.deinit();
+                            self.children.items.allocator.destroy(node_ptr);
+                        },
+                        else => {},
+                    }
+                }
+            }
             self.prefixes.deinit();
             self.children.deinit();
         }
@@ -87,7 +102,7 @@ pub fn Node(comptime V: type) type {
                     else => unreachable,
                 }
             }
-            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
             var octet_val: u8 = 0;
             if (octets.len > prefix_byte_idx) {
                 octet_val = octets[prefix_byte_idx];
@@ -137,7 +152,7 @@ pub fn Node(comptime V: type) type {
                     else => return null,
                 }
             }
-            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
             var octet_val: u8 = 0;
             if (octets.len > prefix_byte_idx) {
                 octet_val = octets[prefix_byte_idx];
@@ -209,7 +224,7 @@ pub fn Node(comptime V: type) type {
                 }
             }
             if (depth == max_depth) {
-                const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+                const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
                 var octet: u8 = 0;
                 if (octets.len > prefix_byte_idx) {
                     octet = octets[prefix_byte_idx];
@@ -227,7 +242,7 @@ pub fn Node(comptime V: type) type {
                 current_node = stack[stack_idx];
                 const actual_depth = @as(usize, @intCast(d)) + 1;
                 const octet: u8 = if (actual_depth <= octets.len) octets[actual_depth - 1] else 0;
-                const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+                const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
                 var prefix_octet: u8 = 0;
                 if (octets.len > prefix_byte_idx) {
                     prefix_octet = octets[prefix_byte_idx];
@@ -267,7 +282,7 @@ pub fn Node(comptime V: type) type {
                         break;
                     }
                 }
-                const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+                const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
                 var octet: u8 = 0;
                 if (octets.len > prefix_byte_idx) {
                     octet = octets[prefix_byte_idx];
@@ -318,7 +333,7 @@ pub fn Node(comptime V: type) type {
                     },
                 }
             }
-            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
             var octet_val: u8 = 0;
             if (octets.len > prefix_byte_idx) {
                 octet_val = octets[prefix_byte_idx];
@@ -355,7 +370,7 @@ pub fn Node(comptime V: type) type {
                     else => break,
                 }
             }
-            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
             var octet_val: u8 = 0;
             if (octets.len > prefix_byte_idx) {
                 octet_val = octets[prefix_byte_idx];
@@ -403,7 +418,7 @@ pub fn Node(comptime V: type) type {
                     },
                 }
             }
-            const prefix_byte_idx: usize = if (bits > 0) (bits / 8) - 1 else 0;
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
             var octet_val: u8 = 0;
             if (octets.len > prefix_byte_idx) {
                 octet_val = octets[prefix_byte_idx];

@@ -57,6 +57,15 @@ pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
 
     const pfx_len = @as(u8, @intCast(std.math.log2_int(u8, idx)));
     const shift_bits = 8 - pfx_len;
+    
+    // shift_bitsが8の場合（pfx_len=0）は特別処理
+    if (shift_bits == 8) {
+        return .{
+            .octet = 0,
+            .pfx_len = 0,
+        };
+    }
+    
     const mask = @as(u8, 0xff) >> @intCast(shift_bits);
     const octet = (idx & mask) << @intCast(shift_bits);
 

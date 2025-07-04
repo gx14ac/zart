@@ -24,78 +24,15 @@ pub fn backTrackingBitset(idx: usize) BitSet256 {
 
 /// Lookup table for backtracking bitsets
 /// Each entry contains the backtracking sequence for that index
-pub const lookupTbl = [_]BitSet256{
-    // idx: 0 - invalid
-    BitSet256.init(),
-    
-    // idx: 1-63 - first 64 entries
-    BitSet256.fromSlice(&[_]u8{1}),
-    BitSet256.fromSlice(&[_]u8{ 1, 2 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 8 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 9 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 10 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 11 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 12 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 13 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 14 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 15 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 8, 16 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 8, 17 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 9, 18 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 9, 19 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 10, 20 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 10, 21 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 11, 22 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 11, 23 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 12, 24 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 12, 25 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 13, 26 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 13, 27 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 14, 28 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 14, 29 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 15, 30 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 15, 31 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 8, 16, 32 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 8, 16, 33 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 8, 17, 34 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 8, 17, 35 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 9, 18, 36 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 9, 18, 37 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 9, 19, 38 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 4, 9, 19, 39 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 10, 20, 40 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 10, 20, 41 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 10, 21, 42 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 10, 21, 43 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 11, 22, 44 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 11, 22, 45 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 11, 23, 46 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 2, 5, 11, 23, 47 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 12, 24, 48 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 12, 24, 49 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 12, 25, 50 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 12, 25, 51 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 13, 26, 52 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 13, 26, 53 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 13, 27, 54 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 6, 13, 27, 55 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 14, 28, 56 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 14, 28, 57 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 14, 29, 58 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 14, 29, 59 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 15, 30, 60 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 15, 30, 61 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 15, 31, 62 }),
-    BitSet256.fromSlice(&[_]u8{ 1, 3, 7, 15, 31, 63 }),
-    
-    // 残りのエントリは簡略化のため空のビットセットで初期化
-    // 実際の実装では、Go実装と同様に512個のエントリを完全に定義する必要があります
-} ** (512 - 64);
+pub const lookupTbl = blk: {
+    @setEvalBranchQuota(100000);
+    var arr: [512]BitSet256 = undefined;
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        arr[i] = backTrackingBitset(i);
+    }
+    break :blk arr;
+};
 
 test "backTrackingBitset basic" {
     var bs1 = backTrackingBitset(1);
@@ -111,4 +48,36 @@ test "backTrackingBitset basic" {
     try std.testing.expect(bs3.isSet(1));
     try std.testing.expect(bs3.isSet(3));
     try std.testing.expect(!bs3.isSet(2));
+}
+
+test "lookupTbl basic" {
+    // 基本的なルックアップテーブルのテスト
+    try std.testing.expect(lookupTbl[0].isEmpty());
+    try std.testing.expect(lookupTbl[1].isSet(1));
+    try std.testing.expect(lookupTbl[2].isSet(1));
+    try std.testing.expect(lookupTbl[2].isSet(2));
+    try std.testing.expect(lookupTbl[3].isSet(1));
+    try std.testing.expect(lookupTbl[3].isSet(3));
+    
+    // ホストアドレスのテスト（256-511）
+    try std.testing.expect(lookupTbl[256].isSet(0)); // 256 -> 0
+    try std.testing.expect(lookupTbl[257].isSet(1)); // 257 -> 1
+    try std.testing.expect(lookupTbl[511].isSet(255)); // 511 -> 255
+}
+
+test "lookupTbl consistency" {
+    // 動的生成とルックアップテーブルの一貫性テスト（サンプルテスト）
+    const test_indices = [_]usize{ 0, 1, 2, 3, 10, 100, 255, 256, 257, 511 };
+    for (test_indices) |i| {
+        const dynamic = backTrackingBitset(i);
+        const lookup = lookupTbl[i];
+        
+        // すべてのビットが一致することを確認
+        var bit: u8 = 0;
+        while (true) {
+            try std.testing.expectEqual(dynamic.isSet(bit), lookup.isSet(bit));
+            if (bit == 255) break;
+            bit += 1;
+        }
+    }
 } 

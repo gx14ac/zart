@@ -3,9 +3,9 @@
 ## 実装すべき機能
 
 ### 1. 高度なLPM機能
-- [ ] LookupPrefixLPM: プレフィックス自体のLPM検索
-- [ ] Supernets: 指定プレフィックスの上位ネットワーク検索  
-- [ ] Subnets: 指定プレフィックスの下位ネットワーク検索
+- [x] LookupPrefixLPM: プレフィックス自体のLPM検索
+- [x] Supernets: 指定プレフィックスの上位ネットワーク検索  
+- [x] Subnets: 指定プレフィックスの下位ネットワーク検索
 
 ### 2. 不変性機能
 - [ ] InsertPersist: 元のテーブルを変更せずに新しいテーブルを返す
