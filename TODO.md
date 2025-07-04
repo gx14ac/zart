@@ -1,22 +1,66 @@
-## TODO
-- Implement prefix deletion functionality
-- Add iteration functionality (traverse all prefixes)
-- Prefix update functionality
-- Memory usage optimization (more efficient memory layout than current implementation)
-- Enhanced error handling
-- Cache line optimization
-- SIMD instruction utilization (especially bitmap operations)
-- Memory alignment optimization
-- Atomic operation optimization
-- Memory pool introduction for allocation optimization
-- More fine-grained locking mechanism implementation
-- Consider lock-free algorithms
-- Thread-local storage utilization
-- Enhanced memory fragmentation countermeasures for concurrent processing
-- Race condition testing for concurrent processing
-- Edge case testing enhancement
-- Documentation and tools:
-- Comprehensive API documentation
-- Usage examples addition
-- Debug tool development
-- Profiling tool integration
+# ZART (Zig ART) - TODO List
+
+## 実装すべき機能
+
+### 1. 高度なLPM機能
+- [x] LookupPrefixLPM: プレフィックス自体のLPM検索
+- [x] Supernets: 指定プレフィックスの上位ネットワーク検索  
+- [x] Subnets: 指定プレフィックスの下位ネットワーク検索
+
+### 2. 不変性機能
+- [ ] InsertPersist: 元のテーブルを変更せずに新しいテーブルを返す
+- [ ] UpdatePersist: 不変な更新操作
+- [ ] DeletePersist: 不変な削除操作
+- [ ] Clone: 完全なクローン機能
+
+### 3. オーバーラップ検出
+- [ ] Overlaps: 2つのテーブル間のオーバーラップ検出
+- [ ] OverlapsPrefix: 単一プレフィックスのオーバーラップ検出
+- [ ] Overlaps4/Overlaps6: IPv4/IPv6専用オーバーラップ検出
+
+### 4. ユニオン操作
+- [ ] Union: 2つのテーブルの結合
+
+### 5. シリアライゼーション
+- [ ] Fprint: 階層的なツリー表示
+- [ ] MarshalJSON: JSON形式での出力
+- [ ] DumpList4/DumpList6: 構造化されたリスト出力
+
+### 6. Lite版
+- [ ] Lite: ペイロードなしの軽量版（ACL用途）
+
+### 7. ビットセット最適化
+- [ ] LPMルックアップテーブル: 事前計算されたバックトラッキングビットセット
+- [ ] SIMD命令を使ったビットセット操作
+
+### 8. パス圧縮
+- [ ] FringeNode: 特殊なパス圧縮ノード
+- [ ] LeafNode: リーフノードの最適化
+
+## 実装順序
+
+1. **LPMルックアップテーブル** (今やること)
+2. 不変性機能
+3. オーバーラップ検出
+4. 高度な検索機能
+5. シリアライゼーション
+6. Lite版
+7. パス圧縮の最適化
+
+## メモ
+
+### LPMルックアップテーブル
+- 512エントリの事前計算テーブル
+- 各エントリは256ビットのビットセット
+- バックトラッキングパスを事前計算
+- 高速なビットセット操作でLPMを実現
+
+### 不変性機能
+- 元のテーブルを変更せずに新しいテーブルを返す
+- パフォーマンスは通常の操作より遅い（μsec vs nsec）
+- ロックフリー更新に使用
+
+### オーバーラップ検出
+- 2つのテーブル間のIPアドレス重複検出
+- ビットセット操作による高速化
+- 階層的な検索アルゴリズム

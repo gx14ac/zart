@@ -114,7 +114,23 @@ fn measureMemoryUsage() !usize {
     return error.UnsupportedOS;
 }
 
-// Function to randomly select prefix length based on weights
+// Function to randomly select prefix length based on weights using std.crypto.random
+fn selectRandomPrefixLengthCrypto(distribution: []const PrefixLengthDistribution) u8 {
+    var total_weight: u32 = 0;
+    for (distribution) |item| {
+        total_weight += item.weight;
+    }
+    var r = std.crypto.random.uintAtMost(u32, total_weight - 1);
+    for (distribution) |item| {
+        if (r < item.weight) {
+            return item.length;
+        }
+        r -= item.weight;
+    }
+    return distribution[distribution.len - 1].length;
+}
+
+// Function to randomly select prefix length based on weights (legacy function for compatibility)
 fn selectRandomPrefixLength(random: std.Random, distribution: []const PrefixLengthDistribution) u8 {
     var total_weight: u32 = 0;
     for (distribution) |item| {
@@ -182,7 +198,6 @@ const CacheTestConfig = struct {
 fn runCacheTest(
     table: *bart.BartTable,
     config: CacheTestConfig,
-    random: std.Random,
 ) !struct {
     warmup_time: u64,
     test_time: u64,
@@ -191,7 +206,7 @@ fn runCacheTest(
     var warmup_timer = try Timer.start();
     var i: u32 = 0;
     while (i < config.warmup_iterations) : (i += 1) {
-        const ip_addr = random.int(u32);
+        const ip_addr = std.crypto.random.int(u32);
         var found: i32 = 0;
         _ = bart.bart_lookup4(table, ip_addr, &found);
     }
@@ -201,7 +216,7 @@ fn runCacheTest(
     var hits: u32 = 0;
     i = 0;
     while (i < config.test_iterations) : (i += 1) {
-        const ip_addr = random.int(u32);
+        const ip_addr = std.crypto.random.int(u32);
         var found: i32 = 0;
         _ = bart.bart_lookup4(table, ip_addr, &found);
         if (found != 0) hits += 1;
@@ -388,8 +403,6 @@ fn writeBenchmarkResultsToCSV(
 // Function to run more realistic benchmark
 fn runRealisticBenchmark(config: Config) !BenchmarkResult {
     const stdout = std.io.getStdOut().writer();
-    var prng = std.rand.DefaultPrng.init(config.random_seed);
-    const random = prng.random();
 
     // Measure initial memory usage
     const initial_mem = try measureMemoryUsage();
@@ -430,8 +443,8 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
             var i: u32 = 0;
             while (i < config.prefix_count) : (i += 1) {
                 random_prefixes[i] = .{
-                    .ip = random.int(u32),
-                    .length = selectRandomPrefixLength(random, config.prefix_length_distribution),
+                    .ip = std.crypto.random.int(u32),
+                    .length = selectRandomPrefixLengthCrypto(config.prefix_length_distribution),
                 };
             }
             break :blk PrefixData{
@@ -489,7 +502,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
         .test_iterations = 10_000_000,
         .cache_size = 1024 * 1024, // 1MB
     };
-    const cache_test_results = try runCacheTest(@constCast(table), cache_test_config, random);
+    const cache_test_results = try runCacheTest(@constCast(table), cache_test_config);
     try stdout.print("\nCache Test Results:\n", .{});
     try stdout.print("  Warmup Time: {s}\n", .{formatDuration(cache_test_results.warmup_time)});
     try stdout.print("  Test Time: {s}\n", .{formatDuration(cache_test_results.test_time)});
@@ -501,7 +514,7 @@ fn runRealisticBenchmark(config: Config) !BenchmarkResult {
     var match_count: u32 = 0;
     var i: u32 = 0;
     while (i < config.lookup_count) : (i += 1) {
-        const ip_addr = random.int(u32);
+        const ip_addr = std.crypto.random.int(u32);
         var found: i32 = 0;
         _ = bart.bart_lookup4(@constCast(table), ip_addr, &found);
         if (found != 0) match_count += 1;

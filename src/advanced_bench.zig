@@ -180,7 +180,7 @@ fn threadLookupTest(
     };
 
     // Initialize random number generator
-    var prng = std.rand.DefaultPrng.init(42 + thread_id);
+    var prng = std.Random.DefaultPrng.init(42 + thread_id);
     const random = prng.random();
     var matches: u64 = 0;
 
@@ -279,7 +279,7 @@ fn printBenchmarkResult(result: BenchmarkResult, thread_results: []const ThreadR
 
 fn runMultiThreadedBenchmark(config: TestConfig) !BenchmarkResult {
     const stdout = std.io.getStdOut().writer();
-    var prng = std.rand.DefaultPrng.init(config.random_seed);
+    var prng = std.Random.DefaultPrng.init(config.random_seed);
     const random = prng.random();
 
     // Create table

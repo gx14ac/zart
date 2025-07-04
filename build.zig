@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // 静的ライブラリlibbart.aのビルド設定
+
     const lib = b.addStaticLibrary(.{
         .name = "bart",
         .root_source_file = b.path("src/main.zig"),
@@ -11,34 +11,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true, 
     });
-    // ヘッダファイルをインストール (zig-out/include/bart.h)
     lib.installHeader(b.path("src/bart.h"), "bart.h");
     b.installArtifact(lib);
 
-    // ベンチマーク実行ファイルのビルド設定
     const bench_exe = b.addExecutable(.{
         .name = "bench",
         .root_source_file = b.path("src/bench.zig"),
         .target = target,
         .optimize = optimize,
     });
-    // ライブラリをリンク
     bench_exe.linkLibrary(lib);
     b.installArtifact(bench_exe);
 
-    // ベンチマーク実行用のステップを追加
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run the benchmarks");
     bench_step.dependOn(&run_bench.step);
 
-    // ベンチマーク実行ファイルのビルド設定
     const rt_bench_exe = b.addExecutable(.{
         .name = "rt_bench",
         .root_source_file = b.path("src/rt_bench.zig"),
         .target = target,
         .optimize = optimize,
     });
-    // ライブラリをリンク
     rt_bench_exe.linkLibrary(lib);
     b.installArtifact(rt_bench_exe);
 
@@ -46,7 +40,6 @@ pub fn build(b: *std.Build) void {
     const rt_bench_step = b.step("rt_bench", "Run the rt benchmarks");
     rt_bench_step.dependOn(&run_rt_bench.step);
 
-    // 高度なベンチマーク実行ファイル
     const advanced_bench_exe = b.addExecutable(.{
         .name = "advanced_bench",
         .root_source_file = b.path("src/advanced_bench.zig"),
@@ -56,7 +49,6 @@ pub fn build(b: *std.Build) void {
     advanced_bench_exe.linkLibrary(lib);
     b.installArtifact(advanced_bench_exe);
 
-    // 高度なベンチマーク実行ステップ
     const run_advanced_bench = b.addRunArtifact(advanced_bench_exe);
     const advanced_bench_step = b.step("advanced_bench", "Run advanced benchmarks");
     advanced_bench_step.dependOn(&run_advanced_bench.step);
@@ -80,4 +72,13 @@ pub fn build(b: *std.Build) void {
     const run_base_index_tests = b.addRunArtifact(base_index_tests);
     const base_index_test_step = b.step("base_index_test", "Run base_index tests");
     base_index_test_step.dependOn(&run_base_index_tests.step);
+
+    const test_basic_tests = b.addTest(.{
+        .root_source_file = b.path("src/test_basic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_test_basic_tests = b.addRunArtifact(test_basic_tests);
+    const test_basic_test_step = b.step("test_basic_test", "Run test_basic tests");
+    test_basic_test_step.dependOn(&run_test_basic_tests.step);
 }

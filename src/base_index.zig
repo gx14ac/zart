@@ -57,6 +57,15 @@ pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
 
     const pfx_len = @as(u8, @intCast(std.math.log2_int(u8, idx)));
     const shift_bits = 8 - pfx_len;
+    
+    // shift_bitsが8の場合（pfx_len=0）は特別処理
+    if (shift_bits == 8) {
+        return .{
+            .octet = 0,
+            .pfx_len = 0,
+        };
+    }
+    
     const mask = @as(u8, 0xff) >> @intCast(shift_bits);
     const octet = (idx & mask) << @intCast(shift_bits);
 
@@ -100,6 +109,13 @@ pub fn netMask(bits: u8) u8 {
     if (bits == 0) return 0;
     const shift: u3 = @intCast(8 - bits);
     return @as(u8, 0xff) << shift;
+}
+
+/// Return max_depth (stride数) と last_bits (最後のstride未満のビット数)
+pub fn maxDepthAndLastBits(bits: u8) struct { max_depth: usize, last_bits: u8 } {
+    const max_depth = bits / 8;
+    const last_bits = bits % 8;
+    return .{ .max_depth = max_depth, .last_bits = last_bits };
 }
 
 // Tests
