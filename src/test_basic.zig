@@ -3,6 +3,7 @@ const Table = @import("table.zig").Table;
 const Prefix = @import("node.zig").Prefix;
 const IPAddr = @import("node.zig").IPAddr;
 const Array256 = @import("sparse_array256.zig").Array256;
+const node = @import("node.zig");
 
 // =============================================================================
 // ルーティングテーブルの基本操作テスト
@@ -185,7 +186,8 @@ test "プレフィックスの削除操作" {
     
     // プレフィックスを削除
     const deleted = table.getAndDelete(&pfx1);
-    try std.testing.expectEqual(@as(?u32, 100), deleted);  // 削除された値を確認
+    try std.testing.expectEqual(@as(u32, 100), deleted.value);  // 削除された値を確認
+    try std.testing.expect(deleted.ok);  // 削除成功を確認
     
     // 削除後の確認
     try std.testing.expectEqual(@as(usize, 1), table.size());      // サイズが1減る
@@ -317,4 +319,155 @@ test "Array256の読み取り・書き込み操作" {
     // 存在しない位置の確認
     try std.testing.expect(!arr_val.isSet(10));  // 位置10は設定されていない
     try std.testing.expectEqual(@as(?u32, null), arr_val.get(10));  // nullが返される
+}
+
+test "Table supernets" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // Insert some prefixes
+    const v4_addr1 = node.IPAddr{ .v4 = .{ 192, 168, 0, 0 } };
+    const v4_addr2 = node.IPAddr{ .v4 = .{ 192, 168, 1, 0 } };
+    const v4_addr3 = node.IPAddr{ .v4 = .{ 192, 0, 0, 0 } };
+    const v4_addr4 = node.IPAddr{ .v4 = .{ 0, 0, 0, 0 } };
+
+    const pfx1 = node.Prefix.init(&v4_addr1, 16);
+    const pfx2 = node.Prefix.init(&v4_addr2, 24);
+    const pfx3 = node.Prefix.init(&v4_addr3, 8);
+    const pfx4 = node.Prefix.init(&v4_addr4, 0);
+
+    table.insert(&pfx1, 1);
+    table.insert(&pfx2, 2);
+    table.insert(&pfx3, 3);
+    table.insert(&pfx4, 4);
+
+    // Test supernets of 192.168.1.0/24
+    var count: usize = 0;
+    var supernets = table.supernets(&pfx2);
+    while (supernets.next()) |entry| {
+        count += 1;
+        if (entry.prefix.bits == 16) {
+            try std.testing.expectEqual(@as(u32, 1), entry.value);
+        } else if (entry.prefix.bits == 8) {
+            try std.testing.expectEqual(@as(u32, 3), entry.value);
+        } else if (entry.prefix.bits == 0) {
+            try std.testing.expectEqual(@as(u32, 4), entry.value);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "Table InsertPersist" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // 初期データを挿入
+    const v4_addr1 = node.IPAddr{ .v4 = .{ 192, 168, 0, 0 } };
+    const pfx1 = node.Prefix.init(&v4_addr1, 16);
+    table.insert(&pfx1, 100);
+
+    // InsertPersistで新しいテーブルを作成
+    const v4_addr2 = node.IPAddr{ .v4 = .{ 192, 168, 1, 0 } };
+    const pfx2 = node.Prefix.init(&v4_addr2, 24);
+    const new_table = table.insertPersist(&pfx2, 200);
+    defer new_table.deinit();
+
+    // 元のテーブルには新しいプレフィックスがないことを確認
+    try std.testing.expect(table.get(&pfx2) == null);
+    try std.testing.expectEqual(@as(usize, 1), table.size());
+
+    // 新しいテーブルには両方のプレフィックスがあることを確認
+    try std.testing.expectEqual(@as(u32, 100), new_table.get(&pfx1).?);
+    try std.testing.expectEqual(@as(u32, 200), new_table.get(&pfx2).?);
+    try std.testing.expectEqual(@as(usize, 2), new_table.size());
+}
+
+test "Table UpdatePersist" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // 初期データを挿入
+    const v4_addr1 = node.IPAddr{ .v4 = .{ 192, 168, 0, 0 } };
+    const pfx1 = node.Prefix.init(&v4_addr1, 16);
+    table.insert(&pfx1, 100);
+
+    // UpdatePersistで値を更新
+    const result = table.updatePersist(&pfx1, struct {
+        fn update(val: u32, ok: bool) u32 {
+            _ = ok;
+            return val + 50;
+        }
+    }.update);
+    defer result.table.deinit();
+
+    // 元のテーブルの値は変わらないことを確認
+    try std.testing.expectEqual(@as(u32, 100), table.get(&pfx1).?);
+
+    // 新しいテーブルの値は更新されていることを確認
+    try std.testing.expectEqual(@as(u32, 150), result.table.get(&pfx1).?);
+    try std.testing.expectEqual(@as(u32, 150), result.value);
+}
+
+test "Table DeletePersist" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // 初期データを挿入
+    const v4_addr1 = node.IPAddr{ .v4 = .{ 192, 168, 0, 0 } };
+    const v4_addr2 = node.IPAddr{ .v4 = .{ 192, 168, 1, 0 } };
+    const pfx1 = node.Prefix.init(&v4_addr1, 16);
+    const pfx2 = node.Prefix.init(&v4_addr2, 24);
+    table.insert(&pfx1, 100);
+    table.insert(&pfx2, 200);
+
+    // DeletePersistで削除
+    const new_table = table.deletePersist(&pfx2);
+    defer new_table.deinit();
+
+    // 元のテーブルには両方のプレフィックスがあることを確認
+    try std.testing.expectEqual(@as(u32, 100), table.get(&pfx1).?);
+    try std.testing.expectEqual(@as(u32, 200), table.get(&pfx2).?);
+    try std.testing.expectEqual(@as(usize, 2), table.size());
+
+    // 新しいテーブルには削除されたプレフィックスがないことを確認
+    try std.testing.expectEqual(@as(u32, 100), new_table.get(&pfx1).?);
+    try std.testing.expect(new_table.get(&pfx2) == null);
+    try std.testing.expectEqual(@as(usize, 1), new_table.size());
+}
+
+test "Table Clone" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // 初期データを挿入
+    const v4_addr1 = node.IPAddr{ .v4 = .{ 192, 168, 0, 0 } };
+    const v4_addr2 = node.IPAddr{ .v4 = .{ 192, 168, 1, 0 } };
+    const pfx1 = node.Prefix.init(&v4_addr1, 16);
+    const pfx2 = node.Prefix.init(&v4_addr2, 24);
+    table.insert(&pfx1, 100);
+    table.insert(&pfx2, 200);
+
+    // テーブルをクローン
+    const cloned = table.clone();
+    defer cloned.deinit();
+
+    // クローンには同じデータがあることを確認
+    try std.testing.expectEqual(@as(u32, 100), cloned.get(&pfx1).?);
+    try std.testing.expectEqual(@as(u32, 200), cloned.get(&pfx2).?);
+    try std.testing.expectEqual(@as(usize, 2), cloned.size());
+
+    // クローンに新しいデータを追加しても元のテーブルには影響しないことを確認
+    const v4_addr3 = node.IPAddr{ .v4 = .{ 192, 168, 2, 0 } };
+    const pfx3 = node.Prefix.init(&v4_addr3, 24);
+    cloned.insert(&pfx3, 300);
+
+    try std.testing.expect(table.get(&pfx3) == null);
+    try std.testing.expectEqual(@as(usize, 2), table.size());
+    try std.testing.expectEqual(@as(u32, 300), cloned.get(&pfx3).?);
+    try std.testing.expectEqual(@as(usize, 3), cloned.size());
 } 

@@ -110,14 +110,13 @@ pub fn Array256(comptime T: type) type {
         
         /// Copy returns a shallow copy of the Array.
         /// The elements are copied using assignment, this is no deep clone.
-        pub fn copy(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            const copy_ptr = try allocator.create(Self);
-            copy_ptr.* = Self{
+        pub fn copy(self: *const Self) Self {
+            var new_items = std.ArrayList(T).init(self.items.allocator);
+            new_items.appendSlice(self.items.items) catch unreachable;
+            return Self{
                 .bitset = self.bitset,
-                .items = std.ArrayList(T).init(allocator),
+                .items = new_items,
             };
-            try copy_ptr.items.appendSlice(self.items.items);
-            return copy_ptr;
         }
         
         /// InsertAt a value at i into the sparse array.

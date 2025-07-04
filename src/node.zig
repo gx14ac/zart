@@ -112,6 +112,87 @@ pub fn Node(comptime V: type) type {
             return inserted;
         }
         
+        /// insertAtDepthPersist is the immutable version of insertAtDepth.
+        /// All visited nodes are cloned during insertion.
+        pub fn insertAtDepthPersist(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
+            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
+            var current_depth = depth;
+            var current_node = self;
+            
+            while (current_depth < max_depth) : (current_depth += 1) {
+                var octet: u8 = 0;
+                if (current_depth < octets.len) {
+                    octet = octets[current_depth];
+                }
+                
+                // 子ノードが存在しない場合、新規作成
+                if (!current_node.children.isSet(octet)) {
+                    const new_node = allocator.create(Node(V)) catch unreachable;
+                    new_node.* = Node(V).init(allocator);
+                    const child = Child(V){ .node = new_node };
+                    _ = current_node.children.insertAt(octet, child);
+                    current_node = new_node;
+                    continue;
+                }
+                
+                // 既存の子ノードを取得
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        // ノードをクローンして置き換える
+                        const cloned = node.cloneFlat(allocator);
+                        _ = current_node.children.insertAt(octet, Child(V){ .node = cloned });
+                        current_node = cloned;
+                    },
+                    .leaf => |leaf| {
+                        // リーフに到達した場合
+                        if (leaf.prefix.eql(pfx.*)) {
+                            // 同じプレフィックスの場合、値を更新
+                            const new_leaf = LeafNode(V){ .prefix = leaf.prefix, .value = val };
+                            _ = current_node.children.insertAt(octet, Child(V){ .leaf = new_leaf });
+                            return true; // 既存値の更新
+                        }
+                        
+                        // 異なるプレフィックスの場合、新しいノードを作成
+                        const new_node = allocator.create(Node(V)) catch unreachable;
+                        new_node.* = Node(V).init(allocator);
+                        _ = new_node.insertAtDepth(&leaf.prefix, leaf.value, current_depth + 1, allocator);
+                        _ = current_node.children.insertAt(octet, Child(V){ .node = new_node });
+                        current_node = new_node;
+                    },
+                    .fringe => |fringe| {
+                        // フリンジに到達した場合
+                        if (isFringe(current_depth, bits)) {
+                            // 同じ深さのフリンジの場合、値を更新
+                            const new_fringe = FringeNode(V){ .value = val };
+                            _ = current_node.children.insertAt(octet, Child(V){ .fringe = new_fringe });
+                            return true; // 既存値の更新
+                        }
+                        
+                        // 異なる深さの場合、新しいノードを作成
+                        const new_node = allocator.create(Node(V)) catch unreachable;
+                        new_node.* = Node(V).init(allocator);
+                        _ = new_node.prefixes.insertAt(1, fringe.value); // フリンジはデフォルトルート（idx=1）として挿入
+                        _ = current_node.children.insertAt(octet, Child(V){ .node = new_node });
+                        current_node = new_node;
+                    },
+                }
+            }
+            
+            // 最終的なプレフィックスを挿入
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
+            }
+            const idx = base_index.pfxToIdx256(octet_val, last_bits);
+            return !current_node.prefixes.insertAt(idx, val); // insertAtは新規挿入時にtrueを返すので反転
+        }
+        
         /// lpmTest tests if there is a longest prefix match for idx
         pub fn lpmTest(self: *const Self, idx: usize) bool {
             var bs: bitset256.BitSet256 = @as(bitset256.BitSet256, lookup_tbl.backTrackingBitset(idx));
@@ -380,6 +461,107 @@ pub fn Node(comptime V: type) type {
             return .{ .value = result.new_value, .was_present = result.was_present };
         }
 
+        /// updateAtDepthPersist is the immutable version of update.
+        /// All visited nodes are cloned during update.
+        pub fn updateAtDepthPersist(self: *Self, pfx: *const Prefix, cb: fn (V, bool) V, depth: usize, allocator: std.mem.Allocator) struct { value: V, was_present: bool } {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
+            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
+            var current_depth = depth;
+            var current_node = self;
+            
+            while (current_depth < max_depth) : (current_depth += 1) {
+                var octet: u8 = 0;
+                if (current_depth < octets.len) {
+                    octet = octets[current_depth];
+                }
+                
+                // 最後のオクテットに到達した場合、プレフィックスを更新
+                if (current_depth == max_depth) {
+                    const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
+                    var octet_val: u8 = 0;
+                    if (octets.len > prefix_byte_idx) {
+                        octet_val = octets[prefix_byte_idx];
+                    }
+                    const idx = base_index.pfxToIdx256(octet_val, last_bits);
+                    const result = current_node.prefixes.updateAt(idx, cb);
+                    return .{ .value = result.new_value, .was_present = result.was_present };
+                }
+                
+                // 子ノードが存在しない場合
+                if (!current_node.children.isSet(octet)) {
+                    // 新しい値を作成
+                    const new_val = cb(undefined, false);
+                    
+                    // パス圧縮されたリーフまたはフリンジとして挿入
+                    if (isFringe(current_depth, bits)) {
+                        _ = current_node.children.insertAt(octet, Child(V){ .fringe = FringeNode(V){ .value = new_val } });
+                    } else {
+                        _ = current_node.children.insertAt(octet, Child(V){ .leaf = LeafNode(V){ .prefix = pfx.*, .value = new_val } });
+                    }
+                    
+                    return .{ .value = new_val, .was_present = false };
+                }
+                
+                // 既存の子ノードを取得
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        // ノードをクローンして置き換える
+                        const cloned = node.cloneFlat(allocator);
+                        _ = current_node.children.insertAt(octet, Child(V){ .node = cloned });
+                        current_node = cloned;
+                    },
+                    .leaf => |leaf| {
+                        // リーフに到達した場合
+                        if (leaf.prefix.eql(pfx.*)) {
+                            // 同じプレフィックスの場合、値を更新
+                            const new_val = cb(leaf.value, true);
+                            const new_leaf = LeafNode(V){ .prefix = leaf.prefix, .value = new_val };
+                            _ = current_node.children.insertAt(octet, Child(V){ .leaf = new_leaf });
+                            return .{ .value = new_val, .was_present = true };
+                        }
+                        
+                        // 異なるプレフィックスの場合、新しいノードを作成
+                        const new_node = allocator.create(Node(V)) catch unreachable;
+                        new_node.* = Node(V).init(allocator);
+                        _ = new_node.insertAtDepth(&leaf.prefix, leaf.value, current_depth + 1, allocator);
+                        _ = current_node.children.insertAt(octet, Child(V){ .node = new_node });
+                        current_node = new_node;
+                    },
+                    .fringe => |fringe| {
+                        // フリンジに到達した場合
+                        if (isFringe(current_depth, bits)) {
+                            // 同じ深さのフリンジの場合、値を更新
+                            const new_val = cb(fringe.value, true);
+                            const new_fringe = FringeNode(V){ .value = new_val };
+                            _ = current_node.children.insertAt(octet, Child(V){ .fringe = new_fringe });
+                            return .{ .value = new_val, .was_present = true };
+                        }
+                        
+                        // 異なる深さの場合、新しいノードを作成
+                        const new_node = allocator.create(Node(V)) catch unreachable;
+                        new_node.* = Node(V).init(allocator);
+                        _ = new_node.prefixes.insertAt(1, fringe.value); // フリンジはデフォルトルート（idx=1）として挿入
+                        _ = current_node.children.insertAt(octet, Child(V){ .node = new_node });
+                        current_node = new_node;
+                    },
+                }
+            }
+            
+            // 最終的なプレフィックスを更新
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
+            }
+            const idx = base_index.pfxToIdx256(octet_val, last_bits);
+            const result = current_node.prefixes.updateAt(idx, cb);
+            return .{ .value = result.new_value, .was_present = result.was_present };
+        }
+
         pub fn delete(self: *Self, pfx: *const Prefix) ?V {
             const masked_pfx = pfx.masked();
             const ip = &masked_pfx.addr;
@@ -425,6 +607,135 @@ pub fn Node(comptime V: type) type {
             }
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
             return current_node.prefixes.deleteAt(idx);
+        }
+        
+        /// deleteAtDepthPersist is the immutable version of delete.
+        /// All visited nodes are cloned during deletion.
+        pub fn deleteAtDepthPersist(self: *Self, pfx: *const Prefix, depth: usize, allocator: std.mem.Allocator) struct { value: V, ok: bool } {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
+            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
+            var current_depth = depth;
+            var current_node = self;
+            
+            // 削除パスを記録するスタック
+            var stack: [max_tree_depth]*Node(V) = undefined;
+            
+            while (current_depth < max_depth) : (current_depth += 1) {
+                // 現在のノードをスタックに記録
+                stack[current_depth] = current_node;
+                
+                var octet: u8 = 0;
+                if (current_depth < octets.len) {
+                    octet = octets[current_depth];
+                }
+                
+                // 最後のオクテットに到達した場合
+                if (current_depth == max_depth) {
+                    const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
+                    var octet_val: u8 = 0;
+                    if (octets.len > prefix_byte_idx) {
+                        octet_val = octets[prefix_byte_idx];
+                    }
+                    const idx = base_index.pfxToIdx256(octet_val, last_bits);
+                    
+                    if (current_node.prefixes.deleteAt(idx)) |val| {
+                        // 削除後のパージと圧縮処理（必要に応じて実装）
+                        return .{ .value = val, .ok = true };
+                    }
+                    return .{ .value = undefined, .ok = false };
+                }
+                
+                // 子ノードが存在しない場合
+                if (!current_node.children.isSet(octet)) {
+                    return .{ .value = undefined, .ok = false };
+                }
+                
+                // 既存の子ノードを取得
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        // ノードをクローンして置き換える
+                        const cloned = node.cloneFlat(allocator);
+                        _ = current_node.children.insertAt(octet, Child(V){ .node = cloned });
+                        current_node = cloned;
+                    },
+                    .leaf => |leaf| {
+                        // リーフに到達した場合
+                        if (leaf.prefix.eql(pfx.*)) {
+                            // プレフィックスが一致する場合、削除
+                            if (current_node.children.deleteAt(octet)) |_| {
+                                // 削除後のパージと圧縮処理（必要に応じて実装）
+                                return .{ .value = leaf.value, .ok = true };
+                            }
+                        }
+                        return .{ .value = undefined, .ok = false };
+                    },
+                    .fringe => |fringe| {
+                        // フリンジに到達した場合
+                        if (isFringe(current_depth, bits)) {
+                            // フリンジを削除
+                            if (current_node.children.deleteAt(octet)) |_| {
+                                // 削除後のパージと圧縮処理（必要に応じて実装）
+                                return .{ .value = fringe.value, .ok = true };
+                            }
+                        }
+                        return .{ .value = undefined, .ok = false };
+                    },
+                }
+            }
+            
+            // 最終的なプレフィックスを削除
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
+            }
+            const idx = base_index.pfxToIdx256(octet_val, last_bits);
+            
+            if (current_node.prefixes.deleteAt(idx)) |val| {
+                return .{ .value = val, .ok = true };
+            }
+            return .{ .value = undefined, .ok = false };
+        }
+        
+        /// cloneFlat returns a flat clone of the node.
+        /// The children are not cloned, just the pointers are copied.
+        pub fn cloneFlat(self: *const Self, allocator: std.mem.Allocator) *Self {
+            const new_node = allocator.create(Node(V)) catch unreachable;
+            new_node.* = Self{
+                .prefixes = self.prefixes.copy(),
+                .children = self.children.copy(),
+            };
+            return new_node;
+        }
+        
+        /// cloneRec returns a recursive clone of the node and all its children.
+        pub fn cloneRec(self: *const Self, allocator: std.mem.Allocator) *Self {
+            const new_node = allocator.create(Node(V)) catch unreachable;
+            new_node.* = Self{
+                .prefixes = self.prefixes.copy(),
+                .children = Array256(Child(V)).init(allocator),
+            };
+            
+            // 子ノードを再帰的にクローン
+            var i: usize = 0;
+            while (i < 256) : (i += 1) {
+                const idx = std.math.cast(u8, i) orelse break;
+                if (self.children.isSet(idx)) {
+                    const child = self.children.mustGet(idx);
+                    const cloned_child = switch (child) {
+                        .node => |node| Child(V){ .node = node.cloneRec(allocator) },
+                        .leaf => |leaf| Child(V){ .leaf = leaf.cloneLeaf() },
+                        .fringe => |fringe| Child(V){ .fringe = fringe.cloneFringe() },
+                    };
+                    _ = new_node.children.insertAt(idx, cloned_child);
+                }
+            }
+            
+            return new_node;
         }
     };
 }

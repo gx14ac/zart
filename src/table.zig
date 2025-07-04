@@ -98,6 +98,44 @@ pub fn Table(comptime V: type) type {
             }
         }
         
+        /// InsertPersist is similar to Insert but the receiver isn't modified.
+        /// All nodes touched during insert are cloned and a new Table is returned.
+        /// This is not a full Clone, all untouched nodes are still referenced from both Tables.
+        pub fn insertPersist(self: *const Self, pfx: *const Prefix, val: V) *Self {
+            if (!pfx.isValid()) {
+                const new_table = self.allocator.create(Self) catch unreachable;
+                new_table.* = self.*;
+                return new_table;
+            }
+            
+            const canonical_pfx = pfx.masked();
+            const is4 = canonical_pfx.addr.is4();
+            
+            // 新しいテーブルを作成
+            const pt = self.allocator.create(Self) catch unreachable;
+            pt.* = Self{
+                .root4 = self.root4,
+                .root6 = self.root6,
+                .size4 = self.size4,
+                .size6 = self.size6,
+                .allocator = self.allocator,
+            };
+            
+            // 挿入パスのルートをクローン
+            const root_node = pt.rootNodeByVersion(is4);
+            root_node.* = root_node.cloneFlat(self.allocator).*;
+            
+            // 挿入パスに沿ってノードをクローン
+            if (root_node.insertAtDepthPersist(&canonical_pfx, val, 0, self.allocator)) {
+                // プレフィックスが既に存在していた場合、サイズは増加しない
+                return pt;
+            }
+            
+            // 新規挿入の場合、サイズを更新
+            pt.sizeUpdate(is4, 1);
+            return pt;
+        }
+        
         /// Update or set the value at pfx with a callback function.
         /// The callback function is called with (value, ok) and returns a new value.
         ///
@@ -107,14 +145,50 @@ pub fn Table(comptime V: type) type {
                 return cb(undefined, false);
             }
             const canonical_pfx = pfx.masked();
-            const ip = &canonical_pfx.addr;
-            const is4 = ip.is4();
-            const root_node = self.rootNodeByVersion(is4);
-            const result = root_node.update(&canonical_pfx, cb);
+            const is4 = canonical_pfx.addr.is4();
+            const n = self.rootNodeByVersion(is4);
+            const result = n.update(&canonical_pfx, cb);
             if (!result.was_present) {
                 self.sizeUpdate(is4, 1);
             }
             return result.value;
+        }
+        
+        /// UpdatePersist is similar to Update but the receiver isn't modified.
+        /// All nodes touched during update are cloned and a new Table is returned.
+        pub fn updatePersist(self: *const Self, pfx: *const Prefix, cb: fn (V, bool) V) struct { table: *Self, value: V } {
+            if (!pfx.isValid()) {
+                const new_table = self.allocator.create(Self) catch unreachable;
+                new_table.* = self.*;
+                return .{ .table = new_table, .value = cb(undefined, false) };
+            }
+            
+            const canonical_pfx = pfx.masked();
+            const is4 = canonical_pfx.addr.is4();
+            
+            // 新しいテーブルを作成
+            const pt = self.allocator.create(Self) catch unreachable;
+            pt.* = Self{
+                .root4 = self.root4,
+                .root6 = self.root6,
+                .size4 = self.size4,
+                .size6 = self.size6,
+                .allocator = self.allocator,
+            };
+            
+            // 更新パスのルートをクローン
+            const root_node = pt.rootNodeByVersion(is4);
+            root_node.* = root_node.cloneFlat(self.allocator).*;
+            
+            // 更新パスに沿ってノードをクローンしながら更新
+            const result = root_node.updateAtDepthPersist(&canonical_pfx, cb, 0, self.allocator);
+            
+            if (!result.was_present) {
+                // 新規挿入の場合、サイズを更新
+                pt.sizeUpdate(is4, 1);
+            }
+            
+            return .{ .table = pt, .value = result.value };
         }
         
         /// Delete removes a pfx from the tree.
@@ -122,43 +196,74 @@ pub fn Table(comptime V: type) type {
             _ = self.getAndDelete(pfx);
         }
         
-        /// GetAndDelete removes a pfx from the tree and returns its value.
-        pub fn getAndDelete(self: *Self, pfx: *const Prefix) ?V {
-            return self.getAndDeleteInternal(pfx);
+        /// DeletePersist is similar to Delete but the receiver isn't modified.
+        /// All nodes touched during delete are cloned and a new Table is returned.
+        pub fn deletePersist(self: *const Self, pfx: *const Prefix) *Self {
+            const result = self.getAndDeletePersist(pfx);
+            return result.table;
         }
         
-        /// getAndDeleteInternal is the internal implementation of getAndDelete
-        fn getAndDeleteInternal(self: *Self, pfx: *const Prefix) ?V {
+        /// GetAndDelete deletes the prefix and returns the associated value
+        pub fn getAndDelete(self: *Self, pfx: *const Prefix) struct { value: V, ok: bool } {
             if (!pfx.isValid()) {
-                return null;
+                return .{ .value = undefined, .ok = false };
             }
-            
-            // canonicalize prefix
             const canonical_pfx = pfx.masked();
-            
-            // values derived from pfx
-            const ip = canonical_pfx.addr;
-            const is4 = ip.is4();
-            const root_node = self.rootNodeByVersion(is4);
-            
-            const deleted_val = root_node.delete(&canonical_pfx);
-            if (deleted_val != null) {
+            const is4 = canonical_pfx.addr.is4();
+            const n = self.rootNodeByVersion(is4);
+            if (n.delete(&canonical_pfx)) |val| {
                 self.sizeUpdate(is4, -1);
+                return .{ .value = val, .ok = true };
             }
-            return deleted_val;
+            return .{ .value = undefined, .ok = false };
         }
         
-        /// Get gets the value at pfx.
+        /// GetAndDeletePersist is similar to GetAndDelete but the receiver isn't modified.
+        /// All nodes touched during delete are cloned and a new Table is returned.
+        pub fn getAndDeletePersist(self: *const Self, pfx: *const Prefix) struct { table: *Self, value: V, ok: bool } {
+            if (!pfx.isValid()) {
+                const new_table = self.allocator.create(Self) catch unreachable;
+                new_table.* = self.*;
+                return .{ .table = new_table, .value = undefined, .ok = false };
+            }
+            
+            const canonical_pfx = pfx.masked();
+            const is4 = canonical_pfx.addr.is4();
+            
+            // 新しいテーブルを作成
+            const pt = self.allocator.create(Self) catch unreachable;
+            pt.* = Self{
+                .root4 = self.root4,
+                .root6 = self.root6,
+                .size4 = self.size4,
+                .size6 = self.size6,
+                .allocator = self.allocator,
+            };
+            
+            // 削除パスのルートをクローン
+            const root_node = pt.rootNodeByVersion(is4);
+            root_node.* = root_node.cloneFlat(self.allocator).*;
+            
+            // 削除パスに沿ってノードをクローンしながら削除
+            const result = root_node.deleteAtDepthPersist(&canonical_pfx, 0, self.allocator);
+            
+            if (result.ok) {
+                // 削除成功の場合、サイズを更新
+                pt.sizeUpdate(is4, -1);
+            }
+            
+            return .{ .table = pt, .value = result.value, .ok = result.ok };
+        }
+        
+        /// Get returns the value associated with the prefix
         pub fn get(self: *const Self, pfx: *const Prefix) ?V {
-            std.debug.print("GET START: pfx={s}\n", .{pfx.*});
             if (!pfx.isValid()) {
                 return null;
             }
             const canonical_pfx = pfx.masked();
-            const ip = &canonical_pfx.addr;
-            const is4 = ip.is4();
-            const root_node = self.rootNodeByVersionConst(is4);
-            return root_node.get(&canonical_pfx);
+            const is4 = canonical_pfx.addr.is4();
+            const n = self.rootNodeByVersionConst(is4);
+            return n.get(&canonical_pfx);
         }
         
         /// Contains tests if ip is contained in any prefix in the table.
@@ -472,6 +577,20 @@ pub fn Table(comptime V: type) type {
             } else {
                 self.size6 = @intCast(@as(i32, @intCast(self.size6)) + delta);
             }
+        }
+        
+        /// Clone returns a complete copy of the routing table.
+        /// This is a deep clone operation where all nodes are recursively cloned.
+        pub fn clone(self: *const Self) *Self {
+            const new_table = self.allocator.create(Self) catch unreachable;
+            new_table.* = Self{
+                .root4 = if (self.root4) |r4| r4.cloneRec(self.allocator) else null,
+                .root6 = if (self.root6) |r6| r6.cloneRec(self.allocator) else null,
+                .size4 = self.size4,
+                .size6 = self.size6,
+                .allocator = self.allocator,
+            };
+            return new_table;
         }
     };
 }
