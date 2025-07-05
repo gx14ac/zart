@@ -1,6 +1,13 @@
 ## zart
 bitmap based art table.
 
+## Test
+This test covered for application unit tests
+```bash
+zig build test
+```
+
+
 ## Benchmark
 
 ### Basic bench
