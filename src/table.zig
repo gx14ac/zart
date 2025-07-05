@@ -608,6 +608,17 @@ pub fn Table(comptime V: type) type {
             }
             return self.root6.overlaps(other.root6, 0);
         }
+
+        /// Union combines two tables, changing the receiver table.
+        /// If there are duplicate entries, the payload of type V is shallow copied from the other table.
+        /// If type V implements the Cloner interface, the values are cloned.
+        pub fn unionWith(self: *Self, other: *const Self) void {
+            const dup4 = self.root4.unionRec(other.root4, 0);
+            const dup6 = self.root6.unionRec(other.root6, 0);
+
+            self.size4 += other.size4 - dup4;
+            self.size6 += other.size6 - dup6;
+        }
     };
 }
 
@@ -627,6 +638,44 @@ pub fn Table(comptime V: type) type {
 fn isFringe(depth: usize, bits: u8) bool {
     const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
     return depth == max_depth - 1;
+}
+
+// Cloner is an interface, if implemented by payload of type V the values are deeply copied
+// during union operations and other clone operations.
+pub fn Cloner(comptime V: type) type {
+    return struct {
+        pub fn clone(self: *const V) V {
+            return self.clone();
+        }
+    };
+}
+
+// cloneOrCopy clones the value if it implements the Cloner interface,
+// otherwise it performs a shallow copy.
+fn cloneOrCopy(comptime V: type, value: V) V {
+    const type_info = @typeInfo(V);
+    
+    // Check if V has a clone method
+    switch (type_info) {
+        .pointer => |ptr_info| {
+            const child_type = ptr_info.child;
+            if (@hasDecl(child_type, "clone")) {
+                return value.clone();
+            }
+        },
+        else => {
+            // For non-pointer types, check if they have a clone method
+            // Only check for struct/enum/union types
+            if (type_info == .@"struct" or type_info == .@"enum" or type_info == .@"union") {
+                if (@hasDecl(V, "clone")) {
+                    return value.clone();
+                }
+            }
+        },
+    }
+    
+    // Default to shallow copy
+    return value;
 }
 
 test "Table lookupPrefixLPM basic" {
@@ -974,4 +1023,412 @@ test "Table overlaps detailed scenarios" {
         try std.testing.expect(table1.overlaps(&table2)); // 一部でもオーバーラップがあればtrue
         std.debug.print("✓ シナリオ3: 部分的オーバーラップ検出成功\n", .{});
     }
+}
+
+test "Table unionWith basic" {
+    const allocator = std.testing.allocator;
+    
+    // テーブル1を作成
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    table1.insert(&pfx1, 1);
+    table1.insert(&pfx2, 2);
+    
+    // テーブル2を作成
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);
+    table2.insert(&pfx3, 3);
+    table2.insert(&pfx4, 4);
+    
+    std.debug.print("Table1 size before union: {}\n", .{table1.size()});
+    std.debug.print("Table2 size: {}\n", .{table2.size()});
+    
+    // ユニオン実行
+    table1.unionWith(&table2);
+    
+    std.debug.print("Table1 size after union: {}\n", .{table1.size()});
+    
+    // 結果をテスト
+    try std.testing.expectEqual(@as(usize, 4), table1.size());
+    
+    // 元のプレフィックスが存在することを確認
+    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx1).?);
+    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx2).?);
+    
+    // 追加されたプレフィックスが存在することを確認
+    try std.testing.expectEqual(@as(u32, 3), table1.get(&pfx3).?);
+    try std.testing.expectEqual(@as(u32, 4), table1.get(&pfx4).?);
+    
+    std.debug.print("✓ ユニオンテーブル基本動作成功\n", .{});
+}
+
+test "Table unionWith duplicate prefixes" {
+    const allocator = std.testing.allocator;
+    
+    // テーブル1を作成
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    table1.insert(&pfx1, 1);
+    table1.insert(&pfx2, 2);
+    
+    // テーブル2を作成（重複あり）
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
+    // pfx1と同じプレフィックス、異なる値
+    table2.insert(&pfx1, 100);
+    table2.insert(&pfx3, 3);
+    
+    std.debug.print("Table1 initial pfx1 value: {}\n", .{table1.get(&pfx1).?});
+    
+    // ユニオン実行
+    table1.unionWith(&table2);
+    
+    // 結果をテスト：重複したプレフィックスは上書きされる
+    try std.testing.expectEqual(@as(usize, 3), table1.size()); // 2 + 2 - 1(重複)
+    
+    // 重複したプレフィックスは table2 の値で上書きされる
+    try std.testing.expectEqual(@as(u32, 100), table1.get(&pfx1).?);
+    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx2).?);
+    try std.testing.expectEqual(@as(u32, 3), table1.get(&pfx3).?);
+    
+    std.debug.print("✓ ユニオンテーブル重複処理成功\n", .{});
+}
+
+test "Table unionWith empty tables" {
+    const allocator = std.testing.allocator;
+    
+    // 空のテーブル1
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    
+    // 空のテーブル2
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    // 空同士のユニオン
+    table1.unionWith(&table2);
+    try std.testing.expectEqual(@as(usize, 0), table1.size());
+    
+    // 片方だけに要素を追加
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    table2.insert(&pfx1, 1);
+    
+    table1.unionWith(&table2);
+    try std.testing.expectEqual(@as(usize, 1), table1.size());
+    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx1).?);
+    
+    std.debug.print("✓ ユニオンテーブル空テーブル処理成功\n", .{});
+}
+
+test "Table unionWith IPv6" {
+    const allocator = std.testing.allocator;
+    
+    // テーブル1を作成
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    
+    const pfx1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    table1.insert(&pfx1, 1);
+    
+    // テーブル2を作成
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    const pfx2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
+    table2.insert(&pfx2, 2);
+    
+    // ユニオン実行
+    table1.unionWith(&table2);
+    
+    // 結果をテスト
+    try std.testing.expectEqual(@as(usize, 2), table1.size());
+    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx1).?);
+    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx2).?);
+    
+    std.debug.print("✓ ユニオンテーブルIPv6処理成功\n", .{});
+}
+
+test "Table unionWith mixed IPv4 and IPv6" {
+    const allocator = std.testing.allocator;
+    
+    // テーブル1を作成（IPv4とIPv6混在）
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx6 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    table1.insert(&pfx4, 1);
+    table1.insert(&pfx6, 2);
+    
+    // テーブル2を作成（IPv4とIPv6混在）
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    const pfx4_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const pfx6_2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
+    table2.insert(&pfx4_2, 3);
+    table2.insert(&pfx6_2, 4);
+    
+    // ユニオン実行
+    table1.unionWith(&table2);
+    
+    // 結果をテスト
+    try std.testing.expectEqual(@as(usize, 4), table1.size());
+    try std.testing.expectEqual(@as(usize, 2), table1.getSize4());
+    try std.testing.expectEqual(@as(usize, 2), table1.getSize6());
+    
+    // 各プレフィックスが存在することを確認
+    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx4).?);
+    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx6).?);
+    try std.testing.expectEqual(@as(u32, 3), table1.get(&pfx4_2).?);
+    try std.testing.expectEqual(@as(u32, 4), table1.get(&pfx6_2).?);
+    
+    std.debug.print("✓ ユニオンテーブルIPv4/IPv6混在処理成功\n", .{});
+}
+
+test "Table unionWith detailed verification" {
+    const allocator = std.testing.allocator;
+    
+    // より複雑なシナリオでテスト
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    // Table1: 複数のプレフィックスを挿入
+    const pfx1_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);  // 192.168.0.0/16
+    const pfx1_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);     // 10.0.0.0/8
+    const pfx1_3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);  // 172.16.0.0/12
+    const pfx1_4 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32); // 2001:db8::/32
+    
+    table1.insert(&pfx1_1, 100);
+    table1.insert(&pfx1_2, 200);
+    table1.insert(&pfx1_3, 300);
+    table1.insert(&pfx1_4, 400);
+    
+    std.debug.print("=== Table1 初期状態 ===\n", .{});
+    std.debug.print("Size: {}, IPv4: {}, IPv6: {}\n", .{ table1.size(), table1.getSize4(), table1.getSize6() });
+    std.debug.print("192.168.0.0/16 -> {}\n", .{table1.get(&pfx1_1).?});
+    std.debug.print("10.0.0.0/8 -> {}\n", .{table1.get(&pfx1_2).?});
+    std.debug.print("172.16.0.0/12 -> {}\n", .{table1.get(&pfx1_3).?});
+    std.debug.print("2001:db8::/32 -> {}\n", .{table1.get(&pfx1_4).?});
+    
+    // Table2: 一部重複、一部新規
+    const pfx2_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);  // 重複: 192.168.0.0/16
+    const pfx2_2 = Prefix.init(&IPAddr{ .v4 = .{ 203, 0, 113, 0 } }, 24);  // 新規: 203.0.113.0/24
+    const pfx2_3 = Prefix.init(&IPAddr{ .v4 = .{ 198, 51, 100, 0 } }, 24); // 新規: 198.51.100.0/24
+    const pfx2_4 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10); // 新規: fe80::/10
+    const pfx2_5 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32); // 重複: 2001:db8::/32
+    
+    table2.insert(&pfx2_1, 999);  // 重複 - この値で上書きされるはず
+    table2.insert(&pfx2_2, 500);
+    table2.insert(&pfx2_3, 600);
+    table2.insert(&pfx2_4, 700);
+    table2.insert(&pfx2_5, 888);  // 重複 - この値で上書きされるはず
+    
+    std.debug.print("\n=== Table2 初期状態 ===\n", .{});
+    std.debug.print("Size: {}, IPv4: {}, IPv6: {}\n", .{ table2.size(), table2.getSize4(), table2.getSize6() });
+    std.debug.print("192.168.0.0/16 -> {} (重複)\n", .{table2.get(&pfx2_1).?});
+    std.debug.print("203.0.113.0/24 -> {}\n", .{table2.get(&pfx2_2).?});
+    std.debug.print("198.51.100.0/24 -> {}\n", .{table2.get(&pfx2_3).?});
+    std.debug.print("fe80::/10 -> {}\n", .{table2.get(&pfx2_4).?});
+    std.debug.print("2001:db8::/32 -> {} (重複)\n", .{table2.get(&pfx2_5).?});
+    
+    // ユニオン実行前の確認
+    try std.testing.expectEqual(@as(usize, 4), table1.size());
+    try std.testing.expectEqual(@as(usize, 5), table2.size());
+    
+    // ユニオン実行
+    std.debug.print("\n=== ユニオン実行 ===\n", .{});
+    table1.unionWith(&table2);
+    
+    std.debug.print("Union後のTable1 Size: {}, IPv4: {}, IPv6: {}\n", .{ table1.size(), table1.getSize4(), table1.getSize6() });
+    
+    // 結果検証
+    // 期待値: 4 + 5 - 2(重複) = 7
+    try std.testing.expectEqual(@as(usize, 7), table1.size());
+    try std.testing.expectEqual(@as(usize, 5), table1.getSize4()); // IPv4: 3(元) + 3(新規) - 1(重複) = 5
+    try std.testing.expectEqual(@as(usize, 2), table1.getSize6()); // IPv6: 1(元) + 2(新規) - 1(重複) = 2
+    
+    // 各プレフィックスの値を確認
+    std.debug.print("\n=== 結果検証 ===\n", .{});
+    
+    // 重複したプレフィックス - table2の値で上書きされているはず
+    try std.testing.expectEqual(@as(u32, 999), table1.get(&pfx1_1).?);
+    std.debug.print("192.168.0.0/16 -> {} (999に上書き確認)\n", .{table1.get(&pfx1_1).?});
+    
+    try std.testing.expectEqual(@as(u32, 888), table1.get(&pfx1_4).?);
+    std.debug.print("2001:db8::/32 -> {} (888に上書き確認)\n", .{table1.get(&pfx1_4).?});
+    
+    // table1の元のプレフィックス - 変更されないはず
+    try std.testing.expectEqual(@as(u32, 200), table1.get(&pfx1_2).?);
+    std.debug.print("10.0.0.0/8 -> {} (変更なし確認)\n", .{table1.get(&pfx1_2).?});
+    
+    try std.testing.expectEqual(@as(u32, 300), table1.get(&pfx1_3).?);
+    std.debug.print("172.16.0.0/12 -> {} (変更なし確認)\n", .{table1.get(&pfx1_3).?});
+    
+    // table2の新規プレフィックス - 追加されているはず
+    try std.testing.expectEqual(@as(u32, 500), table1.get(&pfx2_2).?);
+    std.debug.print("203.0.113.0/24 -> {} (新規追加確認)\n", .{table1.get(&pfx2_2).?});
+    
+    try std.testing.expectEqual(@as(u32, 600), table1.get(&pfx2_3).?);
+    std.debug.print("198.51.100.0/24 -> {} (新規追加確認)\n", .{table1.get(&pfx2_3).?});
+    
+    try std.testing.expectEqual(@as(u32, 700), table1.get(&pfx2_4).?);
+    std.debug.print("fe80::/10 -> {} (新規追加確認)\n", .{table1.get(&pfx2_4).?});
+    
+    // table2は変更されていないことを確認
+    std.debug.print("\n=== Table2 変更されていないことを確認 ===\n", .{});
+    try std.testing.expectEqual(@as(usize, 5), table2.size());
+    try std.testing.expectEqual(@as(u32, 999), table2.get(&pfx2_1).?);
+    try std.testing.expectEqual(@as(u32, 500), table2.get(&pfx2_2).?);
+    try std.testing.expectEqual(@as(u32, 600), table2.get(&pfx2_3).?);
+    try std.testing.expectEqual(@as(u32, 700), table2.get(&pfx2_4).?);
+    try std.testing.expectEqual(@as(u32, 888), table2.get(&pfx2_5).?);
+    std.debug.print("Table2は変更されていません ✓\n", .{});
+    
+    std.debug.print("\n✅ 詳細検証テスト成功！\n", .{});
+}
+
+test "Table unionWith edge cases" {
+    const allocator = std.testing.allocator;
+    
+    std.debug.print("\n=== エッジケーステスト ===\n", .{});
+    
+    // ケース1: 同じテーブルとのユニオン
+    {
+        var table1 = Table(u32).init(allocator);
+        defer table1.deinit();
+        
+        const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+        const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+        table1.insert(&pfx1, 100);
+        table1.insert(&pfx2, 200);
+        
+        const original_size = table1.size();
+        std.debug.print("自分自身とのユニオン前: size = {}\n", .{original_size});
+        
+        table1.unionWith(&table1);
+        
+        // サイズは変わらないはず（全て重複）
+        try std.testing.expectEqual(original_size, table1.size());
+        try std.testing.expectEqual(@as(u32, 100), table1.get(&pfx1).?);
+        try std.testing.expectEqual(@as(u32, 200), table1.get(&pfx2).?);
+        std.debug.print("自分自身とのユニオン後: size = {} ✓\n", .{table1.size()});
+    }
+    
+    // ケース2: 大量のプレフィックス
+    {
+        var table1 = Table(u32).init(allocator);
+        defer table1.deinit();
+        var table2 = Table(u32).init(allocator);
+        defer table2.deinit();
+        
+        // table1に連続したプレフィックスを追加
+        var i: u8 = 1;
+        while (i <= 10) : (i += 1) {
+            const pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, i, 0 } }, 24);
+            table1.insert(&pfx, @as(u32, i));
+        }
+        
+        // table2に一部重複、一部新規を追加
+        i = 5;
+        while (i <= 15) : (i += 1) {
+            const pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, i, 0 } }, 24);
+            table2.insert(&pfx, @as(u32, i + 100));
+        }
+        
+        const size1_before = table1.size();
+        const size2_before = table2.size();
+        std.debug.print("大量テスト前: table1={}, table2={}\n", .{ size1_before, size2_before });
+        
+        table1.unionWith(&table2);
+        
+        // 期待値: 10 + 11 - 6(重複: 5-10) = 15
+        try std.testing.expectEqual(@as(usize, 15), table1.size());
+        
+        // 重複部分はtable2の値になっているはず
+        const pfx_overlap = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 7, 0 } }, 24);
+        try std.testing.expectEqual(@as(u32, 107), table1.get(&pfx_overlap).?); // 7 + 100
+        
+        std.debug.print("大量テスト後: table1={} ✓\n", .{table1.size()});
+    }
+    
+    std.debug.print("✅ エッジケーステスト成功！\n", .{});
+} 
+
+test "Table unionWith performance test" {
+    const allocator = std.testing.allocator;
+    
+    std.debug.print("\n=== パフォーマンステスト ===\n", .{});
+    
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    // シンプルなテストケース
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24); // 重複
+    const pfx5 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);
+    
+    // table1に3つのプレフィックスを追加
+    table1.insert(&pfx1, 100);
+    table1.insert(&pfx2, 200);
+    table1.insert(&pfx3, 300);
+    
+    // table2に3つのプレフィックスを追加（1つは重複）
+    table2.insert(&pfx4, 999); // 重複: pfx1と同じ
+    table2.insert(&pfx5, 500); // 新規
+    
+    const table1_size_before = table1.size();
+    const table2_size_before = table2.size();
+    
+    std.debug.print("Table1 初期サイズ: {}\n", .{table1_size_before});
+    std.debug.print("Table2 初期サイズ: {}\n", .{table2_size_before});
+    
+    // 時間計測開始
+    const start_time = std.time.nanoTimestamp();
+    
+    // ユニオン実行
+    table1.unionWith(&table2);
+    
+    const end_time = std.time.nanoTimestamp();
+    const duration_ns = end_time - start_time;
+    const duration_ms = @as(f64, @floatFromInt(duration_ns)) / 1_000_000.0;
+    
+    const final_size = table1.size();
+    const expected_size = table1_size_before + table2_size_before - 1; // 1つ重複
+    
+    std.debug.print("ユニオン実行時間: {d:.2}ms\n", .{duration_ms});
+    std.debug.print("最終サイズ: {} (期待値: {})\n", .{ final_size, expected_size });
+    
+    // 結果検証
+    try std.testing.expectEqual(expected_size, final_size);
+    
+    // 重複したプレフィックスは table2 の値になっているはず
+    try std.testing.expectEqual(@as(u32, 999), table1.get(&pfx1).?);
+    
+    // 元のプレフィックスは変更されないはず
+    try std.testing.expectEqual(@as(u32, 200), table1.get(&pfx2).?);
+    try std.testing.expectEqual(@as(u32, 300), table1.get(&pfx3).?);
+    
+    // 新規プレフィックスが追加されているはず
+    try std.testing.expectEqual(@as(u32, 500), table1.get(&pfx5).?);
+    
+    std.debug.print("✅ パフォーマンステスト成功！\n", .{});
 } 
