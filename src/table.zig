@@ -447,7 +447,7 @@ pub fn Table(comptime V: type) type {
                 if (!current_node.children.isSet(addr)) {
                     // プレフィックスをパス圧縮として挿入
                     const new_val = cb(zero, false);
-                    if (isFringe(depth, bits)) {
+                    if (node.isFringe(depth, bits)) {
                         _ = current_node.children.replaceAt(addr, Child(V){ .fringe = FringeNode(V).init(new_val) });
                     } else {
                         _ = current_node.children.replaceAt(addr, Child(V){ .leaf = LeafNode(V).init(canonical_pfx, new_val) });
@@ -500,7 +500,7 @@ pub fn Table(comptime V: type) type {
                         const cloned_fringe = fringe.cloneFringe();
                         
                         // pfxがフリンジの場合、既存の値を更新
-                        if (isFringe(depth, bits)) {
+                        if (node.isFringe(depth, bits)) {
                             const new_val = cb(cloned_fringe.value, true);
                             _ = current_node.children.replaceAt(addr, Child(V){ .fringe = FringeNode(V).init(new_val) });
                             return .{ .table = new_table, .value = new_val };
@@ -619,6 +619,142 @@ pub fn Table(comptime V: type) type {
             self.size4 += other.size4 - dup4;
             self.size6 += other.size6 - dup6;
         }
+
+        // Go実装互換のJSON出力機能
+        
+        /// MarshalJSON: Go実装と同じJSON形式で出力
+        pub fn marshalJSON(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+            var list = std.ArrayList(u8).init(allocator);
+            defer list.deinit();
+            
+            const ipv4_list = try self.dumpList4(allocator);
+            defer {
+                for (ipv4_list) |*item| {
+                    item.deinit(allocator);
+                }
+                allocator.free(ipv4_list);
+            }
+            
+            const ipv6_list = try self.dumpList6(allocator);
+            defer {
+                for (ipv6_list) |*item| {
+                    item.deinit(allocator);
+                }
+                allocator.free(ipv6_list);
+            }
+            
+            try list.appendSlice("{");
+            
+            var has_content = false;
+            
+            if (ipv4_list.len > 0) {
+                try list.appendSlice("\"ipv4\":");
+                try self.serializeDumpList(allocator, list.writer(), ipv4_list);
+                has_content = true;
+            }
+            
+            if (ipv6_list.len > 0) {
+                if (has_content) try list.appendSlice(",");
+                try list.appendSlice("\"ipv6\":");
+                try self.serializeDumpList(allocator, list.writer(), ipv6_list);
+                has_content = true;
+            }
+            
+            try list.appendSlice("}");
+            return list.toOwnedSlice();
+        }
+
+        /// DumpList4: IPv4ツリーの構造化リスト（Go実装互換）
+        pub fn dumpList4(self: *const Self, allocator: std.mem.Allocator) ![]DumpListNode {
+            return try self.dumpListForVersion(allocator, true);
+        }
+
+        /// DumpList6: IPv6ツリーの構造化リスト（Go実装互換）
+        pub fn dumpList6(self: *const Self, allocator: std.mem.Allocator) ![]DumpListNode {
+            return try self.dumpListForVersion(allocator, false);
+        }
+
+        /// バージョン別のDumpList実装
+        fn dumpListForVersion(self: *const Self, allocator: std.mem.Allocator, is4: bool) ![]DumpListNode {
+            const root = self.rootNodeByVersionConst(is4);
+            if (root.isEmpty()) {
+                return try allocator.alloc(DumpListNode, 0);
+            }
+            
+            // Go実装と同じ階層構造を構築
+            const path = std.mem.zeroes([16]u8);
+            return try root.dumpListRec(allocator, 0, path, 0, is4);
+        }
+
+        /// DumpListのJSON形式シリアライゼーション
+        fn serializeDumpList(self: *const Self, allocator: std.mem.Allocator, writer: anytype, dump_list: []const DumpListNode) !void {
+            try writer.print("[", .{});
+            for (dump_list, 0..) |item, i| {
+                if (i > 0) try writer.print(",", .{});
+                try writer.print("{{\"cidr\":\"{}\",\"value\":", .{item.cidr});
+                
+                // 値の型に応じてシリアライズ
+                try self.serializeValue(writer, item.value);
+                
+                if (item.subnets.len > 0) {
+                    try writer.print(",\"subnets\":", .{});
+                    try self.serializeDumpList(allocator, writer, item.subnets);
+                }
+                
+                try writer.print("}}", .{});
+            }
+            try writer.print("]", .{});
+        }
+
+        /// 値の型に応じたシリアライゼーション
+        fn serializeValue(self: *const Self, writer: anytype, value: V) !void {
+            _ = self;
+            if (V == u32) {
+                try writer.print("{}", .{value});
+            } else if (V == []const u8) {
+                try writer.print("\"{}\"", .{value});
+            } else if (V == struct{}) {
+                try writer.print("null", .{});
+            } else {
+                // デフォルトは数値として出力を試行
+                try writer.print("{}", .{value});
+            }
+        }
+
+        /// Fprint: 階層的なツリー表示（Go実装互換）
+        pub fn fprint(self: *const Self, writer: anytype) !void {
+            if (self.getSize4() > 0) {
+                try writer.print("IPv4:\n", .{});
+                try self.fprintVersion(writer, true);
+            }
+            if (self.getSize6() > 0) {
+                try writer.print("IPv6:\n", .{});
+                try self.fprintVersion(writer, false);
+            }
+        }
+
+        /// バージョン別のFprint実装
+        fn fprintVersion(self: *const Self, writer: anytype, is4: bool) !void {
+            const root = self.rootNodeByVersionConst(is4);
+            if (root.isEmpty()) return;
+            
+            try writer.print("▼\n", .{});
+            
+            const path = std.mem.zeroes([16]u8);
+            try root.fprintRecProper(self.allocator, writer, 0, path, 0, "");
+        }
+
+        /// String representation - Fprintのラッパー
+        pub fn toString(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+            var list = std.ArrayList(u8).init(allocator);
+            defer list.deinit();
+            
+            try self.fprint(list.writer());
+            return list.toOwnedSlice();
+        }
+
+        // シリアライゼーション用の構造体（Go実装のDumpListNode互換）
+        pub const DumpListNode = node.DumpListNode(V);
     };
 }
 
