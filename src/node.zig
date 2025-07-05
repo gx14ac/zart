@@ -741,6 +741,230 @@ pub fn Node(comptime V: type) type {
 
             @panic("unreachable: " ++ @typeName(@TypeOf(pfx)));
         }
+
+        /// unionRec combines two nodes, changing the receiver node.
+        /// If there are duplicate entries, the value is taken from the other node.
+        /// Count duplicate entries to adjust the t.size struct members.
+        /// The values are cloned before merging.
+        pub fn unionRec(self: *Self, other: *const Self, depth: u32) u32 {
+            var duplicates: u32 = 0;
+            
+                    // For all prefixes in other node do ...
+        var prefix_buf: [256]u8 = undefined;
+        const other_indices = other.prefixes.bitset.asSlice(&prefix_buf);
+        for (other_indices) |other_idx| {
+            // Clone/copy the value from other node at idx
+            const cloned_val = cloneOrCopy(V, other.prefixes.mustGet(other_idx));
+            
+            // Insert/overwrite cloned value from other into self
+            if (!self.prefixes.insertAt(other_idx, cloned_val)) {
+                // This prefix is duplicate in self and other
+                duplicates += 1;
+            }
+        }
+        
+        // For all child addrs in other node do ...
+        var child_buf: [256]u8 = undefined;
+        const other_child_addrs = other.children.bitset.asSlice(&child_buf);
+                for (other_child_addrs) |addr| {
+            // 12 possible combinations to union this child and other child
+            //
+            // THIS,   OTHER: (always clone the other kid!)
+            // --------------
+            // NULL,   node    <-- insert node at addr
+            // NULL,   leaf    <-- insert leaf at addr
+            // NULL,   fringe  <-- insert fringe at addr
+            //
+            // node,   node    <-- union rec-descent with node
+            // node,   leaf    <-- insert leaf at depth+1
+            // node,   fringe  <-- insert fringe at depth+1
+            //
+            // leaf,   node    <-- insert new node, push this leaf down, union rec-descent
+            // leaf,   leaf    <-- insert new node, push both leaves down (!first check equality)
+            // leaf,   fringe  <-- insert new node, push this leaf and fringe down
+            //
+            // fringe, node    <-- insert new node, push this fringe down, union rec-descent
+            // fringe, leaf    <-- insert new node, push this fringe down, insert other leaf at depth+1
+            // fringe, fringe  <-- just overwrite value
+            
+            // Try to get child at same addr from self
+            const this_child_result = self.children.get(addr);
+            if (this_child_result == null) {
+                // NULL, ... slot at addr is empty
+                const other_child = other.children.mustGet(addr);
+                switch (other_child) {
+                        .node => |other_node| {
+                            // NULL, node
+                            const cloned_node = other_node.cloneRec(self.allocator);
+                            _ = self.children.insertAt(addr, Child(V){ .node = cloned_node });
+                        },
+                        .leaf => |other_leaf| {
+                            // NULL, leaf
+                            const cloned_leaf = other_leaf.cloneLeaf();
+                            _ = self.children.insertAt(addr, Child(V){ .leaf = cloned_leaf });
+                        },
+                        .fringe => |other_fringe| {
+                            // NULL, fringe
+                            const cloned_fringe = other_fringe.cloneFringe();
+                            _ = self.children.insertAt(addr, Child(V){ .fringe = cloned_fringe });
+                        },
+                    }
+                    continue;
+                }
+                
+                            const this_child = this_child_result.?;
+            switch (this_child) {
+                .node => |this_node| {
+                    // node, ...
+                    const other_child = other.children.mustGet(addr);
+                    switch (other_child) {
+                            .node => |other_node| {
+                                // node, node
+                                // Both childs have node at addr, call union rec-descent on child nodes
+                                const cloned_other_node = other_node.cloneRec(self.allocator);
+                                duplicates += this_node.unionRec(cloned_other_node, depth + 1);
+                                // Clean up the cloned node since it's been merged
+                                cloned_other_node.deinit();
+                                self.allocator.destroy(cloned_other_node);
+                            },
+                            .leaf => |other_leaf| {
+                                // node, leaf
+                                // Push this cloned leaf down, count duplicate entry
+                                const cloned_leaf = other_leaf.cloneLeaf();
+                                if (this_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                    duplicates += 1;
+                                }
+                            },
+                            .fringe => |other_fringe| {
+                                // node, fringe
+                                // Push this fringe down, a fringe becomes a default route one level down
+                                const cloned_fringe = other_fringe.cloneFringe();
+                                if (this_node.prefixes.insertAt(1, cloned_fringe.value)) {
+                                    duplicates += 1;
+                                }
+                            },
+                        }
+                    },
+                                    .leaf => |this_leaf| {
+                    // leaf, ...
+                    const other_child = other.children.mustGet(addr);
+                    switch (other_child) {
+                            .node => |other_node| {
+                                // leaf, node
+                                // Create new node
+                                const new_node = Node(V).init(self.allocator);
+                                
+                                // Push this leaf down
+                                _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
+                                
+                                // Insert the new node at current addr
+                                _ = self.children.insertAt(addr, Child(V){ .node = new_node });
+                                
+                                // unionRec this new node with other kid node
+                                const cloned_other_node = other_node.cloneRec(self.allocator);
+                                duplicates += new_node.unionRec(cloned_other_node, depth + 1);
+                                // Clean up the cloned node
+                                cloned_other_node.deinit();
+                                self.allocator.destroy(cloned_other_node);
+                            },
+                            .leaf => |other_leaf| {
+                                // leaf, leaf
+                                // Shortcut, prefixes are equal
+                                if (this_leaf.prefix.eql(other_leaf.prefix)) {
+                                    const cloned_val = cloneOrCopy(V, other_leaf.value);
+                                    // Update the existing leaf's value
+                                    const updated_leaf = LeafNode(V){ .prefix = this_leaf.prefix, .value = cloned_val };
+                                    _ = self.children.insertAt(addr, Child(V){ .leaf = updated_leaf });
+                                    duplicates += 1;
+                                    continue;
+                                }
+                                
+                                // Create new node
+                                const new_node = Node(V).init(self.allocator);
+                                
+                                // Push this leaf down
+                                _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
+                                
+                                // Insert at depth cloned leaf, maybe duplicate
+                                const cloned_leaf = other_leaf.cloneLeaf();
+                                if (new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                    duplicates += 1;
+                                }
+                                
+                                // Insert the new node at current addr
+                                _ = self.children.insertAt(addr, Child(V){ .node = new_node });
+                            },
+                            .fringe => |other_fringe| {
+                                // leaf, fringe
+                                // Create new node
+                                const new_node = Node(V).init(self.allocator);
+                                
+                                // Push this leaf down
+                                _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
+                                
+                                // Push this cloned fringe down, it becomes the default route
+                                const cloned_fringe = other_fringe.cloneFringe();
+                                if (new_node.prefixes.insertAt(1, cloned_fringe.value)) {
+                                    duplicates += 1;
+                                }
+                                
+                                // Insert the new node at current addr
+                                _ = self.children.insertAt(addr, Child(V){ .node = new_node });
+                            },
+                        }
+                    },
+                                    .fringe => |this_fringe| {
+                    // fringe, ...
+                    const other_child = other.children.mustGet(addr);
+                    switch (other_child) {
+                            .node => |other_node| {
+                                // fringe, node
+                                // Create new node
+                                const new_node = Node(V).init(self.allocator);
+                                
+                                // Push this fringe down, it becomes the default route
+                                _ = new_node.prefixes.insertAt(1, this_fringe.value);
+                                
+                                // Insert the new node at current addr
+                                _ = self.children.insertAt(addr, Child(V){ .node = new_node });
+                                
+                                // unionRec this new node with other kid node
+                                const cloned_other_node = other_node.cloneRec(self.allocator);
+                                duplicates += new_node.unionRec(cloned_other_node, depth + 1);
+                                // Clean up the cloned node
+                                cloned_other_node.deinit();
+                                self.allocator.destroy(cloned_other_node);
+                            },
+                            .leaf => |other_leaf| {
+                                // fringe, leaf
+                                // Create new node
+                                const new_node = Node(V).init(self.allocator);
+                                
+                                // Push this fringe down, it becomes the default route
+                                _ = new_node.prefixes.insertAt(1, this_fringe.value);
+                                
+                                // Push this cloned leaf down
+                                const cloned_leaf = other_leaf.cloneLeaf();
+                                if (new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                    duplicates += 1;
+                                }
+                                
+                                // Insert the new node at current addr
+                                _ = self.children.insertAt(addr, Child(V){ .node = new_node });
+                            },
+                            .fringe => |other_fringe| {
+                                const cloned_val = cloneOrCopy(V, other_fringe.value);
+                                const updated_fringe = FringeNode(V){ .value = cloned_val };
+                                _ = self.children.insertAt(addr, Child(V){ .fringe = updated_fringe });
+                                duplicates += 1;
+                            },
+                        }
+                    },
+                }
+            }
+            
+            return duplicates;
+        }
     };
 }
 
@@ -1021,4 +1245,32 @@ fn overlapsTwoChilds(comptime V: type, n_child: Child(V), o_child: Child(V), dep
             return true;
         },
     }
+}
+
+// cloneOrCopy clones the value if it implements the Cloner interface,
+// otherwise it performs a shallow copy.
+fn cloneOrCopy(comptime V: type, value: V) V {
+    const type_info = @typeInfo(V);
+    
+    // Check if V has a clone method
+    switch (type_info) {
+        .pointer => |ptr_info| {
+            const child_type = ptr_info.child;
+            if (@hasDecl(child_type, "clone")) {
+                return value.clone();
+            }
+        },
+        else => {
+            // For non-pointer types, check if they have a clone method
+            // Only check for struct/enum/union types
+            if (type_info == .@"struct" or type_info == .@"enum" or type_info == .@"union") {
+                if (@hasDecl(V, "clone")) {
+                    return value.clone();
+                }
+            }
+        },
+    }
+    
+    // Default to shallow copy
+    return value;
 }
