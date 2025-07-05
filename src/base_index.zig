@@ -75,12 +75,14 @@ pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
     };
 }
 
-/// Calculate prefix length from depth and index
+/// Calculate prefix length from depth and index (Go art.PfxLen256 equivalent)
 pub fn pfxLen256(depth: i32, idx: u8) !u8 {
     if (idx == 0) {
         return error.InvalidIndex;
     }
-    return @as(u8, @intCast(depth * 8 + std.math.log2_int(u8, idx)));
+    // Go実装: return uint8(depth<<3 + bits.Len8(idx) - 1)
+    const bits_len = @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1;
+    return @as(u8, @intCast(depth * 8)) + bits_len - 1;
 }
 
 /// Return range (first and last octet) from prefix index

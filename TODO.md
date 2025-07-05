@@ -40,18 +40,6 @@
 - [x] LeafNode: リーフノードの最適化
 - [x] isFringe: フリンジ判定ロジック
 
-## 現在の問題点（修正中）
-
-### 1. lookupPrefix実装の不完全性
-- [ ] lookupPrefixの正しい実装（Go実装と同等）
-- [ ] バックトラッキングアルゴリズムの修正
-- [ ] プレフィックスLPMの完全な動作実装
-- **注意**: 現在のlookupPrefix実装は基本的な動作のみ
-
-### 2. オーバーフロー修正（保留）
-- [ ] idxToPrefixRoutesのinteger overflow修正
-- [ ] Go実装ロジックとの統一
-
 ## 実装順序
 
 1. ✅ LPMルックアップテーブル

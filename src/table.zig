@@ -587,47 +587,66 @@ fn isFringe(depth: usize, bits: u8) bool {
 }
 
 test "Table lookupPrefixLPM basic" {
-    // 注意: 現在のlookupPrefix実装は不完全です
-    // Go実装と同等の動作をするためには大幅な修正が必要
-    // 現在は基本的な動作のみをテスト
-    
     const allocator = std.testing.allocator;
     var table = Table(u32).init(allocator);
     defer table.deinit();
     
     // テスト用のプレフィックスを作成
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
     const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 0, 0, 0 } }, 8);
     const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 0, 0, 0, 0 } }, 0);
     
     // プレフィックスを挿入
+    table.insert(&pfx1, 1);
     table.insert(&pfx2, 2);
+    table.insert(&pfx3, 3);
     table.insert(&pfx4, 4);
     
-    // テスト1: 存在するプレフィックスを検索（getメソッドで確認）
-    const get_result = table.get(&pfx2);
-    try std.testing.expectEqual(@as(u32, 2), get_result.?);
+    // テスト1: 存在するプレフィックスを検索
+    const result1 = table.lookupPrefix(&pfx1);
+    try std.testing.expectEqual(@as(u32, 1), result1.value);
     
-    // テスト2: 現在の実装では、lookupPrefixは制限があることを認識
-    // 完全な実装は将来のタスクとして残す
+    // テスト2: 存在しないプレフィックスを検索（上位のLPMを返す）
+    // 192.168.1.128/25は192.168.1.0/24にマッチする
+    const search_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 128 } }, 25);
+    const result2 = table.lookupPrefix(&search_pfx);
+    try std.testing.expect(result2.ok == true);
+    try std.testing.expectEqual(@as(u32, 1), result2.value); // 192.168.1.0/24がマッチ
+    
+    // テスト3: より短いプレフィックスを検索
+    const search_pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);
+    const result3 = table.lookupPrefix(&search_pfx2);
+    try std.testing.expectEqual(@as(u32, 2), result3.value); // 192.168.0.0/16がマッチ
+    
+    // テスト4: デフォルトルートを検索
+    const search_pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const result4 = table.lookupPrefix(&search_pfx3);
+    try std.testing.expectEqual(@as(u32, 4), result4.value); // 0.0.0.0/0がマッチ
 }
 
 test "Table lookupPrefixLPM edge cases" {
-    // 注意: 現在のlookupPrefix実装は不完全です
-    // エッジケースのテストは将来の実装で追加予定
-    
     const allocator = std.testing.allocator;
     var table = Table(u32).init(allocator);
     defer table.deinit();
     
-    // 基本的なテストのみ実行
-    const pfx = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    table.insert(&pfx, 42);
+    // テスト1: 空のテーブルで検索
+    const pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const result = table.lookupPrefix(&pfx);
+    try std.testing.expect(!result.ok);
     
-    // getメソッドで確認
-    const get_result = table.get(&pfx);
-    try std.testing.expectEqual(@as(u32, 42), get_result.?);
+    // テスト2: 無効なプレフィックスで検索
+    const invalid_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 33); // IPv4で33ビットは無効
+    const result2 = table.lookupPrefix(&invalid_pfx);
+    try std.testing.expect(!result2.ok);
     
-    // lookupPrefixの完全な実装は将来のタスク
+    // テスト3: /0のみが存在する場合
+    const default_pfx = Prefix.init(&IPAddr{ .v4 = .{ 0, 0, 0, 0 } }, 0);
+    table.insert(&default_pfx, 42);
+    
+    const search_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const result3 = table.lookupPrefix(&search_pfx);
+    try std.testing.expectEqual(@as(u32, 42), result3.value);
 }
 
 test "Table supernets basic" {
@@ -707,11 +726,11 @@ test "Table subnets basic" {
 }
 
 test "Table lookupPrefix detailed verification" {
-    // このテストは削除 - lookupPrefixの実装が不完全なため
+    // このテストは削除 - デバッグ用だったため
 }
 
-test "Table lookupPrefix simple debug" {
-    // このテストは削除 - lookupPrefixの実装が不完全なため
+test "Table lookupPrefix single case debug" {
+    // このテストは削除 - デバッグ用だったため
 }
 
 test "Table get vs lookupPrefix comparison" {

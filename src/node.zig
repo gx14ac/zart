@@ -346,6 +346,7 @@ pub fn Node(comptime V: type) type {
         }
         
         /// lookupPrefix performs longest prefix matching for the given prefix
+        /// This is a complete rewrite based on Go BART implementation
         pub fn lookupPrefix(self: *const Self, pfx: *const Prefix) Result {
             const masked_pfx = pfx.masked();
             const ip = &masked_pfx.addr;
@@ -356,91 +357,99 @@ pub fn Node(comptime V: type) type {
             
             var current_depth: usize = 0;
             var current_node = self;
+            var octet: u8 = 0;
             
             // スタックを使ってパスを記録（バックトラッキング用）
             var stack: [16]*const Self = undefined;
             
             // 前進フェーズ: プレフィックスのパスに沿ってトライを降りる
-            while (current_depth < octets.len) : (current_depth += 1) {
-                var octet: u8 = 0;
-                if (current_depth < octets.len) {
-                    octet = octets[current_depth];
-                }
-                
-                // max_depthを超えた場合は停止
+            forward_loop: while (current_depth < octets.len) {
                 if (current_depth > max_depth) {
                     current_depth -= 1;
                     break;
                 }
                 
+                octet = octets[current_depth];
+                
                 // 現在のノードをスタックに記録
                 stack[current_depth] = current_node;
                 
                 if (!current_node.children.isSet(octet)) {
-                    break;
+                    break :forward_loop;
                 }
+                
                 const kid = current_node.children.mustGet(octet);
                 switch (kid) {
                     .node => |node| {
                         current_node = node;
-                        continue;
+                        current_depth += 1;
+                        continue :forward_loop;
                     },
                     .leaf => |leaf| {
-                        // leafに到達した場合、プレフィックスが検索対象を含むかチェック
-                        if (leaf.prefix.bits <= bits and leaf.prefix.containsAddr(masked_pfx.addr)) {
-                            return Result{ .prefix = leaf.prefix, .value = leaf.value, .ok = true };
+                        // Go実装の条件: kid.prefix.Bits() > bits || !kid.prefix.Contains(ip)
+                        if (leaf.prefix.bits > bits or !leaf.prefix.containsAddr(masked_pfx.addr)) {
+                            break :forward_loop;
                         }
-                        break;
+                        return Result{ .prefix = leaf.prefix, .value = leaf.value, .ok = true };
                     },
                     .fringe => |fringe| {
-                        // fringeに到達した場合、プレフィックスを再構築
+                        // Go実装の条件: fringeBits > bits
                         const fringe_bits = @as(u8, @intCast((current_depth + 1) * 8));
-                        if (fringe_bits <= bits) {
-                            var path: [16]u8 = undefined;
-                            @memcpy(path[0..octets.len], octets);
-                            path[current_depth] = octet;
-                            var addr = if (ip.is4()) IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } else IPAddr{ .v6 = path[0..16].* };
-                            const fringe_pfx = Prefix.init(&addr, fringe_bits);
-                            
-                            if (fringe_pfx.containsAddr(masked_pfx.addr)) {
-                                return Result{ .prefix = fringe_pfx, .value = fringe.value, .ok = true };
-                            }
+                        if (fringe_bits > bits) {
+                            break :forward_loop;
                         }
-                        break;
+                        
+                        // fringeプレフィックスを再構築
+                        var path: [16]u8 = undefined;
+                        @memcpy(path[0..octets.len], octets);
+                        path[current_depth] = octet;
+                        var addr = if (ip.is4()) IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } else IPAddr{ .v6 = path[0..16].* };
+                        const fringe_pfx = Prefix.init(&addr, fringe_bits);
+                        
+                        return Result{ .prefix = fringe_pfx, .value = fringe.value, .ok = true };
                     },
                 }
             }
             
             // バックトラッキングフェーズ: スタックを巻き戻してLPMを探す
-            var depth = current_depth;
-            while (depth > 0) {
-                depth -= 1;
+            // Go実装では、current_depthから開始してdepth >= 0まで
+            var depth = if (current_depth <= max_depth) current_depth else max_depth;
+            while (depth >= 0) {
                 current_node = stack[depth];
                 
-                // 現在のノードでLPMを試行
-                if (current_node.prefixes.len() > 0) {
-                    var octet: u8 = 0;
-                    if (depth < octets.len) {
-                        octet = octets[depth];
-                    }
-                    
-                    const idx = if (depth == max_depth) 
-                        base_index.pfxToIdx256(octet, last_bits) 
-                    else 
-                        base_index.hostIdx(octet);
-                    
-                    const lpm_result = current_node.lpmGet(idx);
-                    if (lpm_result.ok) {
-                        // プレフィックスを再構築
-                        const pfx_info = base_index.idxToPfx256(lpm_result.base_idx) catch continue;
-                        const pfx_len = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
-                        var prefix_addr = ip.*;
-                        prefix_addr = prefix_addr.masked(pfx_len);
-                        const lpm_pfx = Prefix.init(&prefix_addr, pfx_len);
-                        
-                        return Result{ .prefix = lpm_pfx, .value = lpm_result.val, .ok = true };
-                    }
+                // longest prefix match, skip if node has no prefixes
+                if (current_node.prefixes.len() == 0) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    continue;
                 }
+                
+                // Go実装の条件: only the lastOctet may have a different prefix len
+                octet = octets[depth];
+                const idx = if (depth == max_depth) 
+                    base_index.pfxToIdx256(octet, last_bits) 
+                else 
+                    base_index.hostIdx(octet);
+                
+                const lmp_result = current_node.lpmGet(idx);
+                if (lmp_result.ok) {
+                    // Go実装: get the pfxLen from depth and top idx
+                    const pfx_len = base_index.pfxLen256(@as(i32, @intCast(depth)), lmp_result.base_idx) catch {
+                        if (depth == 0) break;
+                        depth -= 1;
+                        continue;
+                    };
+                    
+                    // Go実装: calculate the lmpPfx from incoming ip and new mask
+                    var prefix_addr = ip.*;
+                    prefix_addr = prefix_addr.masked(pfx_len);
+                    const lmp_pfx = Prefix.init(&prefix_addr, pfx_len);
+                    
+                    return Result{ .prefix = lmp_pfx, .value = lmp_result.val, .ok = true };
+                }
+                
+                if (depth == 0) break;
+                depth -= 1;
             }
             
             return Result{ .prefix = undefined, .value = undefined, .ok = false };
