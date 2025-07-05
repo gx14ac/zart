@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     lib.installHeader(b.path("src/bart.h"), "bart.h");
     b.installArtifact(lib);
 
+    // Benchmarks
     const bench_exe = b.addExecutable(.{
         .name = "bench",
         .root_source_file = b.path("src/bench.zig"),
@@ -53,17 +54,9 @@ pub fn build(b: *std.Build) void {
     const advanced_bench_step = b.step("advanced_bench", "Run advanced benchmarks");
     advanced_bench_step.dependOn(&run_advanced_bench.step);
 
-    // テスト
-    const main_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_main_tests = b.addRunArtifact(main_tests);
-    const test_step = b.step("test", "Run library tests");
-    test_step.dependOn(&run_main_tests.step);
 
-
+    // Application tests
+    // base_index
     const base_index_tests = b.addTest(.{
         .root_source_file = b.path("src/base_index.zig"),
         .target = target,
@@ -73,6 +66,7 @@ pub fn build(b: *std.Build) void {
     const base_index_test_step = b.step("base_index_test", "Run base_index tests");
     base_index_test_step.dependOn(&run_base_index_tests.step);
 
+    // test_basic
     const test_basic_tests = b.addTest(.{
         .root_source_file = b.path("src/test_basic.zig"),
         .target = target,
@@ -81,4 +75,42 @@ pub fn build(b: *std.Build) void {
     const run_test_basic_tests = b.addRunArtifact(test_basic_tests);
     const test_basic_test_step = b.step("test_basic_test", "Run test_basic tests");
     test_basic_test_step.dependOn(&run_test_basic_tests.step);
+
+    // bitset256
+    const bitset256_tests = b.addTest(.{
+        .root_source_file = b.path("src/bitset256.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_bitset256_tests = b.addRunArtifact(bitset256_tests);
+    const bitset256_test_step = b.step("bitset256_test", "Run bitset256 tests");
+    bitset256_test_step.dependOn(&run_bitset256_tests.step);
+
+    // table
+    const table_tests = b.addTest(.{
+        .root_source_file = b.path("src/table.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_table_tests = b.addRunArtifact(table_tests);
+    const table_test_step = b.step("table_test", "Run table tests");
+    table_test_step.dependOn(&run_table_tests.step);
+
+    // lookup_tbl
+    const lookup_tbl_tests = b.addTest(.{
+        .root_source_file = b.path("src/lookup_tbl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_lookup_tbl_tests = b.addRunArtifact(lookup_tbl_tests);
+    const lookup_tbl_test_step = b.step("lookup_tbl_test", "Run lookup_tbl tests");
+    lookup_tbl_test_step.dependOn(&run_lookup_tbl_tests.step);
+
+    // combine all application tests
+    const test_step = b.step("test", "Run all tests");
+    test_step.dependOn(&run_base_index_tests.step);
+    test_step.dependOn(&run_test_basic_tests.step);
+    test_step.dependOn(&run_bitset256_tests.step);
+    test_step.dependOn(&run_table_tests.step);
+    test_step.dependOn(&run_lookup_tbl_tests.step);
 }

@@ -1,38 +1,35 @@
 const std = @import("std");
-const Array256 = @import("sparse_array256.zig").Array256;
 const base_index = @import("base_index.zig");
-const bitset256 = @import("bitset256.zig");
 const sparse_array256 = @import("sparse_array256.zig");
-const node_pool = @import("node_pool.zig");
+const Array256 = sparse_array256.Array256;
+const bitset256 = @import("bitset256.zig");
+const BitSet256 = bitset256.BitSet256;
 const lookup_tbl = @import("lookup_tbl.zig");
 
-const stride_len = 8; // byte, a multibit trie with stride len 8
-const max_tree_depth = 16; // max 16 bytes for IPv6
-const max_items = 256; // max 256 prefixes or children in node
+/// LookupResult represents the result of a lookup operation
+pub fn LookupResult(comptime V: type) type {
+    return struct {
+        prefix: Prefix,
+        value: V,
+        ok: bool,
+    };
+}
 
-/// stridePath, max 16 octets deep
-pub const StridePath = [max_tree_depth]u8;
-
-/// node is a level node in the multibit-trie.
+/// Node is a level node in the multibit-trie.
 /// A node has prefixes and children, forming the multibit trie.
 ///
 /// The prefixes, mapped by the baseIndex() function from the ART algorithm,
 /// form a complete binary tree.
-/// See the artlookup.pdf paper in the doc folder to understand the mapping function
-/// and the binary tree of prefixes.
 ///
 /// In contrast to the ART algorithm, sparse arrays (popcount-compressed slices)
 /// are used instead of fixed-size arrays.
-///
-/// The array slots are also not pre-allocated (alloted) as described
-/// in the ART algorithm, fast bitset operations are used to find the
-/// longest-prefix-match.
 ///
 /// The child array recursively spans the trie with a branching factor of 256
 /// and also records path-compressed leaves in the free node slots.
 pub fn Node(comptime V: type) type {
     return struct {
         const Self = @This();
+        const Result = LookupResult(V);
         
         /// prefixes contains the routes, indexed as a complete binary tree with payload V
         /// with the help of the baseIndex mapping function from the ART algorithm.
@@ -41,15 +38,20 @@ pub fn Node(comptime V: type) type {
         /// children, recursively spans the trie with a branching factor of 256.
         children: Array256(Child(V)),
         
-        pub fn init(allocator: std.mem.Allocator) Self {
-            return Self{
+        allocator: std.mem.Allocator,
+        
+        pub fn init(allocator: std.mem.Allocator) *Self {
+            const node = allocator.create(Node(V)) catch unreachable;
+            node.* = Self{
                 .prefixes = Array256(V).init(allocator),
                 .children = Array256(Child(V)).init(allocator),
+                .allocator = allocator,
             };
+            return node;
         }
         
         pub fn deinit(self: *Self) void {
-            // 子ノードの再帰的解放
+            // 子ノードを再帰的にdeinit
             var i: usize = 0;
             while (i < 256) : (i += 1) {
                 const idx = std.math.cast(u8, i) orelse break;
@@ -58,12 +60,13 @@ pub fn Node(comptime V: type) type {
                     switch (child) {
                         .node => |node_ptr| {
                             node_ptr.deinit();
-                            self.children.items.allocator.destroy(node_ptr);
+                            node_ptr.allocator.destroy(node_ptr);
                         },
                         else => {},
                     }
                 }
             }
+            // Array256のdeinitで自動的にクリーンアップされる
             self.prefixes.deinit();
             self.children.deinit();
         }
@@ -89,8 +92,7 @@ pub fn Node(comptime V: type) type {
                     octet = octets[current_depth];
                 }
                 if (!current_node.children.isSet(octet)) {
-                    const new_node = allocator.create(Node(V)) catch unreachable;
-                    new_node.* = Node(V).init(allocator);
+                    const new_node = Node(V).init(allocator);
                     const child = Child(V){ .node = new_node };
                     _ = (&current_node.children).insertAt(octet, child);
                 }
@@ -110,6 +112,114 @@ pub fn Node(comptime V: type) type {
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
             const inserted = current_node.prefixes.insertAt(idx, val);
             return inserted;
+        }
+        
+        fn deepCloneChild(child: *const Child(V), allocator: std.mem.Allocator) Child(V) {
+            return switch (child.*) {
+                .node => |node_ptr| {
+                    const new_node = Self.init(allocator);
+                    new_node.prefixes = node_ptr.prefixes.deepCopy(allocator, struct {
+                        fn cloneFn(val: *const V, _: std.mem.Allocator) V { return val.*; }
+                    }.cloneFn);
+                    new_node.children = node_ptr.children.deepCopy(allocator, Self.deepCloneChild);
+                    return Child(V){ .node = new_node };
+                },
+                .leaf => |leaf| {
+                    return Child(V){ .leaf = leaf.cloneLeaf() };
+                },
+                .fringe => |fringe| {
+                    return Child(V){ .fringe = fringe.cloneFringe() };
+                },
+            };
+        }
+        
+        fn shallowCloneChild(child: *const Child(V), allocator: std.mem.Allocator) Child(V) {
+            return switch (child.*) {
+                .node => |node_ptr| {
+                    const new_node = Self.init(allocator);
+                    new_node.prefixes = node_ptr.prefixes.deepCopy(allocator, struct {
+                        fn cloneFn(val: *const V, _: std.mem.Allocator) V { return val.*; }
+                    }.cloneFn);
+                    new_node.children = node_ptr.children.deepCopy(allocator, Self.shallowCloneChild);
+                    return Child(V){ .node = new_node };
+                },
+                .leaf => |leaf| {
+                    return Child(V){ .leaf = leaf.cloneLeaf() };
+                },
+                .fringe => |fringe| {
+                    return Child(V){ .fringe = fringe.cloneFringe() };
+                },
+            };
+        }
+        pub fn cloneRec(self: *const Self, allocator: std.mem.Allocator) *Self {
+            const new_node = Self.init(allocator);
+            new_node.prefixes = self.prefixes.deepCopy(allocator, struct {
+                fn cloneFn(val: *const V, _: std.mem.Allocator) V {
+                    return val.*;
+                }
+            }.cloneFn);
+            new_node.children = self.children.deepCopy(allocator, Self.deepCloneChild);
+            return new_node;
+        }
+        pub fn cloneFlat(self: *const Self, allocator: std.mem.Allocator) *Self {
+            const new_node = Self.init(allocator);
+            new_node.prefixes = self.prefixes.deepCopy(allocator, struct {
+                fn cloneFn(val: *const V, _: std.mem.Allocator) V {
+                    return val.*;
+                }
+            }.cloneFn);
+            new_node.children = self.children.deepCopy(allocator, Self.shallowCloneChild);
+            return new_node;
+        }
+
+        /// insertAtDepthPersist: Go実装と同じ動作の不変なinsert
+        pub fn insertAtDepthPersist(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
+            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
+            var current_depth = depth;
+            var current_node = self;
+            
+            while (current_depth < max_depth) : (current_depth += 1) {
+                var octet: u8 = 0;
+                if (current_depth < octets.len) {
+                    octet = octets[current_depth];
+                }
+                if (!current_node.children.isSet(octet)) {
+                    const new_node = Node(V).init(allocator);
+                    const child = Child(V){ .node = new_node };
+                    _ = (&current_node.children).replaceAt(octet, child);
+                }
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        // 子ノードをクローンして置き換え
+                        const cloned_node = node.cloneFlat(allocator);
+                        if (current_node.children.replaceAt(octet, Child(V){ .node = cloned_node })) |old_child| {
+                            switch (old_child) {
+                                .node => |old_node| {
+                                    old_node.deinit();
+                                    old_node.allocator.destroy(old_node);
+                                },
+                                else => {},
+                            }
+                        }
+                        current_node = cloned_node;
+                    },
+                    else => unreachable,
+                }
+            }
+            
+            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
+            var octet_val: u8 = 0;
+            if (octets.len > prefix_byte_idx) {
+                octet_val = octets[prefix_byte_idx];
+            }
+            const idx = base_index.pfxToIdx256(octet_val, last_bits);
+            const was_new_insert = current_node.prefixes.insertAt(idx, val);
+            return !was_new_insert; // 既存を更新した場合はtrue、新規挿入の場合はfalse
         }
         
         /// lpmTest tests if there is a longest prefix match for idx
@@ -159,227 +269,11 @@ pub fn Node(comptime V: type) type {
             }
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
             if (current_node.prefixes.isSet(idx)) {
-                const val = current_node.prefixes.get(idx);
-                return val;
-            }
-            if (current_node.children.isSet(idx)) {
-                if (current_node.children.get(idx)) |child| {
-                    switch (child) {
-                        .leaf => |leaf| {
-                            if (leaf.prefix.eql(pfx.*)) {
-                                return leaf.value;
-                            }
-                        },
-                        .fringe => |fringe| {
-                            return fringe.value;
-                        },
-                        .node => |node| {
-                            const val = node.get(pfx);
-                            if (val) |v| {
-                                return v;
-                            }
-                        },
-                    }
-                }
+                return current_node.prefixes.mustGet(idx);
             }
             return null;
         }
-
-        pub fn lookup(self: *const Self, pfx: *const Prefix) ?V {
-            const masked_pfx = pfx.masked();
-            const ip = &masked_pfx.addr;
-            const bits = masked_pfx.bits;
-            const octets = ip.asSlice();
-            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            var stack: [16]*const Node(V) = undefined;
-            var depth: usize = 0;
-            var current_node = self;
-            while (depth < octets.len) : (depth += 1) {
-                stack[depth] = current_node;
-                const octet: u8 = octets[depth];
-                if (depth >= max_depth) {
-                    break;
-                }
-                if (!current_node.children.isSet(octet)) {
-                    break;
-                }
-                const kid = current_node.children.mustGet(octet);
-                switch (kid) {
-                    .node => |node| {
-                        current_node = node;
-                    },
-                    .leaf => |leaf| {
-                        if (leaf.prefix.eql(masked_pfx)) {
-                            return leaf.value;
-                        }
-                        return null;
-                    },
-                    .fringe => |fringe| {
-                        if (isFringe(depth, bits)) {
-                            return fringe.value;
-                        }
-                        return null;
-                    },
-                }
-            }
-            if (depth == max_depth) {
-                const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
-                var octet: u8 = 0;
-                if (octets.len > prefix_byte_idx) {
-                    octet = octets[prefix_byte_idx];
-                }
-                const idx = base_index.pfxToIdx256(octet, last_bits);
-                if (current_node.prefixes.isSet(idx)) {
-                    const val = current_node.prefixes.mustGet(idx);
-                    return val;
-                }
-            }
-            var d: isize = @as(isize, @intCast(depth)) - 1;
-            while (d >= 0) : (d -= 1) {
-                const stack_idx = @as(usize, @intCast(d));
-                if (stack_idx >= stack.len) break;
-                current_node = stack[stack_idx];
-                const actual_depth = @as(usize, @intCast(d)) + 1;
-                const octet: u8 = if (actual_depth <= octets.len) octets[actual_depth - 1] else 0;
-                const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
-                var prefix_octet: u8 = 0;
-                if (octets.len > prefix_byte_idx) {
-                    prefix_octet = octets[prefix_byte_idx];
-                }
-                const idx = if (actual_depth == max_depth)
-                    base_index.pfxToIdx256(prefix_octet, last_bits)
-                else
-                    base_index.hostIdx(octet);
-                if (actual_depth == max_depth) {
-                    if (current_node.prefixes.isSet(@as(u8, @intCast(idx)))) {
-                        const val = current_node.prefixes.mustGet(@as(u8, @intCast(idx)));
-                        return val;
-                    }
-                } else {
-                    if (current_node.lpmTest(idx)) {
-                        const result = current_node.lpmGet(idx);
-                        if (result.ok) {
-                            return result.val;
-                        }
-                    }
-                }
-            }
-            if (depth < max_depth) {
-                var max_depth_node = self;
-                var i: usize = 0;
-                while (i < max_depth) : (i += 1) {
-                    const octet: u8 = if (i < octets.len) octets[i] else 0;
-                    if (max_depth_node.children.isSet(octet)) {
-                        const kid = max_depth_node.children.mustGet(octet);
-                        switch (kid) {
-                            .node => |node| {
-                                max_depth_node = node;
-                            },
-                            else => break,
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
-                var octet: u8 = 0;
-                if (octets.len > prefix_byte_idx) {
-                    octet = octets[prefix_byte_idx];
-                }
-                const idx = base_index.pfxToIdx256(octet, last_bits);
-                if (max_depth_node.prefixes.isSet(idx)) {
-                    const val = max_depth_node.prefixes.mustGet(idx);
-                    return val;
-                }
-            }
-            return null;
-        }
-
-        pub fn contains(self: *const Self, pfx: *const Prefix) bool {
-            const masked_pfx = pfx.masked();
-            const ip = &masked_pfx.addr;
-            const bits = masked_pfx.bits;
-            const octets = ip.asSlice();
-            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            var current_depth: usize = 0;
-            var current_node = self;
-            var found = false;
-            while (current_depth < max_depth) : (current_depth += 1) {
-                const octet_idx: usize = if (current_depth == 0) 0 else current_depth - 1;
-                const octet_val: u8 = if (current_depth == 0 or max_depth == 0) 0 else (if (octets.len > octet_idx) octets[octet_idx] else 0);
-                const idx = base_index.pfxToIdx256(octet_val, last_bits);
-                if (current_node.prefixes.isSet(idx)) {
-                    found = true;
-                }
-                var octet: u8 = 0;
-                if (current_depth < octets.len) {
-                    octet = octets[current_depth];
-                }
-                if (!current_node.children.isSet(octet)) {
-                    break;
-                }
-                const kid = current_node.children.mustGet(octet);
-                switch (kid) {
-                    .node => |node| {
-                        current_node = node;
-                    },
-                    .leaf => |_| {
-                        return true;
-                    },
-                    .fringe => |_| {
-                        return true;
-                    },
-                }
-            }
-            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
-            var octet_val: u8 = 0;
-            if (octets.len > prefix_byte_idx) {
-                octet_val = octets[prefix_byte_idx];
-            }
-            const idx = base_index.pfxToIdx256(octet_val, last_bits);
-            if (current_node.prefixes.isSet(idx)) {
-                found = true;
-            }
-            return found;
-        }
-
-        pub fn update(self: *Self, pfx: *const Prefix, cb: fn (V, bool) V) struct { value: V, was_present: bool } {
-            const masked_pfx = pfx.masked();
-            const ip = &masked_pfx.addr;
-            const bits = masked_pfx.bits;
-            const octets = ip.asSlice();
-            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            var current_depth: usize = 0;
-            var current_node = self;
-            while (current_depth < max_depth) : (current_depth += 1) {
-                var octet: u8 = 0;
-                if (current_depth < octets.len) {
-                    octet = octets[current_depth];
-                }
-                if (!current_node.children.isSet(octet)) {
-                    break;
-                }
-                const kid = current_node.children.mustGet(octet);
-                switch (kid) {
-                    .node => |node| {
-                        current_node = node;
-                    },
-                    else => break,
-                }
-            }
-            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
-            var octet_val: u8 = 0;
-            if (octets.len > prefix_byte_idx) {
-                octet_val = octets[prefix_byte_idx];
-            }
-            const idx = base_index.pfxToIdx256(octet_val, last_bits);
-            const result = current_node.prefixes.updateAt(idx, cb);
-            return .{ .value = result.new_value, .was_present = result.was_present };
-        }
-
+        
         pub fn delete(self: *Self, pfx: *const Prefix) ?V {
             const masked_pfx = pfx.masked();
             const ip = &masked_pfx.addr;
@@ -402,20 +296,7 @@ pub fn Node(comptime V: type) type {
                     .node => |node| {
                         current_node = node;
                     },
-                    .leaf => |leaf| {
-                        if (leaf.prefix.eql(masked_pfx)) {
-                            _ = (&current_node.children).deleteAt(octet);
-                            return leaf.value;
-                        }
-                        return null;
-                    },
-                    .fringe => |fringe| {
-                        if (isFringe(current_depth, bits)) {
-                            _ = (&current_node.children).deleteAt(octet);
-                            return fringe.value;
-                        }
-                        return null;
-                    },
+                    else => return null,
                 }
             }
             const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
@@ -425,6 +306,440 @@ pub fn Node(comptime V: type) type {
             }
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
             return current_node.prefixes.deleteAt(idx);
+        }
+        
+        /// lookup performs longest prefix matching for the given IP address
+        pub fn lookup(self: *const Self, addr: *const IPAddr) Result {
+            const octets = addr.asSlice();
+            var current_node = self;
+            var current_depth: usize = 0;
+            var best_match = Result{ .prefix = undefined, .value = undefined, .ok = false };
+            
+            while (current_depth < octets.len) : (current_depth += 1) {
+                const octet = octets[current_depth];
+                
+                // 現在のノードでLPMを試行
+                const lpm_result = current_node.lpmGet(octet);
+                if (lpm_result.ok) {
+                    // プレフィックスを再構築
+                    const pfx_info = base_index.idxToPfx256(lpm_result.base_idx) catch continue;
+                    var prefix_addr = addr.*;
+                    prefix_addr = prefix_addr.masked(@as(u8, @intCast(current_depth * 8 + pfx_info.pfx_len)));
+                    const prefix = Prefix.init(&prefix_addr, @as(u8, @intCast(current_depth * 8 + pfx_info.pfx_len)));
+                    best_match = Result{ .prefix = prefix, .value = lpm_result.val, .ok = true };
+                }
+                
+                // 子ノードに進む
+                if (!current_node.children.isSet(octet)) {
+                    break;
+                }
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                    },
+                    else => break,
+                }
+            }
+            
+            return best_match;
+        }
+        
+        /// lookupPrefix performs longest prefix matching for the given prefix
+        /// This is a complete rewrite based on Go BART implementation
+        pub fn lookupPrefix(self: *const Self, pfx: *const Prefix) Result {
+            const masked_pfx = pfx.masked();
+            const ip = &masked_pfx.addr;
+            const bits = masked_pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
+            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
+            
+            var current_depth: usize = 0;
+            var current_node = self;
+            var octet: u8 = 0;
+            
+            // スタックを使ってパスを記録（バックトラッキング用）
+            var stack: [16]*const Self = undefined;
+            
+            // 前進フェーズ: プレフィックスのパスに沿ってトライを降りる
+            forward_loop: while (current_depth < octets.len) {
+                if (current_depth > max_depth) {
+                    current_depth -= 1;
+                    break;
+                }
+                
+                octet = octets[current_depth];
+                
+                // 現在のノードをスタックに記録
+                stack[current_depth] = current_node;
+                
+                if (!current_node.children.isSet(octet)) {
+                    break :forward_loop;
+                }
+                
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        current_depth += 1;
+                        continue :forward_loop;
+                    },
+                    .leaf => |leaf| {
+                        // Go実装の条件: kid.prefix.Bits() > bits || !kid.prefix.Contains(ip)
+                        if (leaf.prefix.bits > bits or !leaf.prefix.containsAddr(masked_pfx.addr)) {
+                            break :forward_loop;
+                        }
+                        return Result{ .prefix = leaf.prefix, .value = leaf.value, .ok = true };
+                    },
+                    .fringe => |fringe| {
+                        // Go実装の条件: fringeBits > bits
+                        const fringe_bits = @as(u8, @intCast((current_depth + 1) * 8));
+                        if (fringe_bits > bits) {
+                            break :forward_loop;
+                        }
+                        
+                        // fringeプレフィックスを再構築
+                        var path: [16]u8 = undefined;
+                        @memcpy(path[0..octets.len], octets);
+                        path[current_depth] = octet;
+                        var addr = if (ip.is4()) IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } else IPAddr{ .v6 = path[0..16].* };
+                        const fringe_pfx = Prefix.init(&addr, fringe_bits);
+                        
+                        return Result{ .prefix = fringe_pfx, .value = fringe.value, .ok = true };
+                    },
+                }
+            }
+            
+            // バックトラッキングフェーズ: スタックを巻き戻してLPMを探す
+            // Go実装では、current_depthから開始してdepth >= 0まで
+            var depth = if (current_depth <= max_depth) current_depth else max_depth;
+            while (depth >= 0) {
+                current_node = stack[depth];
+                
+                // longest prefix match, skip if node has no prefixes
+                if (current_node.prefixes.len() == 0) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    continue;
+                }
+                
+                // Go実装の条件: only the lastOctet may have a different prefix len
+                octet = octets[depth];
+                const idx = if (depth == max_depth) 
+                    base_index.pfxToIdx256(octet, last_bits) 
+                else 
+                    base_index.hostIdx(octet);
+                
+                const lmp_result = current_node.lpmGet(idx);
+                if (lmp_result.ok) {
+                    // Go実装: get the pfxLen from depth and top idx
+                    const pfx_len = base_index.pfxLen256(@as(i32, @intCast(depth)), lmp_result.base_idx) catch {
+                        if (depth == 0) break;
+                        depth -= 1;
+                        continue;
+                    };
+                    
+                    // Go実装: calculate the lmpPfx from incoming ip and new mask
+                    var prefix_addr = ip.*;
+                    prefix_addr = prefix_addr.masked(pfx_len);
+                    const lmp_pfx = Prefix.init(&prefix_addr, pfx_len);
+                    
+                    return Result{ .prefix = lmp_pfx, .value = lmp_result.val, .ok = true };
+                }
+                
+                if (depth == 0) break;
+                depth -= 1;
+            }
+            
+            return Result{ .prefix = undefined, .value = undefined, .ok = false };
+        }
+
+        /// overlapsIdx returns true if node overlaps with prefix
+        /// Go実装のoverlapsIdxメソッドを移植
+        pub fn overlapsIdx(self: *const Self, idx: u8) bool {
+            // 1. Test if any route in this node overlaps prefix?
+            if (self.lpmTest(idx)) {
+                return true;
+            }
+
+            // 2. Test if prefix overlaps any route in this node
+            // use bitset intersections instead of range loops
+            // shallow copy pre alloted bitset for idx
+            const alloted_prefix_routes = lookup_tbl.idxToPrefixRoutes(idx);
+            if (alloted_prefix_routes.intersectsAny(&self.prefixes.bitset)) {
+                return true;
+            }
+
+            // 3. Test if prefix overlaps any child in this node
+            const alloted_host_routes = lookup_tbl.idxToFringeRoutes(idx);
+            return alloted_host_routes.intersectsAny(&self.children.bitset);
+        }
+
+        /// overlapsRoutes tests if n overlaps o prefixes and vice versa
+        /// Go実装のoverlapsRoutesメソッドを移植
+        pub fn overlapsRoutes(self: *const Self, other: *const Self) bool {
+            // some prefixes are identical, trivial overlap
+            if (self.prefixes.intersectsAny(&other.prefixes.bitset)) {
+                return true;
+            }
+
+            // get the lowest idx (biggest prefix)
+            const n_first_idx = self.prefixes.bitset.firstSet() orelse return false;
+            const o_first_idx = other.prefixes.bitset.firstSet() orelse return false;
+
+            // start with other min value
+            var n_idx = o_first_idx;
+            var o_idx = n_first_idx;
+
+            var n_ok = true;
+            var o_ok = true;
+
+            // zip, range over n and o together to help chance on its way
+            while (n_ok or o_ok) {
+                if (n_ok) {
+                    // does any route in o overlap this prefix from n
+                    if (self.prefixes.bitset.nextSet(n_idx)) |next_n_idx| {
+                        n_idx = next_n_idx;
+                        if (other.lpmTest(n_idx)) {
+                            return true;
+                        }
+
+                        if (n_idx == 255) {
+                            // stop, don't overflow uint8!
+                            n_ok = false;
+                        } else {
+                            n_idx += 1;
+                        }
+                    } else {
+                        n_ok = false;
+                    }
+                }
+
+                if (o_ok) {
+                    // does any route in n overlap this prefix from o
+                    if (other.prefixes.bitset.nextSet(o_idx)) |next_o_idx| {
+                        o_idx = next_o_idx;
+                        if (self.lpmTest(o_idx)) {
+                            return true;
+                        }
+
+                        if (o_idx == 255) {
+                            // stop, don't overflow uint8!
+                            o_ok = false;
+                        } else {
+                            o_idx += 1;
+                        }
+                    } else {
+                        o_ok = false;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// overlapsChildrenIn tests if prefixes in n overlaps child octets in o
+        /// Go実装のoverlapsChildrenInメソッドを移植
+        pub fn overlapsChildrenIn(self: *const Self, other: *const Self) bool {
+            const pfx_count = self.prefixes.len();
+            const child_count = other.children.len();
+
+            // heuristic, compare benchmarks
+            // when will we range over the children and when will we do bitset calc?
+            const magic_number = 15;
+            const do_range = child_count < magic_number or pfx_count > magic_number;
+
+            // do range over, not so many childs and maybe too many prefixes for other algo below
+            if (do_range) {
+                var buf: [256]u8 = undefined;
+                const children_slice = other.children.bitset.asSlice(&buf);
+                for (children_slice) |addr| {
+                    if (self.lpmTest(base_index.hostIdx(addr))) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // do bitset intersection, alloted route table with child octets
+            // maybe too many childs for range-over or not so many prefixes to
+            // build the alloted routing table from them
+
+            // make allot table with prefixes as bitsets, bitsets are precalculated.
+            // Just union the bitsets to one bitset (allot table) for all prefixes
+            // in this node
+            var host_routes = BitSet256.init();
+
+            var buf: [256]u8 = undefined;
+            const all_indices = self.prefixes.bitset.asSlice(&buf);
+
+            // union all pre alloted bitsets
+            for (all_indices) |idx| {
+                const fringe_routes = lookup_tbl.idxToFringeRoutes(idx);
+                host_routes = host_routes.bitUnion(&fringe_routes);
+            }
+
+            return host_routes.intersectsAny(&other.children.bitset);
+        }
+
+        /// overlaps returns true if any IP in the nodes n or o overlaps
+        /// Go実装のoverlapsメソッドを移植
+        pub fn overlaps(self: *const Self, other: *const Self, depth: usize) bool {
+            const n_pfx_count = self.prefixes.len();
+            const o_pfx_count = other.prefixes.len();
+
+            const n_child_count = self.children.len();
+            const o_child_count = other.children.len();
+
+            // ##############################
+            // 1. Test if any routes overlaps
+            // ##############################
+
+            // full cross check
+            if (n_pfx_count > 0 and o_pfx_count > 0) {
+                if (self.overlapsRoutes(other)) {
+                    return true;
+                }
+            }
+
+            // ####################################
+            // 2. Test if routes overlaps any child
+            // ####################################
+
+            // swap nodes to help chance on its way,
+            // if the first call to expensive overlapsChildrenIn() is already true,
+            // if both orders are false it doesn't help either
+            var n_node = self;
+            var o_node = other;
+            var n_pfx_count_local = n_pfx_count;
+            var o_pfx_count_local = o_pfx_count;
+            var n_child_count_local = n_child_count;
+            var o_child_count_local = o_child_count;
+
+            if (n_child_count > o_child_count) {
+                n_node = other;
+                o_node = self;
+                n_pfx_count_local = o_pfx_count;
+                o_pfx_count_local = n_pfx_count;
+                n_child_count_local = o_child_count;
+                o_child_count_local = n_child_count;
+            }
+
+            if (n_pfx_count_local > 0 and o_child_count_local > 0) {
+                if (n_node.overlapsChildrenIn(o_node)) {
+                    return true;
+                }
+            }
+
+            // symmetric reverse
+            if (o_pfx_count_local > 0 and n_child_count_local > 0) {
+                if (o_node.overlapsChildrenIn(n_node)) {
+                    return true;
+                }
+            }
+
+            // ###########################################
+            // 3. childs with same octet in nodes n and o
+            // ###########################################
+
+            // stop condition, n or o have no childs
+            if (n_child_count == 0 or o_child_count == 0) {
+                return false;
+            }
+
+            // stop condition, no child with identical octet in n and o
+            if (!self.children.intersectsAny(&other.children.bitset)) {
+                return false;
+            }
+
+            return self.overlapsSameChildren(other, depth);
+        }
+
+        /// overlapsSameChildren finds same octets with bitset intersection
+        /// Go実装のoverlapsSameChildrenメソッドを移植
+        fn overlapsSameChildren(self: *const Self, other: *const Self, depth: usize) bool {
+            // intersect the child bitsets from n with o
+            const common_children = self.children.bitset.intersection(&other.children.bitset);
+
+            var addr: u8 = 0;
+            var ok = true;
+            while (ok) {
+                if (common_children.nextSet(addr)) |next_addr| {
+                    addr = next_addr;
+                    const n_child = self.children.mustGet(addr);
+                    const o_child = other.children.mustGet(addr);
+
+                    if (overlapsTwoChilds(V, n_child, o_child, depth + 1)) {
+                        return true;
+                    }
+
+                    if (addr == 255) {
+                        // stop, don't overflow uint8!
+                        ok = false;
+                    } else {
+                        addr += 1;
+                    }
+                } else {
+                    ok = false;
+                }
+            }
+            return false;
+        }
+
+        /// overlapsPrefixAtDepth returns true if node overlaps with prefix
+        /// starting with prefix octet at depth
+        /// Go実装のoverlapsPrefixAtDepthメソッドを移植
+        pub fn overlapsPrefixAtDepth(self: *const Self, pfx: *const Prefix, depth: usize) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth_info = base_index.maxDepthAndLastBits(bits);
+            const max_depth = max_depth_info.max_depth;
+            const last_bits = max_depth_info.last_bits;
+
+            var current_depth = depth;
+            var current_node = self;
+
+            while (current_depth < octets.len) : (current_depth += 1) {
+                if (current_depth > max_depth) {
+                    break;
+                }
+
+                const octet = octets[current_depth];
+
+                // full octet path in node trie, check overlap with last prefix octet
+                if (current_depth == max_depth) {
+                    return current_node.overlapsIdx(base_index.pfxToIdx256(octet, last_bits));
+                }
+
+                // test if any route overlaps prefix so far
+                // no best match needed, forward tests without backtracking
+                if (current_node.prefixes.len() != 0 and current_node.lpmTest(base_index.hostIdx(octet))) {
+                    return true;
+                }
+
+                if (!current_node.children.isSet(octet)) {
+                    return false;
+                }
+
+                // next child, node or leaf
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        continue;
+                    },
+                    .leaf => |leaf| {
+                        return leaf.prefix.overlaps(pfx);
+                    },
+                    .fringe => {
+                        return true;
+                    },
+                }
+            }
+
+            @panic("unreachable: " ++ @typeName(@TypeOf(pfx)));
         }
     };
 }
@@ -535,6 +850,20 @@ pub const Prefix = struct {
         return self.addr.eql(masked_addr);
     }
 
+    /// overlaps checks if this prefix overlaps with another prefix
+    /// Go実装のPrefix.Overlapsメソッドを移植
+    pub fn overlaps(self: *const Prefix, other: *const Prefix) bool {
+        // 短い方のプレフィックス長を使用
+        const min_bits = if (self.bits < other.bits) self.bits else other.bits;
+        
+        // 両方のアドレスを短い方の長さでマスク
+        const self_masked = self.addr.masked(min_bits);
+        const other_masked = other.addr.masked(min_bits);
+        
+        // マスクされたアドレスが同じならオーバーラップ
+        return self_masked.eql(other_masked);
+    }
+
     /// Format function for std.debug.print
     pub fn format(self: Prefix, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
@@ -643,3 +972,53 @@ pub const IPAddr = union(enum) {
         }
     }
 };
+
+/// overlapsTwoChilds checks if two children overlap
+/// Go実装のoverlapsTwoChildsを移植
+fn overlapsTwoChilds(comptime V: type, n_child: Child(V), o_child: Child(V), depth: usize) bool {
+    //  3x3 possible different combinations for n and o
+    //
+    //  node, node    --> overlaps rec descent
+    //  node, leaf    --> overlapsPrefixAtDepth
+    //  node, fringe  --> true
+    //
+    //  leaf, node    --> overlapsPrefixAtDepth
+    //  leaf, leaf    --> Prefix.overlaps
+    //  leaf, fringe  --> true
+    //
+    //  fringe, node    --> true
+    //  fringe, leaf    --> true
+    //  fringe, fringe  --> true
+    //
+    switch (n_child) {
+        .node => |n_kind| {
+            switch (o_child) {
+                .node => |o_kind| { // node, node
+                    return n_kind.overlaps(o_kind, depth);
+                },
+                .leaf => |o_kind| { // node, leaf
+                    return n_kind.overlapsPrefixAtDepth(&o_kind.prefix, depth);
+                },
+                .fringe => { // node, fringe
+                    return true;
+                },
+            }
+        },
+        .leaf => |n_kind| {
+            switch (o_child) {
+                .node => |o_kind| { // leaf, node
+                    return o_kind.overlapsPrefixAtDepth(&n_kind.prefix, depth);
+                },
+                .leaf => |o_kind| { // leaf, leaf
+                    return o_kind.prefix.overlaps(&n_kind.prefix);
+                },
+                .fringe => { // leaf, fringe
+                    return true;
+                },
+            }
+        },
+        .fringe => {
+            return true;
+        },
+    }
+}
