@@ -42,48 +42,60 @@ pub fn idxToPrefixRoutes(idx: u8) BitSet256 {
     
     if (idx == 0) return result; // invalid
     
-    // このプレフィックスがカバーする範囲のより具体的なプレフィックスを設定
-    // 2*idx と 2*idx+1 が子ノードのインデックス
-    const left_child = 2 * idx;
-    const right_child = 2 * idx + 1;
-    
-    if (left_child <= 255) {
-        result.set(left_child);
-    }
-    if (right_child <= 255) {
-        result.set(right_child);
-    }
+    // Go実装のallotRec関数を再現
+    // 完全な二分木でのプレフィックスルートを計算
+    allotRec(&result, @as(usize, idx));
     
     return result;
+}
+
+/// 再帰的にプレフィックスルートを計算する内部関数
+fn allotRec(bitset: *BitSet256, idx: usize) void {
+    // 自分自身を設定
+    if (idx <= 255) {
+        bitset.set(@intCast(idx));
+    }
+    
+    // 256より大きい場合は終了（フリンジ領域）
+    if (idx > 255) {
+        return;
+    }
+    
+    // 左の子ノード
+    allotRec(bitset, idx << 1);
+    // 右の子ノード  
+    allotRec(bitset, (idx << 1) + 1);
 }
 
 /// IdxToFringeRoutes: インデックスに対して、そのプレフィックスによってカバーされる
 /// 子ノードアドレスのビットセットを返す
 pub fn idxToFringeRoutes(idx: u8) BitSet256 {
-    // 簡略化実装: プレフィックスがカバーするアドレス範囲を計算
     var result = BitSet256.init();
     
     if (idx == 0) return result; // invalid
     
-    // プレフィックスの範囲を計算
-    const pfx = base_index.idxToPfx256(idx) catch return result;
-    if (pfx.pfx_len >= 8) {
-        // ホストルート - 単一アドレス
-        result.set(pfx.octet);
-    } else {
-        // ネットワークルート - 範囲
-        const mask = base_index.netMask(pfx.pfx_len);
-        const network = pfx.octet & mask;
-        const range_size = @as(u16, 1) << @intCast(8 - pfx.pfx_len);
-        
-        var addr: u16 = network;
-        while (addr < network + range_size and addr <= 255) {
-            result.set(@intCast(addr));
-            addr += 1;
-        }
-    }
+    // Go実装のallotRec関数を再現（フリンジ用）
+    // 完全な二分木でのフリンジルートを計算
+    allotFringeRec(&result, @as(usize, idx));
     
     return result;
+}
+
+/// 再帰的にフリンジルートを計算する内部関数
+fn allotFringeRec(bitset: *BitSet256, idx: usize) void {
+    // 256以上の場合（フリンジ領域）のみ設定
+    if (idx > 255) {
+        const fringe_idx = idx - 256;
+        if (fringe_idx <= 255) {
+            bitset.set(@intCast(fringe_idx));
+        }
+        return;
+    }
+    
+    // 左の子ノード
+    allotFringeRec(bitset, idx << 1);
+    // 右の子ノード  
+    allotFringeRec(bitset, (idx << 1) + 1);
 }
 
 test "backTrackingBitset basic" {
@@ -135,19 +147,56 @@ test "lookupTbl consistency" {
 }
 
 test "idxToPrefixRoutes basic" {
-    // 基本的なプレフィックスルートテスト
-    const result1 = idxToPrefixRoutes(1);
-    try std.testing.expect(result1.isSet(2));
-    try std.testing.expect(result1.isSet(3));
+    // Go実装のテストケースに合わせて修正
+    // idx: 41 -> want: [41, 82, 83, 164, 165, 166, 167]
+    const result41 = idxToPrefixRoutes(41);
+    try std.testing.expect(result41.isSet(41));
+    try std.testing.expect(result41.isSet(82));
+    try std.testing.expect(result41.isSet(83));
+    try std.testing.expect(result41.isSet(164));
+    try std.testing.expect(result41.isSet(165));
+    try std.testing.expect(result41.isSet(166));
+    try std.testing.expect(result41.isSet(167));
+    
+    // idx: 127 -> want: [127, 254, 255]
+    const result127 = idxToPrefixRoutes(127);
+    try std.testing.expect(result127.isSet(127));
+    try std.testing.expect(result127.isSet(254));
+    try std.testing.expect(result127.isSet(255));
+    
+    // idx: 128 -> want: [128]
+    const result128 = idxToPrefixRoutes(128);
+    try std.testing.expect(result128.isSet(128));
+    try std.testing.expect(!result128.isSet(129)); // 子ノードは256以上なので含まれない
     
     const result0 = idxToPrefixRoutes(0);
     try std.testing.expect(result0.isEmpty());
 }
 
 test "idxToFringeRoutes basic" {
-    // 基本的なフリンジルートテスト
-    const result1 = idxToFringeRoutes(1);
-    try std.testing.expect(!result1.isEmpty());
+    // Go実装のテストケースに合わせて修正
+    // idx: 63 -> want: [248, 249, 250, 251, 252, 253, 254, 255]
+    const result63 = idxToFringeRoutes(63);
+    try std.testing.expect(result63.isSet(248));
+    try std.testing.expect(result63.isSet(249));
+    try std.testing.expect(result63.isSet(250));
+    try std.testing.expect(result63.isSet(251));
+    try std.testing.expect(result63.isSet(252));
+    try std.testing.expect(result63.isSet(253));
+    try std.testing.expect(result63.isSet(254));
+    try std.testing.expect(result63.isSet(255));
+    
+    // idx: 127 -> want: [252, 253, 254, 255]
+    const result127 = idxToFringeRoutes(127);
+    try std.testing.expect(result127.isSet(252));
+    try std.testing.expect(result127.isSet(253));
+    try std.testing.expect(result127.isSet(254));
+    try std.testing.expect(result127.isSet(255));
+    
+    // idx: 128 -> want: [0, 1]
+    const result128 = idxToFringeRoutes(128);
+    try std.testing.expect(result128.isSet(0));
+    try std.testing.expect(result128.isSet(1));
     
     const result0 = idxToFringeRoutes(0);
     try std.testing.expect(result0.isEmpty());

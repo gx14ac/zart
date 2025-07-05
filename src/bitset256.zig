@@ -35,7 +35,7 @@ pub const BitSet256 = struct {
         while (i < 4) : (i += 1) {
             if (self.data[i] != 0) {
                 const trailing = @ctz(self.data[i]);
-                return @as(u8, (i << 6) + trailing);
+                return @as(u8, @intCast((i << 6) + trailing));
             }
         }
         return null;

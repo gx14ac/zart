@@ -454,6 +454,293 @@ pub fn Node(comptime V: type) type {
             
             return Result{ .prefix = undefined, .value = undefined, .ok = false };
         }
+
+        /// overlapsIdx returns true if node overlaps with prefix
+        /// Go実装のoverlapsIdxメソッドを移植
+        pub fn overlapsIdx(self: *const Self, idx: u8) bool {
+            // 1. Test if any route in this node overlaps prefix?
+            if (self.lpmTest(idx)) {
+                return true;
+            }
+
+            // 2. Test if prefix overlaps any route in this node
+            // use bitset intersections instead of range loops
+            // shallow copy pre alloted bitset for idx
+            const alloted_prefix_routes = lookup_tbl.idxToPrefixRoutes(idx);
+            if (alloted_prefix_routes.intersectsAny(&self.prefixes.bitset)) {
+                return true;
+            }
+
+            // 3. Test if prefix overlaps any child in this node
+            const alloted_host_routes = lookup_tbl.idxToFringeRoutes(idx);
+            return alloted_host_routes.intersectsAny(&self.children.bitset);
+        }
+
+        /// overlapsRoutes tests if n overlaps o prefixes and vice versa
+        /// Go実装のoverlapsRoutesメソッドを移植
+        pub fn overlapsRoutes(self: *const Self, other: *const Self) bool {
+            // some prefixes are identical, trivial overlap
+            if (self.prefixes.intersectsAny(&other.prefixes.bitset)) {
+                return true;
+            }
+
+            // get the lowest idx (biggest prefix)
+            const n_first_idx = self.prefixes.bitset.firstSet() orelse return false;
+            const o_first_idx = other.prefixes.bitset.firstSet() orelse return false;
+
+            // start with other min value
+            var n_idx = o_first_idx;
+            var o_idx = n_first_idx;
+
+            var n_ok = true;
+            var o_ok = true;
+
+            // zip, range over n and o together to help chance on its way
+            while (n_ok or o_ok) {
+                if (n_ok) {
+                    // does any route in o overlap this prefix from n
+                    if (self.prefixes.bitset.nextSet(n_idx)) |next_n_idx| {
+                        n_idx = next_n_idx;
+                        if (other.lpmTest(n_idx)) {
+                            return true;
+                        }
+
+                        if (n_idx == 255) {
+                            // stop, don't overflow uint8!
+                            n_ok = false;
+                        } else {
+                            n_idx += 1;
+                        }
+                    } else {
+                        n_ok = false;
+                    }
+                }
+
+                if (o_ok) {
+                    // does any route in n overlap this prefix from o
+                    if (other.prefixes.bitset.nextSet(o_idx)) |next_o_idx| {
+                        o_idx = next_o_idx;
+                        if (self.lpmTest(o_idx)) {
+                            return true;
+                        }
+
+                        if (o_idx == 255) {
+                            // stop, don't overflow uint8!
+                            o_ok = false;
+                        } else {
+                            o_idx += 1;
+                        }
+                    } else {
+                        o_ok = false;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// overlapsChildrenIn tests if prefixes in n overlaps child octets in o
+        /// Go実装のoverlapsChildrenInメソッドを移植
+        pub fn overlapsChildrenIn(self: *const Self, other: *const Self) bool {
+            const pfx_count = self.prefixes.len();
+            const child_count = other.children.len();
+
+            // heuristic, compare benchmarks
+            // when will we range over the children and when will we do bitset calc?
+            const magic_number = 15;
+            const do_range = child_count < magic_number or pfx_count > magic_number;
+
+            // do range over, not so many childs and maybe too many prefixes for other algo below
+            if (do_range) {
+                var buf: [256]u8 = undefined;
+                const children_slice = other.children.bitset.asSlice(&buf);
+                for (children_slice) |addr| {
+                    if (self.lpmTest(base_index.hostIdx(addr))) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // do bitset intersection, alloted route table with child octets
+            // maybe too many childs for range-over or not so many prefixes to
+            // build the alloted routing table from them
+
+            // make allot table with prefixes as bitsets, bitsets are precalculated.
+            // Just union the bitsets to one bitset (allot table) for all prefixes
+            // in this node
+            var host_routes = BitSet256.init();
+
+            var buf: [256]u8 = undefined;
+            const all_indices = self.prefixes.bitset.asSlice(&buf);
+
+            // union all pre alloted bitsets
+            for (all_indices) |idx| {
+                const fringe_routes = lookup_tbl.idxToFringeRoutes(idx);
+                host_routes = host_routes.bitUnion(&fringe_routes);
+            }
+
+            return host_routes.intersectsAny(&other.children.bitset);
+        }
+
+        /// overlaps returns true if any IP in the nodes n or o overlaps
+        /// Go実装のoverlapsメソッドを移植
+        pub fn overlaps(self: *const Self, other: *const Self, depth: usize) bool {
+            const n_pfx_count = self.prefixes.len();
+            const o_pfx_count = other.prefixes.len();
+
+            const n_child_count = self.children.len();
+            const o_child_count = other.children.len();
+
+            // ##############################
+            // 1. Test if any routes overlaps
+            // ##############################
+
+            // full cross check
+            if (n_pfx_count > 0 and o_pfx_count > 0) {
+                if (self.overlapsRoutes(other)) {
+                    return true;
+                }
+            }
+
+            // ####################################
+            // 2. Test if routes overlaps any child
+            // ####################################
+
+            // swap nodes to help chance on its way,
+            // if the first call to expensive overlapsChildrenIn() is already true,
+            // if both orders are false it doesn't help either
+            var n_node = self;
+            var o_node = other;
+            var n_pfx_count_local = n_pfx_count;
+            var o_pfx_count_local = o_pfx_count;
+            var n_child_count_local = n_child_count;
+            var o_child_count_local = o_child_count;
+
+            if (n_child_count > o_child_count) {
+                n_node = other;
+                o_node = self;
+                n_pfx_count_local = o_pfx_count;
+                o_pfx_count_local = n_pfx_count;
+                n_child_count_local = o_child_count;
+                o_child_count_local = n_child_count;
+            }
+
+            if (n_pfx_count_local > 0 and o_child_count_local > 0) {
+                if (n_node.overlapsChildrenIn(o_node)) {
+                    return true;
+                }
+            }
+
+            // symmetric reverse
+            if (o_pfx_count_local > 0 and n_child_count_local > 0) {
+                if (o_node.overlapsChildrenIn(n_node)) {
+                    return true;
+                }
+            }
+
+            // ###########################################
+            // 3. childs with same octet in nodes n and o
+            // ###########################################
+
+            // stop condition, n or o have no childs
+            if (n_child_count == 0 or o_child_count == 0) {
+                return false;
+            }
+
+            // stop condition, no child with identical octet in n and o
+            if (!self.children.intersectsAny(&other.children.bitset)) {
+                return false;
+            }
+
+            return self.overlapsSameChildren(other, depth);
+        }
+
+        /// overlapsSameChildren finds same octets with bitset intersection
+        /// Go実装のoverlapsSameChildrenメソッドを移植
+        fn overlapsSameChildren(self: *const Self, other: *const Self, depth: usize) bool {
+            // intersect the child bitsets from n with o
+            const common_children = self.children.bitset.intersection(&other.children.bitset);
+
+            var addr: u8 = 0;
+            var ok = true;
+            while (ok) {
+                if (common_children.nextSet(addr)) |next_addr| {
+                    addr = next_addr;
+                    const n_child = self.children.mustGet(addr);
+                    const o_child = other.children.mustGet(addr);
+
+                    if (overlapsTwoChilds(V, n_child, o_child, depth + 1)) {
+                        return true;
+                    }
+
+                    if (addr == 255) {
+                        // stop, don't overflow uint8!
+                        ok = false;
+                    } else {
+                        addr += 1;
+                    }
+                } else {
+                    ok = false;
+                }
+            }
+            return false;
+        }
+
+        /// overlapsPrefixAtDepth returns true if node overlaps with prefix
+        /// starting with prefix octet at depth
+        /// Go実装のoverlapsPrefixAtDepthメソッドを移植
+        pub fn overlapsPrefixAtDepth(self: *const Self, pfx: *const Prefix, depth: usize) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth_info = base_index.maxDepthAndLastBits(bits);
+            const max_depth = max_depth_info.max_depth;
+            const last_bits = max_depth_info.last_bits;
+
+            var current_depth = depth;
+            var current_node = self;
+
+            while (current_depth < octets.len) : (current_depth += 1) {
+                if (current_depth > max_depth) {
+                    break;
+                }
+
+                const octet = octets[current_depth];
+
+                // full octet path in node trie, check overlap with last prefix octet
+                if (current_depth == max_depth) {
+                    return current_node.overlapsIdx(base_index.pfxToIdx256(octet, last_bits));
+                }
+
+                // test if any route overlaps prefix so far
+                // no best match needed, forward tests without backtracking
+                if (current_node.prefixes.len() != 0 and current_node.lpmTest(base_index.hostIdx(octet))) {
+                    return true;
+                }
+
+                if (!current_node.children.isSet(octet)) {
+                    return false;
+                }
+
+                // next child, node or leaf
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        continue;
+                    },
+                    .leaf => |leaf| {
+                        return leaf.prefix.overlaps(pfx);
+                    },
+                    .fringe => {
+                        return true;
+                    },
+                }
+            }
+
+            @panic("unreachable: " ++ @typeName(@TypeOf(pfx)));
+        }
     };
 }
 
@@ -561,6 +848,20 @@ pub const Prefix = struct {
         // bits長でマスクして比較
         const masked_addr = addr.masked(self.bits);
         return self.addr.eql(masked_addr);
+    }
+
+    /// overlaps checks if this prefix overlaps with another prefix
+    /// Go実装のPrefix.Overlapsメソッドを移植
+    pub fn overlaps(self: *const Prefix, other: *const Prefix) bool {
+        // 短い方のプレフィックス長を使用
+        const min_bits = if (self.bits < other.bits) self.bits else other.bits;
+        
+        // 両方のアドレスを短い方の長さでマスク
+        const self_masked = self.addr.masked(min_bits);
+        const other_masked = other.addr.masked(min_bits);
+        
+        // マスクされたアドレスが同じならオーバーラップ
+        return self_masked.eql(other_masked);
     }
 
     /// Format function for std.debug.print
@@ -671,3 +972,53 @@ pub const IPAddr = union(enum) {
         }
     }
 };
+
+/// overlapsTwoChilds checks if two children overlap
+/// Go実装のoverlapsTwoChildsを移植
+fn overlapsTwoChilds(comptime V: type, n_child: Child(V), o_child: Child(V), depth: usize) bool {
+    //  3x3 possible different combinations for n and o
+    //
+    //  node, node    --> overlaps rec descent
+    //  node, leaf    --> overlapsPrefixAtDepth
+    //  node, fringe  --> true
+    //
+    //  leaf, node    --> overlapsPrefixAtDepth
+    //  leaf, leaf    --> Prefix.overlaps
+    //  leaf, fringe  --> true
+    //
+    //  fringe, node    --> true
+    //  fringe, leaf    --> true
+    //  fringe, fringe  --> true
+    //
+    switch (n_child) {
+        .node => |n_kind| {
+            switch (o_child) {
+                .node => |o_kind| { // node, node
+                    return n_kind.overlaps(o_kind, depth);
+                },
+                .leaf => |o_kind| { // node, leaf
+                    return n_kind.overlapsPrefixAtDepth(&o_kind.prefix, depth);
+                },
+                .fringe => { // node, fringe
+                    return true;
+                },
+            }
+        },
+        .leaf => |n_kind| {
+            switch (o_child) {
+                .node => |o_kind| { // leaf, node
+                    return o_kind.overlapsPrefixAtDepth(&n_kind.prefix, depth);
+                },
+                .leaf => |o_kind| { // leaf, leaf
+                    return o_kind.prefix.overlaps(&n_kind.prefix);
+                },
+                .fringe => { // leaf, fringe
+                    return true;
+                },
+            }
+        },
+        .fringe => {
+            return true;
+        },
+    }
+}

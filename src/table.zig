@@ -565,6 +565,49 @@ pub fn Table(comptime V: type) type {
             
             return .{ .table = new_table, .value = zero, .ok = false };
         }
+
+        /// OverlapsPrefix reports whether any IP in pfx is matched by a route in the table or vice versa
+        /// Go実装のOverlapsPrefixメソッドを移植
+        pub fn overlapsPrefix(self: *const Self, pfx: *const Prefix) bool {
+            if (!pfx.isValid()) {
+                return false;
+            }
+
+            // canonicalize the prefix
+            const canonical_pfx = pfx.masked();
+
+            const is4 = canonical_pfx.addr.is4();
+            const n = self.rootNodeByVersionConst(is4);
+
+            return n.overlapsPrefixAtDepth(&canonical_pfx, 0);
+        }
+
+        /// Overlaps reports whether any IP in the table is matched by a route in the
+        /// other table or vice versa
+        /// Go実装のOverlapsメソッドを移植
+        pub fn overlaps(self: *const Self, other: *const Self) bool {
+            return self.overlaps4(other) or self.overlaps6(other);
+        }
+
+        /// Overlaps4 reports whether any IPv4 in the table matches a route in the
+        /// other table or vice versa
+        /// Go実装のOverlaps4メソッドを移植
+        pub fn overlaps4(self: *const Self, other: *const Self) bool {
+            if (self.size4 == 0 or other.size4 == 0) {
+                return false;
+            }
+            return self.root4.overlaps(other.root4, 0);
+        }
+
+        /// Overlaps6 reports whether any IPv6 in the table matches a route in the
+        /// other table or vice versa
+        /// Go実装のOverlaps6メソッドを移植
+        pub fn overlaps6(self: *const Self, other: *const Self) bool {
+            if (self.size6 == 0 or other.size6 == 0) {
+                return false;
+            }
+            return self.root6.overlaps(other.root6, 0);
+        }
     };
 }
 
@@ -735,4 +778,200 @@ test "Table lookupPrefix single case debug" {
 
 test "Table get vs lookupPrefix comparison" {
     // このテストは削除 - lookupPrefixの実装が不完全なため
+}
+
+test "Table overlapsPrefix basic" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+    
+    // テスト用のプレフィックスを作成
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    
+    // プレフィックスを挿入
+    table.insert(&pfx1, 1);
+    table.insert(&pfx2, 2);
+    table.insert(&pfx3, 3);
+    
+    // テスト1: 完全一致のプレフィックス
+    try std.testing.expect(table.overlapsPrefix(&pfx1));
+    try std.testing.expect(table.overlapsPrefix(&pfx2));
+    try std.testing.expect(table.overlapsPrefix(&pfx3));
+    
+    // テスト2: オーバーラップするプレフィックス
+    const overlap_pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 128 } }, 25); // pfx1とオーバーラップ
+    const overlap_pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);   // pfx2とオーバーラップ
+    const overlap_pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 1, 0, 0 } }, 16);      // pfx3とオーバーラップ
+    
+    try std.testing.expect(table.overlapsPrefix(&overlap_pfx1));
+    try std.testing.expect(table.overlapsPrefix(&overlap_pfx2));
+    try std.testing.expect(table.overlapsPrefix(&overlap_pfx3));
+    
+    // テスト3: オーバーラップしないプレフィックス
+    const no_overlap_pfx = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
+    try std.testing.expect(!table.overlapsPrefix(&no_overlap_pfx));
+}
+
+test "Table overlaps basic" {
+    const allocator = std.testing.allocator;
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    // table1にプレフィックスを挿入
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    table1.insert(&pfx1, 1);
+    table1.insert(&pfx2, 2);
+    
+    // table2にオーバーラップするプレフィックスを挿入
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16); // pfx1とオーバーラップ
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);  // オーバーラップしない
+    table2.insert(&pfx3, 3);
+    table2.insert(&pfx4, 4);
+    
+    // テスト1: オーバーラップあり
+    try std.testing.expect(table1.overlaps(&table2));
+    try std.testing.expect(table2.overlaps(&table1)); // 対称性
+    
+    // テスト2: IPv4専用オーバーラップ
+    try std.testing.expect(table1.overlaps4(&table2));
+    
+    // テスト3: IPv6オーバーラップなし（IPv6プレフィックスがない）
+    try std.testing.expect(!table1.overlaps6(&table2));
+}
+
+test "Table overlaps no overlap" {
+    const allocator = std.testing.allocator;
+    var table1 = Table(u32).init(allocator);
+    defer table1.deinit();
+    var table2 = Table(u32).init(allocator);
+    defer table2.deinit();
+    
+    // table1にプレフィックスを挿入
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    table1.insert(&pfx1, 1);
+    
+    // table2にオーバーラップしないプレフィックスを挿入
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
+    table2.insert(&pfx2, 2);
+    
+    // テスト: オーバーラップなし
+    try std.testing.expect(!table1.overlaps(&table2));
+    try std.testing.expect(!table2.overlaps(&table1)); // 対称性
+    try std.testing.expect(!table1.overlaps4(&table2));
+}
+
+test "Prefix overlaps detailed verification" {
+    
+    // テスト1: 完全一致
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx1_same = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    try std.testing.expect(pfx1.overlaps(&pfx1_same));
+    std.debug.print("✓ 完全一致: 192.168.1.0/24 と 192.168.1.0/24\n", .{});
+    
+    // テスト2: 包含関係（大きいプレフィックスが小さいプレフィックスを含む）
+    const pfx_large = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16); // 192.168.0.0/16
+    const pfx_small = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24); // 192.168.1.0/24
+    try std.testing.expect(pfx_large.overlaps(&pfx_small));
+    try std.testing.expect(pfx_small.overlaps(&pfx_large)); // 対称性
+    std.debug.print("✓ 包含関係: 192.168.0.0/16 と 192.168.1.0/24\n", .{});
+    
+    // テスト3: 部分的重複（同じ/24内の/25同士）
+    const pfx_25_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 25);   // 192.168.1.0/25
+    const pfx_25_2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 128 } }, 25); // 192.168.1.128/25
+    try std.testing.expect(!pfx_25_1.overlaps(&pfx_25_2)); // これらは隣接だが重複しない
+    std.debug.print("✓ 隣接非重複: 192.168.1.0/25 と 192.168.1.128/25\n", .{});
+    
+    // テスト4: 完全に異なるネットワーク
+    const pfx_192 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx_10 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    try std.testing.expect(!pfx_192.overlaps(&pfx_10));
+    std.debug.print("✓ 完全分離: 192.168.1.0/24 と 10.0.0.0/8\n", .{});
+    
+    // テスト5: より複雑な包含関係
+    const pfx_8 = Prefix.init(&IPAddr{ .v4 = .{ 192, 0, 0, 0 } }, 8);         // 192.0.0.0/8
+    const pfx_16 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);      // 192.168.0.0/16
+    const pfx_24 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);      // 192.168.1.0/24
+    const pfx_32 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 100 } }, 32);    // 192.168.1.100/32
+    
+    try std.testing.expect(pfx_8.overlaps(&pfx_16));
+    try std.testing.expect(pfx_8.overlaps(&pfx_24));
+    try std.testing.expect(pfx_8.overlaps(&pfx_32));
+    try std.testing.expect(pfx_16.overlaps(&pfx_24));
+    try std.testing.expect(pfx_16.overlaps(&pfx_32));
+    try std.testing.expect(pfx_24.overlaps(&pfx_32));
+    std.debug.print("✓ 階層的包含: 192.0.0.0/8 ⊃ 192.168.0.0/16 ⊃ 192.168.1.0/24 ⊃ 192.168.1.100/32\n", .{});
+}
+
+test "Table overlaps detailed scenarios" {
+    const allocator = std.testing.allocator;
+    
+    // シナリオ1: 包含関係のテスト
+    {
+        var table1 = Table(u32).init(allocator);
+        defer table1.deinit();
+        var table2 = Table(u32).init(allocator);
+        defer table2.deinit();
+        
+        // table1: 大きなネットワーク
+        const pfx_large = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
+        table1.insert(&pfx_large, 1);
+        
+        // table2: 小さなネットワーク（table1に含まれる）
+        const pfx_small = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+        table2.insert(&pfx_small, 2);
+        
+        try std.testing.expect(table1.overlaps(&table2));
+        try std.testing.expect(table1.overlapsPrefix(&pfx_small));
+        try std.testing.expect(table2.overlapsPrefix(&pfx_large));
+        std.debug.print("✓ シナリオ1: 包含関係でのオーバーラップ検出成功\n", .{});
+    }
+    
+    // シナリオ2: 完全分離のテスト
+    {
+        var table1 = Table(u32).init(allocator);
+        defer table1.deinit();
+        var table2 = Table(u32).init(allocator);
+        defer table2.deinit();
+        
+        // table1: 192.168.x.x
+        const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+        table1.insert(&pfx1, 1);
+        
+        // table2: 10.x.x.x
+        const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+        table2.insert(&pfx2, 2);
+        
+        try std.testing.expect(!table1.overlaps(&table2));
+        try std.testing.expect(!table1.overlapsPrefix(&pfx2));
+        try std.testing.expect(!table2.overlapsPrefix(&pfx1));
+        std.debug.print("✓ シナリオ2: 完全分離でのオーバーラップ非検出成功\n", .{});
+    }
+    
+    // シナリオ3: 複数プレフィックスでの部分的オーバーラップ
+    {
+        var table1 = Table(u32).init(allocator);
+        defer table1.deinit();
+        var table2 = Table(u32).init(allocator);
+        defer table2.deinit();
+        
+        // table1: 複数のプレフィックス
+        const pfx1_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+        const pfx1_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+        table1.insert(&pfx1_1, 1);
+        table1.insert(&pfx1_2, 2);
+        
+        // table2: 一部がオーバーラップ、一部が分離
+        const pfx2_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16); // pfx1_1とオーバーラップ
+        const pfx2_2 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);  // どちらともオーバーラップしない
+        table2.insert(&pfx2_1, 3);
+        table2.insert(&pfx2_2, 4);
+        
+        try std.testing.expect(table1.overlaps(&table2)); // 一部でもオーバーラップがあればtrue
+        std.debug.print("✓ シナリオ3: 部分的オーバーラップ検出成功\n", .{});
+    }
 } 
