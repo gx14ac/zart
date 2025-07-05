@@ -3,6 +3,12 @@ const c_allocator = std.heap.c_allocator;
 const node_pool = @import("node_pool.zig");
 const Node = node_pool.Node;
 const NodePool = node_pool.NodePool;
+const table_mod = @import("table.zig");
+const node_mod = @import("node.zig");
+
+const Table = table_mod.Table;
+const Prefix = node_mod.Prefix;
+const IPAddr = node_mod.IPAddr;
 
 // Routing table structure (C-compatible)
 pub const BartTable = extern struct {
@@ -259,21 +265,71 @@ pub export fn bart_lookup6(table: *BartTable, addr_ptr: [*]const u8, found: *i32
 
 // Test main function
 pub fn main() !void {
-    std.debug.print("BART (Binary Art Routing Table) - Zig Implementation\n", .{});
-    std.debug.print("Testing basic functionality...\n", .{});
-    
-    // Create a test table
-    const table = bart_create();
-    defer bart_destroy(table);
-    
-    // Test IPv4 insertion
-    const test_ip: u32 = 0x0A000001; // 10.0.0.1
-    const result = bart_insert4(table, test_ip, 24, 42);
-    if (result == 0) {
-        std.debug.print("IPv4 insertion successful\n", .{});
-    } else {
-        std.debug.print("IPv4 insertion failed\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // テーブルを作成
+    var tbl = Table(u32).init(allocator);
+    defer tbl.deinit();
+
+    // IPv4プレフィックスを追加
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 24);
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 1, 0 } }, 24);
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
+    const pfx5 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+
+    tbl.insert(&pfx1, 100);
+    tbl.insert(&pfx2, 200);
+    tbl.insert(&pfx3, 300);
+    tbl.insert(&pfx4, 400);
+    tbl.insert(&pfx5, 500);
+
+    // IPv6プレフィックスを追加
+    const pfx6 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    tbl.insert(&pfx6, 600);
+
+    std.debug.print("=== テーブル情報 ===\n", .{});
+    std.debug.print("サイズ: {}, IPv4: {}, IPv6: {}\n", .{ tbl.size(), tbl.getSize4(), tbl.getSize6() });
+
+    // JSON出力をテスト
+    std.debug.print("\n=== JSON出力 ===\n", .{});
+    const json_output = try tbl.marshalJSON(allocator);
+    defer allocator.free(json_output);
+    std.debug.print("{s}\n", .{json_output});
+
+    // DumpList4をテスト
+    std.debug.print("\n=== DumpList4 ===\n", .{});
+    const dump_list4 = try tbl.dumpList4(allocator);
+    defer {
+        for (dump_list4) |*item| {
+            item.deinit(allocator);
+        }
+        allocator.free(dump_list4);
     }
-    
-    std.debug.print("Test completed\n", .{});
+    std.debug.print("DumpList4 アイテム数: {}\n", .{dump_list4.len});
+    for (dump_list4, 0..) |item, i| {
+        std.debug.print("  [{}] {s}: {} (サブネット: {})\n", .{ i, item.cidr, item.value, item.subnets.len });
+    }
+
+    // DumpList6をテスト
+    std.debug.print("\n=== DumpList6 ===\n", .{});
+    const dump_list6 = try tbl.dumpList6(allocator);
+    defer {
+        for (dump_list6) |*item| {
+            item.deinit(allocator);
+        }
+        allocator.free(dump_list6);
+    }
+    std.debug.print("DumpList6 アイテム数: {}\n", .{dump_list6.len});
+    for (dump_list6, 0..) |item, i| {
+        std.debug.print("  [{}] {s}: {} (サブネット: {})\n", .{ i, item.cidr, item.value, item.subnets.len });
+    }
+
+    // Fprint出力をテスト
+    std.debug.print("\n=== Fprint出力 ===\n", .{});
+    const text_output = try tbl.toString(allocator);
+    defer allocator.free(text_output);
+    std.debug.print("{s}", .{text_output});
 }
