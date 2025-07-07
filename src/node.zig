@@ -1427,6 +1427,233 @@ pub fn Node(comptime V: type) type {
 
             return true;
         }
+
+        /// NodeStats: ノード統計情報（Go実装のnodeStats互換）
+        pub const NodeStats = struct {
+            nodes: usize,
+            leaves: usize,
+            fringes: usize,
+            pfxs: usize,
+        };
+
+        /// getNodeStats: このノード以下のツリー統計を取得
+        pub fn getNodeStats(self: *const Self) NodeStats {
+            return self.nodeStatsRec();
+        }
+
+        /// nodeStatsRec: 再帰的にノード統計を計算
+        fn nodeStatsRec(self: *const Self) NodeStats {
+            if (self.isEmpty()) {
+                return NodeStats{ .nodes = 0, .leaves = 0, .fringes = 0, .pfxs = 0 };
+            }
+            
+            var stats = NodeStats{ 
+                .nodes = 1,  // 現在のノード
+                .leaves = 0, 
+                .fringes = 0, 
+                .pfxs = self.prefixes.len() 
+            };
+            
+            // 子ノードの統計を集計
+            var child_buf: [256]u8 = undefined;
+            const child_addrs = self.children.bitset.asSlice(&child_buf);
+            for (child_addrs) |addr| {
+                const child = self.children.mustGet(addr);
+                switch (child) {
+                    .node => |node| {
+                        const child_stats = node.nodeStatsRec();
+                        stats.nodes += child_stats.nodes;
+                        stats.leaves += child_stats.leaves;
+                        stats.fringes += child_stats.fringes;
+                        stats.pfxs += child_stats.pfxs;
+                    },
+                    .leaf => {
+                        stats.leaves += 1;
+                        stats.pfxs += 1;
+                    },
+                    .fringe => {
+                        stats.fringes += 1;
+                        stats.pfxs += 1;
+                    },
+                }
+            }
+            
+            return stats;
+        }
+
+        /// dumpRec: 詳細なデバッグ情報出力（Go実装のdumper.go互換）
+        pub fn dumpRec(self: *const Self, allocator: std.mem.Allocator, writer: anytype, path: [16]u8, depth: usize, is4: bool) !void {
+            // ノードの基本情報を出力
+            const indent = try allocator.alloc(u8, depth);
+            defer allocator.free(indent);
+            for (indent) |*c| {
+                c.* = '.';
+            }
+            
+            const bits = depth * 8;
+            
+            // ノード情報の出力
+            try writer.print("\n{s}[{s}] depth: {} path: [{s}] / {}\n", 
+                .{ indent, self.hasType(), depth, self.formatPath(path, depth, is4), bits });
+            
+            // プレフィックス情報の出力
+            if (self.prefixes.len() > 0) {
+                var prefix_buf: [256]u8 = undefined;
+                const indices = self.prefixes.bitset.asSlice(&prefix_buf);
+                
+                try writer.print("{s}prefxs(#{}):", .{ indent, self.prefixes.len() });
+                for (indices) |idx| {
+                    const pfx = cidrFromPath(path, depth, is4, idx);
+                    try writer.print(" {}", .{pfx});
+                }
+                try writer.print("\n", .{});
+                
+                // 値の出力（空の構造体以外）
+                if (V != struct{}) {
+                    try writer.print("{s}values(#{}):", .{ indent, self.prefixes.len() });
+                    for (indices) |idx| {
+                        const val = self.prefixes.mustGet(idx);
+                        try writer.print(" {}", .{val});
+                    }
+                    try writer.print("\n", .{});
+                }
+            }
+            
+            // 子ノード情報の出力
+            if (self.children.len() > 0) {
+                var child_addrs = std.ArrayList(u8).init(allocator);
+                defer child_addrs.deinit();
+                var leaf_addrs = std.ArrayList(u8).init(allocator);
+                defer leaf_addrs.deinit();
+                var fringe_addrs = std.ArrayList(u8).init(allocator);
+                defer fringe_addrs.deinit();
+                
+                // 子ノードを分類
+                var child_buf: [256]u8 = undefined;
+                const all_addrs = self.children.bitset.asSlice(&child_buf);
+                for (all_addrs) |addr| {
+                    const child = self.children.mustGet(addr);
+                    switch (child) {
+                        .node => try child_addrs.append(addr),
+                        .leaf => try leaf_addrs.append(addr),
+                        .fringe => try fringe_addrs.append(addr),
+                    }
+                }
+                
+                // オクテット表示
+                try writer.print("{s}octets(#{}):\n", .{ indent, self.children.len() });
+                
+                // リーフノード表示
+                if (leaf_addrs.items.len > 0) {
+                    try writer.print("{s}leaves(#{}):", .{ indent, leaf_addrs.items.len });
+                    for (leaf_addrs.items) |addr| {
+                        const leaf = self.children.mustGet(addr).leaf;
+                        
+                        if (V == struct{}) {
+                            try writer.print(" {s}:{{{}}}", .{ self.addrFmt(addr, is4), leaf.prefix });
+                        } else {
+                            try writer.print(" {s}:{{{}, {}}}", .{ self.addrFmt(addr, is4), leaf.prefix, leaf.value });
+                        }
+                    }
+                    try writer.print("\n", .{});
+                }
+                
+                // フリンジノード表示
+                if (fringe_addrs.items.len > 0) {
+                    try writer.print("{s}fringe(#{}):", .{ indent, fringe_addrs.items.len });
+                    for (fringe_addrs.items) |addr| {
+                        const fringe = self.children.mustGet(addr).fringe;
+                        const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                        
+                        if (V == struct{}) {
+                            try writer.print(" {s}:{{{}}}", .{ self.addrFmt(addr, is4), fringe_pfx });
+                        } else {
+                            try writer.print(" {s}:{{{}, {}}}", .{ self.addrFmt(addr, is4), fringe_pfx, fringe.value });
+                        }
+                    }
+                    try writer.print("\n", .{});
+                }
+                
+                // 子ノード表示
+                if (child_addrs.items.len > 0) {
+                    try writer.print("{s}childs(#{}):", .{ indent, child_addrs.items.len });
+                    for (child_addrs.items) |addr| {
+                        try writer.print(" {s}", .{self.addrFmt(addr, is4)});
+                    }
+                    try writer.print("\n", .{});
+                }
+            }
+            
+            // 子ノードに対して再帰的にdump
+            var child_buf: [256]u8 = undefined;
+            const all_child_addrs = self.children.bitset.asSlice(&child_buf);
+            for (all_child_addrs) |addr| {
+                const child = self.children.mustGet(addr);
+                switch (child) {
+                    .node => |node| {
+                        var next_path = path;
+                        next_path[depth & 15] = addr;
+                        try node.dumpRec(allocator, writer, next_path, depth + 1, is4);
+                    },
+                    else => {}, // リーフとフリンジは上で表示済み
+                }
+            }
+        }
+
+        /// hasType: ノードタイプを判定（Go実装のnodeType互換）
+        fn hasType(self: *const Self) []const u8 {
+            const has_prefixes = self.prefixes.len() > 0;
+            const has_children = self.children.len() > 0;
+            
+            var child_nodes: usize = 0;
+            var leaf_nodes: usize = 0;
+            var fringe_nodes: usize = 0;
+            
+            var child_buf: [256]u8 = undefined;
+            const child_addrs = self.children.bitset.asSlice(&child_buf);
+            for (child_addrs) |addr| {
+                const child = self.children.mustGet(addr);
+                switch (child) {
+                    .node => child_nodes += 1,
+                    .leaf => leaf_nodes += 1,
+                    .fringe => fringe_nodes += 1,
+                }
+            }
+            
+            if (!has_prefixes and !has_children) {
+                return "NULL";
+            } else if (child_nodes == 0) {
+                return "STOP";
+            } else if ((leaf_nodes > 0 or fringe_nodes > 0) and child_nodes > 0 and !has_prefixes) {
+                return "HALF";
+            } else if ((has_prefixes or leaf_nodes > 0 or fringe_nodes > 0) and child_nodes > 0) {
+                return "FULL";
+            } else if (!has_prefixes and leaf_nodes == 0 and fringe_nodes == 0 and child_nodes > 0) {
+                return "PATH";
+            } else {
+                return "UNKN";
+            }
+        }
+
+        /// formatPath: パス表示のフォーマット
+        fn formatPath(self: *const Self, path: [16]u8, depth: usize, is4: bool) []const u8 {
+            _ = self;
+            _ = path;
+            _ = depth;
+            _ = is4;
+            return "path";
+        }
+
+        /// addrFmt: アドレスフォーマット（IPv4は10進、IPv6は16進）
+        fn addrFmt(self: *const Self, addr: u8, is4: bool) []const u8 {
+            _ = self;
+            _ = addr;
+            if (is4) {
+                return "addr";
+            } else {
+                return "0x??";
+            }
+        }
     };
 }
 

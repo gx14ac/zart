@@ -723,14 +723,11 @@ pub fn Table(comptime V: type) type {
 
         /// Fprint: 階層的なツリー表示（Go実装互換）
         pub fn fprint(self: *const Self, writer: anytype) !void {
-            if (self.getSize4() > 0) {
-                try writer.print("IPv4:\n", .{});
-                try self.fprintVersion(writer, true);
-            }
-            if (self.getSize6() > 0) {
-                try writer.print("IPv6:\n", .{});
-                try self.fprintVersion(writer, false);
-            }
+            // IPv4ツリーを出力
+            try self.fprintVersion(writer, true);
+            
+            // IPv6ツリーを出力
+            try self.fprintVersion(writer, false);
         }
 
         /// バージョン別のFprint実装
@@ -750,6 +747,47 @@ pub fn Table(comptime V: type) type {
             defer list.deinit();
             
             try self.fprint(list.writer());
+            return list.toOwnedSlice();
+        }
+
+        /// MarshalText: Go実装のencoding.TextMarshalerインターフェース互換
+        /// Fprintのラッパーとして実装
+        pub fn marshalText(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+            return try self.toString(allocator);
+        }
+
+        /// dump: 詳細なデバッグ情報出力（Go実装のdumper.go互換）
+        pub fn dump(self: *const Self, writer: anytype) !void {
+            if (self.getSize4() > 0) {
+                const stats4 = self.root4.getNodeStats();
+                try writer.print("\n### IPv4: size({}), nodes({}), leaves({}), fringes({})\n", 
+                    .{ self.getSize4(), stats4.nodes, stats4.leaves, stats4.fringes });
+                try self.dumpVersion(writer, true);
+            }
+            
+            if (self.getSize6() > 0) {
+                const stats6 = self.root6.getNodeStats();
+                try writer.print("\n### IPv6: size({}), nodes({}), leaves({}), fringes({})\n", 
+                    .{ self.getSize6(), stats6.nodes, stats6.leaves, stats6.fringes });
+                try self.dumpVersion(writer, false);
+            }
+        }
+
+        /// バージョン別のdump実装
+        fn dumpVersion(self: *const Self, writer: anytype, is4: bool) !void {
+            const root = self.rootNodeByVersionConst(is4);
+            if (root.isEmpty()) return;
+            
+            const path = std.mem.zeroes([16]u8);
+            try root.dumpRec(self.allocator, writer, path, 0, is4);
+        }
+
+        /// dumpString: dumpの文字列版（デバッグ用）
+        pub fn dumpString(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+            var list = std.ArrayList(u8).init(allocator);
+            defer list.deinit();
+            
+            try self.dump(list.writer());
             return list.toOwnedSlice();
         }
 
