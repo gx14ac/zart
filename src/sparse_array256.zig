@@ -231,4 +231,83 @@ pub fn Array256(comptime T: type) type {
             _ = self.items.orderedRemove(i);
         }
     };
+}
+
+test "SparseArray256 with SIMD BitSet256" {
+    const allocator = std.testing.allocator;
+    
+    var arr = Array256(u32).init(allocator);
+    defer arr.deinit();
+    
+    // 基本操作テスト
+    _ = arr.insertAt(10, 100);
+    _ = arr.insertAt(50, 200);
+    _ = arr.insertAt(200, 300);
+    
+    try std.testing.expect(arr.isSet(10));
+    try std.testing.expect(arr.isSet(50));
+    try std.testing.expect(arr.isSet(200));
+    try std.testing.expect(!arr.isSet(11));
+    
+    try std.testing.expectEqual(@as(u32, 100), arr.get(10).?);
+    try std.testing.expectEqual(@as(u32, 200), arr.get(50).?);
+    try std.testing.expectEqual(@as(u32, 300), arr.get(200).?);
+    try std.testing.expectEqual(@as(?u32, null), arr.get(11));
+    
+    try std.testing.expectEqual(@as(usize, 3), arr.len());
+    
+    // ビットセット操作テスト（SIMD最適化の恩恵）
+    var test_bitset = BitSet256.init();
+    test_bitset.set(10);
+    test_bitset.set(50);
+    test_bitset.set(100); // 存在しない要素
+    
+    try std.testing.expect(arr.intersectsAny(&test_bitset));
+    
+    const top = arr.intersectionTop(&test_bitset);
+    try std.testing.expectEqual(@as(u8, 50), top.?); // 最高位のセットビット
+    
+    std.debug.print("✅ SparseArray256 with SIMD BitSet256 test passed!\n", .{});
+}
+
+test "SparseArray256 SIMD performance test" {
+    const allocator = std.testing.allocator;
+    const Timer = std.time.Timer;
+    
+    var arr = Array256(u32).init(allocator);
+    defer arr.deinit();
+    
+    // 高密度データを準備
+    var i: u16 = 0;
+    while (i < 256) : (i += 2) {
+        _ = arr.insertAt(@as(u8, @intCast(i)), @as(u32, @intCast(i * 10)));
+    }
+    
+    // ビットセット検索テスト
+    var test_bitset = BitSet256.init();
+    i = 0;
+    while (i < 256) : (i += 4) {
+        test_bitset.set(@as(u8, @intCast(i)));
+    }
+    
+    const iterations: u32 = 100_000;
+    var timer = Timer.start() catch unreachable;
+    var j: u32 = 0;
+    var hit_count: u32 = 0;
+    
+    while (j < iterations) : (j += 1) {
+        if (arr.intersectsAny(&test_bitset)) {
+            hit_count += 1;
+        }
+    }
+    
+    const elapsed = timer.read();
+    const ns_per_op = elapsed / iterations;
+    
+    std.debug.print("SparseArray256 SIMD intersectsAny: {d:.2} ns/op ({d:.2} million ops/sec) [hits: {d}]\n", 
+                   .{ ns_per_op, 1000.0 / @as(f64, @floatFromInt(ns_per_op)), hit_count });
+    
+    try std.testing.expectEqual(iterations, hit_count); // 常にヒットするはず
+    
+    std.debug.print("✅ SparseArray256 SIMD performance test completed!\n", .{});
 } 
