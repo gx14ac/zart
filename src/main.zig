@@ -6,6 +6,7 @@ const NodePool = node_pool.NodePool;
 const table_mod = @import("table.zig");
 const node_mod = @import("node.zig");
 const base_index = @import("base_index.zig");
+const vs_go_benchmark = @import("vs_go_benchmark.zig");
 
 const Table = table_mod.Table;
 const Prefix = node_mod.Prefix;
@@ -329,6 +330,9 @@ pub fn main() !void {
 
     // JSONファイル出力デモ
     try generateJSONFileSimple(allocator);
+
+    // Go vs Zig ベンチマーク対決
+    try vs_go_benchmark.runVsGoBenchmark(allocator);
 }
 
 /// 簡素化されたJSONファイル生成機能
