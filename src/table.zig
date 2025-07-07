@@ -755,6 +755,61 @@ pub fn Table(comptime V: type) type {
 
         // シリアライゼーション用の構造体（Go実装のDumpListNode互換）
         pub const DumpListNode = node.DumpListNode(V);
+
+        // =============================================================================
+        // All系イテレーション機能
+        // =============================================================================
+
+        /// Yield関数の型定義
+        pub const YieldFn = fn (prefix: Prefix, value: V) bool;
+
+        /// allWithCallback: 全プレフィックス列挙（IPv4+IPv6、順序不定）
+        /// Go実装のAllメソッドを移植
+        pub fn allWithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            
+            // IPv4とIPv6の両方を処理
+            _ = self.root4.allRec(path, 0, true, yield) and 
+                self.root6.allRec(path, 0, false, yield);
+        }
+
+        /// all4WithCallback: IPv4プレフィックス列挙（順序不定）
+        /// Go実装のAll4メソッドを移植
+        pub fn all4WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root4.allRec(path, 0, true, yield);
+        }
+
+        /// all6WithCallback: IPv6プレフィックス列挙（順序不定）
+        /// Go実装のAll6メソッドを移植
+        pub fn all6WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root6.allRec(path, 0, false, yield);
+        }
+
+        /// allSortedWithCallback: 全プレフィックス列挙（ソート済み）
+        /// Go実装のAllSortedメソッドを移植
+        pub fn allSortedWithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            
+            // IPv4とIPv6の両方をソート順で処理
+            _ = self.root4.allRecSorted(path, 0, true, yield) and 
+                self.root6.allRecSorted(path, 0, false, yield);
+        }
+
+        /// allSorted4WithCallback: IPv4プレフィックス列挙（ソート済み）
+        /// Go実装のAllSorted4メソッドを移植
+        pub fn allSorted4WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root4.allRecSorted(path, 0, true, yield);
+        }
+
+        /// allSorted6WithCallback: IPv6プレフィックス列挙（ソート済み）
+        /// Go実装のAllSorted6メソッドを移植
+        pub fn allSorted6WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root6.allRecSorted(path, 0, false, yield);
+        }
     };
 }
 
@@ -1568,3 +1623,139 @@ test "Table unionWith performance test" {
     
     std.debug.print("✅ パフォーマンステスト成功！\n", .{});
 } 
+
+// =============================================================================
+// All系イテレーション機能のテスト
+// =============================================================================
+
+
+
+test "all6WithCallback basic" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+
+    // IPv6プレフィックスを追加
+    const pfx1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    const pfx2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
+    
+    table.insert(&pfx1, 1);
+    table.insert(&pfx2, 2);
+    
+    // IPv4プレフィックス（除外されるべき）
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    table.insert(&pfx4, 4);
+    
+    // all6WithCallbackを実行
+    table.all6WithCallback(&testCountYield);
+
+    // IPv6プレフィックスのみが収集されることを確認
+    try std.testing.expect(test_ipv6_count == 2);
+    try std.testing.expect(test_ipv4_count == 0);
+}
+
+test "allWithCallback mixed IPv4 and IPv6" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+    
+    // IPv4とIPv6プレフィックスを混在で追加
+    const pfx4_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx4_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const pfx6_1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    const pfx6_2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
+    
+    table.insert(&pfx4_1, 1);
+    table.insert(&pfx4_2, 2);
+    table.insert(&pfx6_1, 3);
+    table.insert(&pfx6_2, 4);
+    
+    // allWithCallbackを実行
+    table.allWithCallback(&testCountYield);
+    
+    // IPv4とIPv6の両方が含まれることを確認
+    try std.testing.expect(test_ipv4_count == 2);
+    try std.testing.expect(test_ipv6_count == 2);
+}
+
+test "allSorted4WithCallback order verification" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+    
+    // 意図的に順序を混乱させたプレフィックスを追加
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);    // 後のアドレス
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);    // より短いプレフィックス
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);    // 前のアドレス
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);        // 全く違うアドレス空間
+    
+    table.insert(&pfx3, 3);
+    table.insert(&pfx1, 1);
+    table.insert(&pfx2, 2);
+    table.insert(&pfx4, 4);
+    
+    // allSorted4WithCallbackを実行
+    table.allSorted4WithCallback(&testCountYield);
+    
+    // IPv4プレフィックスが4つ全て収集されることを確認
+    try std.testing.expect(test_ipv4_count == 4);
+    try std.testing.expect(test_ipv6_count == 0);
+}
+
+// テスト用のグローバル変数
+var test_ipv4_count: u32 = 0;
+var test_ipv6_count: u32 = 0;
+
+// テスト用のカウンター関数
+fn testCountYield(prefix: Prefix, value: u32) bool {
+    _ = value;
+    if (prefix.addr.is4()) {
+        test_ipv4_count += 1;
+    } else {
+        test_ipv6_count += 1;
+    }
+    return true; // 継続
+}
+
+test "all4WithCallback basic" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+
+    // IPv4プレフィックスを追加
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);
+    
+    table.insert(&pfx1, 24);
+    table.insert(&pfx2, 8);
+    table.insert(&pfx3, 16);
+
+    // IPv6プレフィックスを追加（含まれるべきではない）
+    const pfx6 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    table.insert(&pfx6, 32);
+    
+    // all4WithCallbackを実行
+    table.all4WithCallback(&testCountYield);
+
+    // IPv4プレフィックスのみが収集されることを確認
+    try std.testing.expect(test_ipv4_count == 3);
+    try std.testing.expect(test_ipv6_count == 0);
+}
+

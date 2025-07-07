@@ -742,6 +742,71 @@ pub fn Node(comptime V: type) type {
             @panic("unreachable: " ++ @typeName(@TypeOf(pfx)));
         }
 
+        // =============================================================================
+        // All系イテレーション機能
+        // =============================================================================
+
+        /// Yield関数の型定義
+        pub const YieldFn = fn (prefix: Prefix, value: V) bool;
+
+        /// allRec: 基本的なイテレーション機能（順序不定）
+        /// Go実装のallRecメソッドを移植
+        pub fn allRec(self: *const Self, path: StridePath, depth: usize, is4: bool, yield: *const YieldFn) bool {
+            // 現在のノードのすべてのプレフィックスをイテレート
+            var buf: [256]u8 = undefined;
+            const indices = self.prefixes.bitset.asSlice(&buf);
+
+            for (indices) |idx| {
+                const cidr = cidrFromPath(path, depth, is4, idx);
+                const value = self.prefixes.mustGet(idx);
+
+                // コールバックでこのプレフィックスと値を処理
+                if (!yield(cidr, value)) {
+                    // 早期終了
+                    return false;
+                }
+            }
+
+            // このノードのすべての子（ノードとリーフ）をイテレート
+            var child_buf: [256]u8 = undefined;
+            const child_addrs = self.children.bitset.asSlice(&child_buf);
+
+            for (child_addrs) |addr| {
+                const kid = self.children.mustGet(addr);
+
+                switch (kid) {
+                    .node => |node| {
+                        // この子ノードで再帰的に処理
+                        var new_path = path;
+                        if (depth < new_path.len) {
+                            new_path[depth] = addr;
+                        }
+                        if (!node.allRec(new_path, depth + 1, is4, yield)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                    .leaf => |leaf| {
+                        // このリーフのコールバック
+                        if (!yield(leaf.prefix, leaf.value)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                    .fringe => |fringe| {
+                        const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                        // このフリンジのコールバック
+                        if (!yield(fringe_pfx, fringe.value)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                }
+            }
+
+            return true;
+        }
+
         /// dumpListRec: Go実装互換の階層構造リスト生成
         pub fn dumpListRec(self: *const Self, allocator: std.mem.Allocator, parent_idx: u8, path: [16]u8, depth: usize, is4: bool) ![]DumpListNode(V) {
             // Go実装: recursion stop condition
@@ -1250,6 +1315,118 @@ pub fn Node(comptime V: type) type {
             
             return duplicates;
         }
+
+        /// allRecSorted: ソート済みイテレーション機能（CIDRソート順）
+        /// Go実装のallRecSortedメソッドを移植
+        pub fn allRecSorted(self: *const Self, path: StridePath, depth: usize, is4: bool, yield: *const YieldFn) bool {
+            // すべての子アドレスをソート済みで取得（アドレス順）
+            var child_buf: [256]u8 = undefined;
+            const all_child_addrs = self.children.bitset.asSlice(&child_buf);
+
+            // すべてのインデックスをソート済みで取得（インデックス順）
+            var buf: [256]u8 = undefined;
+            const all_indices = self.prefixes.bitset.asSlice(&buf);
+
+            // インデックスをCIDRソート順でソート
+            var sorted_indices = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer sorted_indices.deinit();
+            sorted_indices.appendSlice(all_indices) catch return false;
+
+            // Zig標準ライブラリのソート関数を使用
+            std.sort.insertion(u8, sorted_indices.items, {}, struct {
+                fn lessThan(_: void, a: u8, b: u8) bool {
+                    return cmpIndexRank(a, b) < 0;
+                }
+            }.lessThan);
+
+            var child_cursor: usize = 0;
+
+            // インデックスと子をCIDRソート順でyield
+            for (sorted_indices.items) |pfx_idx| {
+                const pfx_info = base_index.idxToPfx256(pfx_idx) catch continue;
+                const pfx_octet = pfx_info.octet;
+
+                // インデックスより前のすべての子をyield
+                while (child_cursor < all_child_addrs.len) {
+                    const child_addr = all_child_addrs[child_cursor];
+
+                    if (child_addr >= pfx_octet) {
+                        break;
+                    }
+
+                    // ノード（再帰降下）またはリーフをyield
+                    const kid = self.children.mustGet(child_addr);
+                    switch (kid) {
+                        .node => |node| {
+                            var new_path = path;
+                            if (depth < new_path.len) {
+                                new_path[depth] = child_addr;
+                            }
+                            if (!node.allRecSorted(new_path, depth + 1, is4, yield)) {
+                                return false;
+                            }
+                        },
+                        .leaf => |leaf| {
+                            if (!yield(leaf.prefix, leaf.value)) {
+                                return false;
+                            }
+                        },
+                        .fringe => |fringe| {
+                            const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, child_addr);
+                            // このフリンジのコールバック
+                            if (!yield(fringe_pfx, fringe.value)) {
+                                // 早期終了
+                                return false;
+                            }
+                        },
+                    }
+
+                    child_cursor += 1;
+                }
+
+                // このインデックスのプレフィックスをyield
+                const cidr = cidrFromPath(path, depth, is4, pfx_idx);
+                const value = self.prefixes.mustGet(pfx_idx);
+                if (!yield(cidr, value)) {
+                    return false;
+                }
+            }
+
+            // 残りのリーフとノード（再帰降下）をyield
+            while (child_cursor < all_child_addrs.len) {
+                const addr = all_child_addrs[child_cursor];
+                const kid = self.children.mustGet(addr);
+
+                switch (kid) {
+                    .node => |node| {
+                        var new_path = path;
+                        if (depth < new_path.len) {
+                            new_path[depth] = addr;
+                        }
+                        if (!node.allRecSorted(new_path, depth + 1, is4, yield)) {
+                            return false;
+                        }
+                    },
+                    .leaf => |leaf| {
+                        if (!yield(leaf.prefix, leaf.value)) {
+                            return false;
+                        }
+                    },
+                    .fringe => |fringe| {
+                        const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                        // このフリンジのコールバック
+                        if (!yield(fringe_pfx, fringe.value)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                }
+
+                child_cursor += 1;
+            }
+
+            return true;
+        }
     };
 }
 
@@ -1643,3 +1820,100 @@ const base_index_extended = struct {
     pub const idxToBits = base_index_ext.idxToBits;
     pub const idxToOctet = base_index_ext.idxToOctet;
 };
+
+// =============================================================================
+// All系イテレーション機能のヘルパー関数
+// =============================================================================
+
+/// ストライドパス型定義 (Goのstridepathに相当)
+pub const StridePath = [16]u8;
+
+/// cmpIndexRank: インデックスをCIDRソート順で比較する関数
+/// Go実装のcmpIndexRankに相当
+pub fn cmpIndexRank(a: u8, b: u8) i32 {
+    // インデックスをプレフィックスに変換
+    const a_pfx = base_index.idxToPfx256(a) catch |err| switch (err) {
+        error.InvalidIndex => return 1, // 無効なインデックスは後ろに
+    };
+    const b_pfx = base_index.idxToPfx256(b) catch |err| switch (err) {
+        error.InvalidIndex => return -1, // 無効なインデックスは後ろに
+    };
+
+    // プレフィックスを比較：まずアドレス、次にビット数
+    if (a_pfx.octet == b_pfx.octet) {
+        if (a_pfx.pfx_len <= b_pfx.pfx_len) {
+            return -1;
+        }
+        return 1;
+    }
+
+    if (a_pfx.octet < b_pfx.octet) {
+        return -1;
+    }
+
+    return 1;
+}
+
+/// cidrFromPath: ストライドパス、深度、インデックスからプレフィックスを復元
+/// Go実装のcidrFromPathに相当
+pub fn cidrFromPath(path: StridePath, depth: usize, is4: bool, idx: u8) Prefix {
+    const pfx_info = base_index.idxToPfx256(idx) catch {
+        // エラーの場合は無効なプレフィックスを返す
+        return Prefix.init(&IPAddr{ .v4 = .{0, 0, 0, 0} }, 0);
+    };
+
+    var new_path = path;
+    
+    // depthの位置にマスクされたバイトを設定
+    if (depth < new_path.len) {
+        new_path[depth] = pfx_info.octet;
+    }
+
+    // プレフィックスビット後のバイトをゼロクリア
+    if (depth + 1 < new_path.len) {
+        for (new_path[depth + 1..]) |*byte| {
+            byte.* = 0;
+        }
+    }
+
+    // オクテットからIPアドレスを作成
+    const ip_addr = if (is4) 
+        IPAddr{ .v4 = .{ new_path[0], new_path[1], new_path[2], new_path[3] } }
+    else 
+        IPAddr{ .v6 = new_path };
+
+    // pathLenとpfxLenからビット数を計算
+    const bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
+
+    // 正規化されたプレフィックスを返す
+    return Prefix.init(&ip_addr, bits);
+}
+
+/// cidrForFringe: フリンジノードからプレフィックスを復元
+/// Go実装のcidrForFringeに相当
+pub fn cidrForFringe(octets: []const u8, depth: usize, is4: bool, last_octet: u8) Prefix {
+    var path: StridePath = std.mem.zeroes(StridePath);
+    
+    // 現在の深度までのパスをコピー
+    const copy_len = @min(depth, octets.len);
+    for (0..copy_len) |i| {
+        path[i] = octets[i];
+    }
+
+    // 最後のオクテットを置き換え
+    if (depth < path.len) {
+        path[depth] = last_octet;
+    }
+
+    // オクテットからIPアドレスを作成
+    const ip_addr = if (is4) 
+        IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } }
+    else 
+        IPAddr{ .v6 = path };
+
+    // フリンジのビット数は常に /8, /16, /24, ...
+    const bits = @as(u8, @intCast((depth + 1) * 8));
+
+    // 正規化されたプレフィックスを返す
+    return Prefix.init(&ip_addr, bits);
+}
