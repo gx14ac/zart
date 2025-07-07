@@ -5,6 +5,7 @@ const Node = node_pool.Node;
 const NodePool = node_pool.NodePool;
 const table_mod = @import("table.zig");
 const node_mod = @import("node.zig");
+const base_index = @import("base_index.zig");
 
 const Table = table_mod.Table;
 const Prefix = node_mod.Prefix;
@@ -325,4 +326,40 @@ pub fn main() !void {
     
     std.debug.print("\n🎯 **zart - BART in Zig completed successfully!**\n", .{});
     std.debug.print("All advanced features implemented: SIMD, Lite wrapper, Serialization\n", .{});
+
+    // JSONファイル出力デモ
+    try generateJSONFileSimple(allocator);
+}
+
+/// 簡素化されたJSONファイル生成機能
+fn generateJSONFileSimple(allocator: std.mem.Allocator) !void {
+    std.debug.print("\n📄 **JSONファイル生成（簡素版）**\n", .{});
+
+    // 基本テーブルを作成
+    var json_tbl = Table(u32).init(allocator);
+    defer json_tbl.deinit();
+
+    // テストデータを追加
+    const addr1 = IPAddr{ .v4 = .{ 10, 0, 0, 0 } };
+    const pfx1 = Prefix.init(&addr1, 8);
+    json_tbl.insert(&pfx1, 100);
+
+    const addr2 = IPAddr{ .v4 = .{ 192, 168, 0, 0 } };
+    const pfx2 = Prefix.init(&addr2, 16);
+    json_tbl.insert(&pfx2, 200);
+
+    std.debug.print("テーブルサイズ: {}\n", .{json_tbl.size()});
+
+    // JSON生成
+    const json_content = try json_tbl.marshalJSON(allocator);
+    defer allocator.free(json_content);
+
+    // ファイル出力
+    const file = try std.fs.cwd().createFile("bart_simple.json", .{});
+    defer file.close();
+    
+    try file.writeAll(json_content);
+    
+    std.debug.print("✅ JSONファイル出力完了: bart_simple.json\n", .{});
+    std.debug.print("📁 サイズ: {} bytes\n", .{json_content.len});
 }

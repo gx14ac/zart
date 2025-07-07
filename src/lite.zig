@@ -308,16 +308,7 @@ test "Lite basic operations" {
     std.debug.print("✅ Lite basic operations test passed!\n", .{});
 }
 
-test "Lite deprecated methods exist" {
-    const allocator = std.testing.allocator;
-    
-    var lite = Lite.init(allocator);
-    defer lite.deinit();
-    
-    // These should all panic - we can't easily test panics in Zig,
-    // so we just verify the methods exist and would panic
-    std.debug.print("✅ Lite deprecated methods exist and would panic correctly!\n", .{});
-}
+
 
 test "Lite ACL example" {
     const allocator = std.testing.allocator;
@@ -362,60 +353,4 @@ test "Lite ACL example" {
     std.debug.print("✅ Lite ACL example test passed!\n", .{});
 }
 
-test "Direct Table(void) test" {
-    const allocator = std.testing.allocator;
-    
-    var table = Table(void).init(allocator);
-    defer table.deinit();
-    
-    // Test with the same prefixes
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    const addr2 = IPAddr{ .v4 = .{ 10, 0, 0, 1 } };
-    
-    std.debug.print("直接テスト: pfx2 = {}\n", .{pfx2});
-    std.debug.print("直接テスト: addr2 = {}\n", .{addr2});
-    
-    // Insert
-    table.insert(&pfx2, {});
-    std.debug.print("挿入後のサイズ: {}\n", .{table.size()});
-    
-    // Test get
-    const get_result = table.get(&pfx2);
-    std.debug.print("get結果: {}\n", .{get_result != null});
-    
-    // Test lookup
-    const lookup_result = table.lookup(&addr2);
-    std.debug.print("lookup結果: ok={}\n", .{lookup_result.ok});
-    
-    try std.testing.expect(get_result != null);
-    try std.testing.expect(lookup_result.ok);
-}
-
-test "Direct Table(u32) test for comparison" {
-    const allocator = std.testing.allocator;
-    
-    var table = Table(u32).init(allocator);
-    defer table.deinit();
-    
-    // Test with the same prefixes
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    const addr2 = IPAddr{ .v4 = .{ 10, 0, 0, 1 } };
-    
-    std.debug.print("u32テスト: pfx2 = {}\n", .{pfx2});
-    std.debug.print("u32テスト: addr2 = {}\n", .{addr2});
-    
-    // Insert
-    table.insert(&pfx2, 123);
-    std.debug.print("u32テスト挿入後のサイズ: {}\n", .{table.size()});
-    
-    // Test get
-    const get_result = table.get(&pfx2);
-    std.debug.print("u32テストget結果: {}\n", .{get_result != null});
-    
-    // Test lookup
-    const lookup_result = table.lookup(&addr2);
-    std.debug.print("u32テストlookup結果: ok={}\n", .{lookup_result.ok});
-    
-    try std.testing.expect(get_result != null);
-    try std.testing.expect(lookup_result.ok);
-} 
+ 

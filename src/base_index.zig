@@ -54,20 +54,46 @@ pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
     if (idx == 0) {
         return error.InvalidIndex;
     }
-
-    const pfx_len = @as(u8, @intCast(std.math.log2_int(u8, idx)));
-    const shift_bits = 8 - pfx_len;
     
-    // shift_bitsが8の場合（pfx_len=0）は特別処理
-    if (shift_bits == 8) {
+    // idx == 1 は特別ケース: デフォルトルート (0/0)
+    if (idx == 1) {
+        return .{
+            .octet = 0,
+            .pfx_len = 0,
+        };
+    }
+
+    // Go実装の逆変換ロジック
+    // pfxToIdx では: return (octet >> (8-pfx_len)) + (1 << pfx_len)
+    // 逆変換: idx = prefix_value + (1 << pfx_len)
+    // つまり: prefix_value = idx - (1 << pfx_len)
+    
+    // pfx_lenを見つける: 最上位ビットの位置
+    var pfx_len: u8 = 0;
+    var test_val = idx;
+    while (test_val > 1) {
+        test_val >>= 1;
+        pfx_len += 1;
+    }
+    
+    if (pfx_len == 0) {
         return .{
             .octet = 0,
             .pfx_len = 0,
         };
     }
     
-    const mask = @as(u8, 0xff) >> @intCast(shift_bits);
-    const octet = (idx & mask) << @intCast(shift_bits);
+    // prefix_value = idx - (1 << pfx_len)
+    const base_value = @as(u8, 1) << @as(u3, @intCast(pfx_len));
+    if (idx < base_value) {
+        return error.InvalidIndex;
+    }
+    
+    const prefix_value = idx - base_value;
+    
+    // octet = prefix_value << (8 - pfx_len)
+    const shift_bits = 8 - pfx_len;
+    const octet = if (shift_bits < 8) prefix_value << @as(u3, @intCast(shift_bits)) else 0;
 
     return .{
         .octet = octet,

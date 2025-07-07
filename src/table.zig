@@ -1046,17 +1046,7 @@ test "Table subnets basic" {
     try std.testing.expect(found_2);
 }
 
-test "Table lookupPrefix detailed verification" {
-    // このテストは削除 - デバッグ用だったため
-}
 
-test "Table lookupPrefix single case debug" {
-    // このテストは削除 - デバッグ用だったため
-}
-
-test "Table get vs lookupPrefix comparison" {
-    // このテストは削除 - lookupPrefixの実装が不完全なため
-}
 
 test "Table overlapsPrefix basic" {
     const allocator = std.testing.allocator;

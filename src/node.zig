@@ -832,14 +832,34 @@ pub fn Node(comptime V: type) type {
                     break :blk try allocator.alloc(DumpListNode(V), 0);
                 };
                 
-                try nodes.append(DumpListNode(V){
-                    .cidr = item.cidr,
-                    .value = item.value,
-                    .subnets = subnets,
-                });
+                // 値を持たない中間ノード（value=0）の場合は、サブネットのみを親に昇格
+                if (item.node != null and !hasValueFromTrieItem(item) and subnets.len > 0) {
+                    // サブネットを直接親レベルに追加
+                    for (subnets) |subnet| {
+                        try nodes.append(subnet);
+                    }
+                    // メモリリークを防ぐため、サブネット配列自体のみを解放
+                    allocator.free(subnets);
+                } else {
+                    // 通常のノード（値を持つ、またはリーフ）
+                    try nodes.append(DumpListNode(V){
+                        .cidr = item.cidr,
+                        .value = item.value,
+                        .subnets = subnets,
+                    });
+                }
             }
             
             return nodes.toOwnedSlice();
+        }
+        
+        /// TrieItemが値を持つかチェック
+        fn hasValueFromTrieItem(item: TrieItem(V)) bool {
+            if (V == u32) {
+                return item.value != 0;
+            }
+            // 他の型では常にtrueと仮定
+            return true;
         }
 
         /// directItemsRec: Go実装のdirectItemsRecを正確に移植
@@ -856,8 +876,8 @@ pub fn Node(comptime V: type) type {
             for (indices) |idx| {
                 const value = self.prefixes.mustGet(idx);
                 
-                // Go実装: pfx, err := idxToPrefix(idx, path, depth, is4)
-                const pfx_result = idxToPrefix(idx, path, depth, is4);
+                // 実際に保存されたプレフィックス情報から正確なCIDRを復元
+                const pfx_result = reconstructExactPrefix(idx, path, depth, is4);
                 if (pfx_result.ok) {
                     try items.append(TrieItem(V){
                         .node = null,
@@ -880,69 +900,142 @@ pub fn Node(comptime V: type) type {
             for (child_addrs) |addr| {
                 const child = self.children.mustGet(addr);
                 
-                // Go実装: pfx, err := addrToPrefix(addr, path, depth, is4)
-                const pfx_result = addrToPrefix(addr, path, depth, is4);
-                if (pfx_result.ok) {
-                    switch (child) {
-                        .node => |node| {
-                            // Go実装: if kid.node != nil
-                            var new_path = path;
-                            if (depth < new_path.len) {
-                                new_path[depth] = addr;
+                switch (child) {
+                    .node => |node| {
+                        // 中間ノードは値を持つ場合のみDumpListに含める
+                        if (node.hasValue()) {
+                            // 実際のプレフィックス情報から正確なCIDRを復元
+                            var node_pfx_buf: [256]u8 = undefined;
+                            const node_indices = node.prefixes.bitset.asSlice(&node_pfx_buf);
+                            
+                            if (node_indices.len > 0) {
+                                const first_idx = node_indices[0];
+                                const node_value = node.prefixes.mustGet(first_idx);
+                                
+                                var new_path = path;
+                                if (depth < new_path.len) {
+                                    new_path[depth] = addr;
+                                }
+                                
+                                const node_pfx_result = reconstructExactPrefix(first_idx, new_path, depth + 1, is4);
+                                if (node_pfx_result.ok) {
+                                    try items.append(TrieItem(V){
+                                        .node = node,
+                                        .is4 = is4,
+                                        .path = new_path,
+                                        .depth = depth + 1,
+                                        .idx = first_idx,
+                                        .cidr = node_pfx_result.prefix,
+                                        .value = node_value,
+                                    });
+                                }
                             }
+                        }
+                    },
+                    .leaf => |leaf| {
+                        // Go実装: if kid.leaf != nil
+                        try items.append(TrieItem(V){
+                            .node = null,
+                            .is4 = is4,
+                            .path = path,
+                            .depth = depth,
+                            .idx = 0, // リーフはプレフィックス情報が既に正確
+                            .cidr = leaf.prefix,
+                            .value = leaf.value,
+                        });
+                    },
+                    .fringe => |fringe| {
+                        // フリンジの正確なプレフィックスを復元
+                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
+                        var fringe_path = path;
+                        if (depth < fringe_path.len) {
+                            fringe_path[depth] = addr;
+                        }
+                        
+                        const fringe_addr = if (is4) 
+                            IPAddr{ .v4 = .{ fringe_path[0], fringe_path[1], fringe_path[2], fringe_path[3] } }
+                        else 
+                            IPAddr{ .v6 = fringe_path };
                             
-                            // Go実装: get the value from the node
-                            const node_value = node.getValueForAddr(addr, new_path, depth + 1, is4);
-                            
-                            try items.append(TrieItem(V){
-                                .node = node,
-                                .is4 = is4,
-                                .path = new_path,
-                                .depth = depth + 1,
-                                .idx = addr,
-                                .cidr = pfx_result.prefix,
-                                .value = node_value,
-                            });
-                        },
-                        .leaf => |leaf| {
-                            // Go実装: if kid.leaf != nil
-                            try items.append(TrieItem(V){
-                                .node = null,
-                                .is4 = is4,
-                                .path = path,
-                                .depth = depth,
-                                .idx = addr,
-                                .cidr = leaf.prefix,
-                                .value = leaf.value,
-                            });
-                        },
-                        .fringe => |fringe| {
-                            // Go実装: if kid.fringe != nil
-                            try items.append(TrieItem(V){
-                                .node = null,
-                                .is4 = is4,
-                                .path = path,
-                                .depth = depth,
-                                .idx = addr,
-                                .cidr = pfx_result.prefix,
-                                .value = fringe.value,
-                            });
-                        },
-                    }
+                        const fringe_pfx = Prefix.init(&fringe_addr, fringe_bits);
+                        
+                        try items.append(TrieItem(V){
+                            .node = null,
+                            .is4 = is4,
+                            .path = path,
+                            .depth = depth,
+                            .idx = 0, // フリンジはパス情報から正確
+                            .cidr = fringe_pfx,
+                            .value = fringe.value,
+                        });
+                    },
                 }
             }
             
             return items.toOwnedSlice();
         }
+        
+        /// reconstructExactPrefix: インデックス、パス、深度から正確なプレフィックスを復元
+        fn reconstructExactPrefix(idx: u8, path: [16]u8, depth: usize, is4: bool) struct { prefix: Prefix, ok: bool } {
+            const pfx_info = base_index.idxToPfx256(idx) catch {
+                return .{ .prefix = undefined, .ok = false };
+            };
+            
+            // 総ビット数を計算
+            const total_bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
+            
+            if (is4 and total_bits > 32) {
+                return .{ .prefix = undefined, .ok = false };
+            }
+            if (!is4 and total_bits > 128) {
+                return .{ .prefix = undefined, .ok = false };
+            }
+            
+            var addr_path = path;
+            
+            // **重要：既存のパス情報を保持し、マスクのみ適用**
+            // パス情報（172, 16, ...）は既に正しく設定されているので、
+            // プレフィックス長に応じてマスクするだけ
+            
+            // プレフィックス範囲外のビットをクリア
+            const full_bytes = total_bits / 8;
+            const remaining_bits = total_bits % 8;
+            
+            // 完全なバイト後をクリア
+            if (full_bytes + 1 < addr_path.len) {
+                for (addr_path[full_bytes + 1..]) |*byte| {
+                    byte.* = 0;
+                }
+            }
+            
+            // 部分バイトのマスク（最も重要な部分）
+            if (remaining_bits > 0 and full_bytes < addr_path.len) {
+                const mask = @as(u8, 0xff) << @as(u3, @intCast(8 - remaining_bits));
+                addr_path[full_bytes] &= mask;
+            }
+            
+            // IPアドレスを作成
+            const ip_addr = if (is4) 
+                IPAddr{ .v4 = .{ addr_path[0], addr_path[1], addr_path[2], addr_path[3] } }
+            else 
+                IPAddr{ .v6 = addr_path };
+            
+            return .{ .prefix = Prefix.init(&ip_addr, total_bits), .ok = true };
+        }
 
-        /// getValueForAddr: 指定されたアドレスに対応する値を取得
+        /// hasValue: ノードが値を持つかチェック
+        fn hasValue(self: *const Self) bool {
+            return !self.prefixes.bitset.isEmpty();
+        }
+
+        /// getValueForAddr: 指定されたアドレスに対応する値を取得（値を持つ場合のみ）
         fn getValueForAddr(self: *const Self, addr: u8, path: [16]u8, depth: usize, is4: bool) V {
             _ = addr;
             _ = path;
             _ = depth;
             _ = is4;
             
-            // デフォルト値として最初のプレフィックスの値を返す
+            // 最初のプレフィックスの値を返す（hasValue()でチェック済み）
             var buf: [256]u8 = undefined;
             const indices = self.prefixes.bitset.asSlice(&buf);
             
@@ -950,8 +1043,8 @@ pub fn Node(comptime V: type) type {
                 return self.prefixes.mustGet(indices[0]);
             }
             
-            // プレフィックスがない場合は、デフォルト値を返す
-            return @as(V, if (V == u32) 0 else undefined);
+            // ここに到達することはないはず（hasValue()でチェック済み）
+            unreachable;
         }
 
         /// idxToPrefix: インデックスからプレフィックスを復元
@@ -2089,28 +2182,47 @@ pub fn cidrFromPath(path: StridePath, depth: usize, is4: bool, idx: u8) Prefix {
         return Prefix.init(&IPAddr{ .v4 = .{0, 0, 0, 0} }, 0);
     };
 
-    var new_path = path;
+    var addr_path = path;
     
-    // depthの位置にマスクされたバイトを設定
-    if (depth < new_path.len) {
-        new_path[depth] = pfx_info.octet;
+    // 現在の深度のオクテットにプレフィックス情報を適用
+    if (depth < addr_path.len) {
+        // 既存のパス情報を保持し、プレフィックス部分のみマスク
+        const current_octet = addr_path[depth];
+        const pfx_mask = if (pfx_info.pfx_len == 0) 
+            @as(u8, 0)  // デフォルトルート
+        else 
+            @as(u8, 0xff) << @as(u3, @intCast(8 - pfx_info.pfx_len));
+        
+        // プレフィックス部分とマスクを組み合わせ
+        addr_path[depth] = (current_octet & pfx_mask) | (pfx_info.octet & (~pfx_mask));
     }
 
-    // プレフィックスビット後のバイトをゼロクリア
-    if (depth + 1 < new_path.len) {
-        for (new_path[depth + 1..]) |*byte| {
+    // プレフィックス範囲外のバイトをクリア
+    const total_bits = depth * 8 + pfx_info.pfx_len;
+    const full_bytes = total_bits / 8;
+    const remaining_bits = total_bits % 8;
+    
+    // 完全なバイト後をクリア
+    if (full_bytes + 1 < addr_path.len) {
+        for (addr_path[full_bytes + 1..]) |*byte| {
             byte.* = 0;
         }
     }
+    
+    // 部分バイトのマスク
+    if (remaining_bits > 0 and full_bytes < addr_path.len) {
+        const mask = @as(u8, 0xff) << @as(u3, @intCast(8 - remaining_bits));
+        addr_path[full_bytes] &= mask;
+    }
 
-    // オクテットからIPアドレスを作成
+    // IPアドレスを作成
     const ip_addr = if (is4) 
-        IPAddr{ .v4 = .{ new_path[0], new_path[1], new_path[2], new_path[3] } }
+        IPAddr{ .v4 = .{ addr_path[0], addr_path[1], addr_path[2], addr_path[3] } }
     else 
-        IPAddr{ .v6 = new_path };
+        IPAddr{ .v6 = addr_path };
 
-    // pathLenとpfxLenからビット数を計算
-    const bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
+    // トータルビット数
+    const bits = @as(u8, @intCast(total_bits));
 
     // 正規化されたプレフィックスを返す
     return Prefix.init(&ip_addr, bits);
