@@ -1,5 +1,5 @@
 ## zart
-bitmap based art table.
+over the art table.
 
 ## Test
 This test covered for application unit tests

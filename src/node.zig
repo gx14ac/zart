@@ -1747,6 +1747,194 @@ pub fn Node(comptime V: type) type {
                 return "0x??";
             }
         }
+
+
+        
+        /// insertAtDepthForCompress: purgeAndCompress専用の簡易挿入関数
+        /// 通常のinsertAtDepthと異なり、圧縮時の再挿入に特化
+        fn insertAtDepthForCompress(self: *Self, pfx: *const Prefix, val: V, depth: usize) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth_info = base_index.maxDepthAndLastBits(bits);
+            const max_depth = max_depth_info.max_depth;
+            const last_bits = max_depth_info.last_bits;
+            
+            var current_depth = depth;
+            var current_node = self;
+            
+            // Go実装のinsertAtDepthロジックを簡略化
+            while (current_depth < octets.len) : (current_depth += 1) {
+                const octet = octets[current_depth];
+                
+                // 最後のマスクされたオクテット: prefix/valをノードに挿入/上書き
+                if (current_depth == max_depth) {
+                    return current_node.prefixes.insertAt(base_index.pfxToIdx256(octet, last_bits), val) != null;
+                }
+                
+                // トライパスの終端に到達...
+                if (!current_node.children.isSet(octet)) {
+                                    // プレフィックスをpath-compressedとしてleafまたはfringeで挿入
+                if (base_index.isFringe(current_depth, bits)) {
+                    return current_node.children.insertAt(octet, Child(V){ .fringe = FringeNode(V).init(val) }) != null;
+                }
+                    return current_node.children.insertAt(octet, Child(V){ .leaf = LeafNode(V).init(pfx.*, val) }) != null;
+                }
+                
+                // ...または下位のトライに降りる
+                const kid = current_node.children.mustGet(octet);
+                
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        continue;
+                    },
+                    .leaf => |leaf| {
+                        // path-compressedプレフィックスに到達
+                        if (leaf.prefix.eql(pfx.*)) {
+                            // プレフィックスが等しい場合、値を上書き
+                            const new_leaf = Child(V){ .leaf = LeafNode(V).init(pfx.*, val) };
+                            _ = current_node.children.insertAt(octet, new_leaf);
+                            return true;
+                        }
+                        
+                        // 新しいノードを作成
+                        // leafを下にプッシュ
+                        // 現在のleaf位置に新しい子を挿入
+                        // 降りて、nを新しい子で置換
+                        const new_node = try Node(V).init(self.allocator);
+                        _ = new_node.insertAtDepthForCompress(&leaf.prefix, leaf.value, current_depth + 1);
+                        
+                        const new_child = Child(V){ .node = new_node };
+                        _ = current_node.children.insertAt(octet, new_child);
+                        current_node = new_node;
+                    },
+                    .fringe => |fringe| {
+                        // path-compressedのfringeに到達
+                        if (base_index.isFringe(current_depth, bits)) {
+                            // プレフィックスがfringeの場合、値を上書き
+                            const new_fringe = Child(V){ .fringe = FringeNode(V).init(val) };
+                            _ = current_node.children.insertAt(octet, new_fringe);
+                            return true;
+                        }
+                        
+                        // 新しいノードを作成
+                        // fringeを下にプッシュ、デフォルトルートになる (idx=1)
+                        // 現在のleaf位置に新しい子を挿入
+                        // 降りて、nを新しい子で置換
+                        const new_node = try Node(V).init(self.allocator);
+                        _ = new_node.prefixes.insertAt(1, fringe.value);
+                        
+                        const new_child = Child(V){ .node = new_node };
+                        _ = current_node.children.insertAt(octet, new_child);
+                        current_node = new_node;
+                    },
+                }
+            }
+            
+            return false;
+        }
+
+        /// cidrForFringe: helper function,
+        /// get prefix back from octets path, depth, IP version and last octet.
+        /// The prefix of a fringe is solely defined by the position in the trie.
+        /// Go実装のcidrForFringeを移植
+        fn cidrForFringe(octets: []const u8, depth: usize, is4: bool, last_octet: u8) Prefix {
+            var path: [16]u8 = std.mem.zeroes([16]u8);
+            
+            // copy existing path
+            const copy_len = @min(depth, octets.len, path.len);
+            @memcpy(path[0..copy_len], octets[0..copy_len]);
+            
+            // replace last octet
+            if (depth < path.len) {
+                path[depth] = last_octet;
+            }
+            
+            // make ip addr from octets
+            const ip = if (is4) 
+                IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } }
+            else 
+                IPAddr{ .v6 = path };
+                
+            // it's a fringe, bits are always /8, /16, /24, ...
+            const bits = @as(u8, @intCast((depth + 1) * 8));
+            
+            // return a (normalized) prefix from ip/bits
+            return Prefix.init(&ip, bits);
+        }
+
+
+
+        /// TODO: purgeAndCompressのエラー修正（cidrForFringeFromStack -> cidrForFringe）
+        
+        /// purgeAndCompress: Go実装のpurgeAndCompressメソッドを移植
+        /// 空ノードの削除と単一要素ノードの圧縮を行う
+        pub fn purgeAndCompress(self: *Self, stack: []*Self, octets: []const u8, is4: bool) void {
+            // Go実装: unwind the stack
+            var depth = @as(i32, @intCast(stack.len)) - 1;
+            var current_node = self;
+            
+            while (depth >= 0) : (depth -= 1) {
+                const parent = stack[@intCast(depth)];
+                const octet = octets[@intCast(depth)];
+                
+                const pfx_count = current_node.prefixes.len();
+                const child_count = current_node.children.len();
+                
+                if (current_node.isEmpty()) {
+                    // Go実装: just delete this empty node from parent
+                    _ = parent.children.deleteAt(octet);
+                } else if (pfx_count == 0 and child_count == 1) {
+                    // Go実装: single child compression logic
+                    var child_addrs_buf: [256]u8 = undefined;
+                    const child_addrs = current_node.children.bitset.asSlice(&child_addrs_buf);
+                    
+                    if (child_addrs.len == 1) {
+                        const child_addr = child_addrs[0];
+                        const kid = current_node.children.mustGet(child_addr);
+                        
+                        switch (kid) {
+                            .node => {
+                                // Go実装: fast exit, we are at an intermediate path node
+                                // no further delete/compress upwards the stack is possible
+                                return;
+                            },
+                            .leaf => |leaf| {
+                                // Go実装: just one leaf, delete this node and reinsert the leaf above
+                                _ = parent.children.deleteAt(octet);
+                                
+                                // ... (re)insert the leaf at parents depth
+                                _ = parent.insertAtDepthForCompress(&leaf.prefix, leaf.value, @intCast(depth));
+                            },
+                            .fringe => |fringe| {
+                                // Go実装: just one fringe, delete this node and reinsert the fringe as leaf above
+                                _ = parent.children.deleteAt(octet);
+                                
+                                // get the last octet back, the only item is also the first item
+                                const last_octet = child_addr;
+                                
+                                // rebuild the prefix with octets, depth, ip version and addr
+                                // depth is the parent's depth, so add +1 here for the kid
+                                const fringe_pfx = cidrForFringe(octets, @intCast(depth + 1), is4, last_octet);
+                                
+                                // ... (re)reinsert prefix/value at parents depth
+                                _ = parent.insertAtDepthForCompress(&fringe_pfx, fringe.value, @intCast(depth));
+                            },
+                        }
+                    }
+                } else {
+                    // Go実装: node has both prefixes and children, or multiple children
+                    // no compression possible, stop here
+                    return;
+                }
+                
+                // Move up to parent for next iteration
+                current_node = parent;
+            }
+        }
+
+
     };
 }
 
@@ -1799,25 +1987,6 @@ pub fn Child(comptime V: type) type {
         leaf: LeafNode(V),
         fringe: FringeNode(V),
     };
-}
-
-/// isFringe, leaves with /8, /16, ... /128 bits at special positions
-/// in the trie.
-///
-/// Just a path-compressed leaf, inserted at the last
-/// possible level as path compressed (depth == maxDepth-1)
-/// before inserted just as a prefix in the next level down (depth == maxDepth).
-///
-/// Nice side effect: A fringe is the default-route for all nodes below this slot!
-///
-///     e.g. prefix is addr/8, or addr/16, or ... addr/128
-///     depth <  maxDepth-1 : a leaf, path-compressed
-///     depth == maxDepth-1 : a fringe, path-compressed
-///     depth == maxDepth   : a prefix with octet/pfx == 0/0 => idx == 1, a strides default route
-pub fn isFringe(depth: usize, bits: u8) bool {
-    const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-    const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-    return depth == max_depth - 1 and last_bits == 0;
 }
 
 /// Prefix represents an IP prefix with address and bit length
@@ -2228,31 +2397,3 @@ pub fn cidrFromPath(path: StridePath, depth: usize, is4: bool, idx: u8) Prefix {
     return Prefix.init(&ip_addr, bits);
 }
 
-/// cidrForFringe: フリンジノードからプレフィックスを復元
-/// Go実装のcidrForFringeに相当
-pub fn cidrForFringe(octets: []const u8, depth: usize, is4: bool, last_octet: u8) Prefix {
-    var path: StridePath = std.mem.zeroes(StridePath);
-    
-    // 現在の深度までのパスをコピー
-    const copy_len = @min(depth, octets.len);
-    for (0..copy_len) |i| {
-        path[i] = octets[i];
-    }
-
-    // 最後のオクテットを置き換え
-    if (depth < path.len) {
-        path[depth] = last_octet;
-    }
-
-    // オクテットからIPアドレスを作成
-    const ip_addr = if (is4) 
-        IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } }
-    else 
-        IPAddr{ .v6 = path };
-
-    // フリンジのビット数は常に /8, /16, /24, ...
-    const bits = @as(u8, @intCast((depth + 1) * 8));
-
-    // 正規化されたプレフィックスを返す
-    return Prefix.init(&ip_addr, bits);
-}

@@ -39,9 +39,9 @@ fn pfxToIdx(octet: u8, pfx_len: u8) usize {
 /// Map 8-bit prefix to numeric value (256 version)
 /// Value range is [1..255]. Values greater than 255 are shifted by >>1.
 pub fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
-    const idx = pfxToIdx(octet, pfx_len);
+    var idx = pfxToIdx(octet, pfx_len);
     if (idx > 255) {
-        return @as(u8, @intCast(idx >> 1));
+        idx >>= 1;
     }
     return @as(u8, @intCast(idx));
 }
@@ -145,6 +145,17 @@ pub fn maxDepthAndLastBits(bits: u8) struct { max_depth: usize, last_bits: u8 } 
     const last_bits = bits % 8;
     return .{ .max_depth = max_depth, .last_bits = last_bits };
 }
+
+/// isFringe: leaves with /8, /16, ... /128 bits at special positions
+/// in the trie. Go実装のisFringeを移植
+pub fn isFringe(depth: usize, bits: u8) bool {
+    const info = maxDepthAndLastBits(bits);
+    const max_depth = info.max_depth;
+    const last_bits = info.last_bits;
+    return depth == max_depth - 1 and last_bits == 0;
+}
+
+
 
 // Tests
 test "base_index" {

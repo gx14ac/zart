@@ -330,3 +330,12 @@ test "Zig vs Go benchmark" {
     const allocator = std.testing.allocator;
     try runVsGoBenchmark(allocator);
 } 
+
+// Main function for zig run
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    try runVsGoBenchmark(allocator);
+} 
