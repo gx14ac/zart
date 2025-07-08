@@ -174,12 +174,13 @@ fn benchmarkLookup(allocator: std.mem.Allocator, n: usize, operation: enum { Con
     for (0..iterations) |_| {
                  switch (operation) {
              .Contains => {
-                 const result = table.lookup(probe_addr);
-                 dummy_sink = result.ok;
+                 // Go BART互換の超高速Contains
+                 dummy_sink = table.contains(probe_addr);
              },
              .Lookup => {
-                 const result = table.lookup(probe_addr);
-                 dummy_sink = result.ok;
+                 // Go BART互換の高速Lookup
+                 const result = table.fastLookup(probe_addr);
+                 dummy_sink = (result != null);
              },
              .Get => {
                  const result = table.get(probe_prefix);

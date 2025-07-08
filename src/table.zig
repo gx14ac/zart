@@ -124,10 +124,10 @@ pub fn Table(comptime V: type) type {
         }
         
         /// Lookup performs a longest prefix match for the given IP address.
-        pub fn lookup(self: *const Self, addr: *const node.IPAddr) node.LookupResult(V) {
+        pub fn lookup(self: *const Self, addr: *const IPAddr) node.LookupResult(V) {
             const is4 = addr.is4();
-            const n = self.rootNodeByVersionConst(is4);
-            return n.lookup(addr);
+            const root = self.rootNodeByVersionConst(is4);
+            return root.fastLookup(addr);
         }
         
         /// LookupPrefix performs a longest prefix match for the given prefix.
@@ -847,6 +847,24 @@ pub fn Table(comptime V: type) type {
         pub fn allSorted6WithCallback(self: *const Self, yield: *const YieldFn) void {
             const path = std.mem.zeroes(node.StridePath);
             _ = self.root6.allRecSorted(path, 0, false, yield);
+        }
+
+        /// contains: Go BART互換の超高速Contains実装
+        /// バックトラッキングなし、任意のLPMマッチで十分
+        pub fn contains(self: *const Self, addr: *const IPAddr) bool {
+            const is4 = addr.is4();
+            const root = self.rootNodeByVersionConst(is4);
+            return root.contains(addr);
+        }
+        
+        /// fastLookup: Go BART互換の高速Lookup実装
+        /// 効率的なバックトラッキングと最適化されたLPM
+        pub fn fastLookup(self: *const Self, addr: *const IPAddr) ?V {
+            const is4 = addr.is4();
+            const root = self.rootNodeByVersionConst(is4);
+            const result = root.fastLookup(addr);
+            
+            return if (result.ok) result.value else null;
         }
     };
 }

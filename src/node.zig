@@ -1934,6 +1934,127 @@ pub fn Node(comptime V: type) type {
             }
         }
 
+        /// contains: Go BARTのContains実装を移植 - 超高速化版
+        /// バックトラッキングなし、任意のLPMマッチで十分
+        pub fn contains(self: *const Self, addr: *const IPAddr) bool {
+            const octets = addr.asSlice();
+            var current_node = self;
+            
+            for (octets) |octet| {
+                // Go実装: for contains, any lpm match is good enough, no backtracking needed
+                if (current_node.prefixes.len() != 0 and current_node.lpmTest(@as(usize, octet) << 3)) {
+                    return true; // 即座にtrue返却！
+                }
+                
+                // stop traversing?
+                if (!current_node.children.isSet(octet)) {
+                    return false;
+                }
+                
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        continue; // descend down to next trie level
+                    },
+                    .fringe => {
+                        // fringe is the default-route for all possible octets below
+                        return true;
+                    },
+                    .leaf => |leaf| {
+                        return leaf.prefix.containsAddr(addr.*);
+                    },
+                }
+            }
+            
+            return false;
+        }
+        
+        /// fastLookup: Go BARTのLookup実装を移植 - 高速バックトラッキング版  
+        pub fn fastLookup(self: *const Self, addr: *const IPAddr) Result {
+            const octets = addr.asSlice();
+            var current_node = self;
+            
+            // stack of the traversed nodes for fast backtracking, if needed
+            var stack: [16]*const Self = undefined;
+            
+            // run variable, used after for loop
+            var depth: usize = 0;
+            var octet: u8 = 0;
+            
+            // find leaf node
+            for (octets, 0..) |current_octet, current_depth| {
+                depth = current_depth & 0xf; // BCE, Lookup must be fast
+                octet = current_octet;
+                
+                // push current node on stack for fast backtracking
+                stack[depth] = current_node;
+                
+                // go down in tight loop to last octet
+                if (!current_node.children.isSet(octet)) {
+                    // no more nodes below octet
+                    break;
+                }
+                
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        continue; // descend down to next trie level
+                    },
+                    .fringe => |fringe| {
+                        // fringe is the default-route for all possible nodes below
+                        var path: [16]u8 = undefined;
+                        @memcpy(path[0..octets.len], octets);
+                        path[depth] = octet;
+                        var fringe_addr = if (addr.is4()) IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } else IPAddr{ .v6 = path[0..16].* };
+                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
+                        const fringe_pfx = Prefix.init(&fringe_addr, fringe_bits);
+                        return Result{ .prefix = fringe_pfx, .value = fringe.value, .ok = true };
+                    },
+                    .leaf => |leaf| {
+                        if (leaf.prefix.containsAddr(addr.*)) {
+                            return Result{ .prefix = leaf.prefix, .value = leaf.value, .ok = true };
+                        }
+                        // reached a path compressed prefix, stop traversing
+                        break;
+                    },
+                }
+            }
+            
+            // start backtracking, unwind the stack, bounds check eliminated
+            var current_depth = if (depth > 0) depth - 1 else 0;
+            while (true) {
+                current_depth = current_depth & 0xf; // BCE
+                
+                current_node = stack[current_depth];
+                
+                // longest prefix match, skip if node has no prefixes
+                if (current_node.prefixes.len() != 0) {
+                    const idx = @as(usize, octets[current_depth]) << 3; // art.HostIdx equivalent
+                    
+                    // Go実装のマニュアルインライン化: lpmGet(idx)
+                    var bs: bitset256.BitSet256 = @as(bitset256.BitSet256, lookup_tbl.backTrackingBitset(idx));
+                    if (current_node.prefixes.intersectionTop(&bs)) |top_idx| {
+                        const val = current_node.prefixes.mustGet(top_idx);
+                        
+                        // プレフィックスを簡易再構築
+                        var masked_addr = addr.*;
+                        const pfx_info = base_index.idxToPfx256(top_idx) catch return Result{ .prefix = undefined, .value = undefined, .ok = false };
+                        const bits = @as(u8, @intCast(current_depth * 8 + pfx_info.pfx_len));
+                        masked_addr = masked_addr.masked(bits);
+                        const prefix = Prefix.init(&masked_addr, bits);
+                        
+                        return Result{ .prefix = prefix, .value = val, .ok = true };
+                    }
+                }
+                
+                if (current_depth == 0) break;
+                current_depth -= 1;
+            }
+            
+            return Result{ .prefix = undefined, .value = undefined, .ok = false };
+        }
 
     };
 }
