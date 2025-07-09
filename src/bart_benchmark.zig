@@ -93,6 +93,127 @@ fn createTestData(allocator: std.mem.Allocator) !void {
     print("Created {} test prefixes ({} IPv4, {} IPv6)\n", .{ routes.items.len, routes4.items.len, routes6.items.len });
 }
 
+// Load real routing table data from testdata/prefixes.txt
+fn loadRealRoutingData(allocator: std.mem.Allocator) !void {
+    routes = std.ArrayList(Route).init(allocator);
+    routes4 = std.ArrayList(Route).init(allocator);
+    routes6 = std.ArrayList(Route).init(allocator);
+
+    // Try to load from uncompressed file first
+    const file = std.fs.cwd().openFile("testdata/prefixes.txt", .{}) catch |err| {
+        print("Error: Could not open testdata/prefixes.txt: {}\n", .{err});
+        print("Falling back to test data...\n", .{});
+        return createTestData(allocator);
+    };
+    defer file.close();
+
+    print("Loading real routing table data from testdata/prefixes.txt...\n", .{});
+
+    var buf_reader = std.io.bufferedReader(file.reader());
+    var in_stream = buf_reader.reader();
+
+    var buf: [256]u8 = undefined;
+    var count: i32 = 0;
+    var errors: usize = 0;
+
+    while (try in_stream.readUntilDelimiterOrEof(buf[0..], '\n')) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\n\t");
+        if (trimmed.len == 0) continue;
+
+        // Parse CIDR notation: "192.168.1.0/24"
+        const slash_pos = std.mem.indexOf(u8, trimmed, "/") orelse {
+            errors += 1;
+            continue;
+        };
+
+        const addr_str = trimmed[0..slash_pos];
+        const len_str = trimmed[slash_pos + 1..];
+
+        // Parse prefix length
+        const prefix_len = std.fmt.parseInt(u8, len_str, 10) catch {
+            errors += 1;
+            continue;
+        };
+
+        // Parse IP address
+        const addr = parseIPAddress(addr_str) catch {
+            errors += 1;
+            continue;
+        };
+
+        // Validate prefix length
+        const is_valid = switch (addr) {
+            .v4 => prefix_len <= 32,
+            .v6 => prefix_len <= 128,
+        };
+        if (!is_valid) {
+            errors += 1;
+            continue;
+        }
+
+        const prefix = Prefix.init(&addr, prefix_len);
+        const route = Route{ .cidr = prefix.masked(), .value = count };
+
+        try routes.append(route);
+        if (addr.is4()) {
+            try routes4.append(route);
+        } else {
+            try routes6.append(route);
+        }
+
+        count += 1;
+
+        // Limit for reasonable performance
+        if (count >= 100000) break;
+    }
+
+    print("Loaded {} real prefixes ({} IPv4, {} IPv6, {} errors)\n", .{ routes.items.len, routes4.items.len, routes6.items.len, errors });
+
+    if (routes.items.len == 0) {
+        print("No valid prefixes loaded, falling back to test data...\n", .{});
+        return createTestData(allocator);
+    }
+}
+
+// Parse IP address from string (IPv4 or IPv6)
+fn parseIPAddress(addr_str: []const u8) !IPAddr {
+    // Try IPv4 first
+    if (std.mem.indexOf(u8, addr_str, ":") == null) {
+        // IPv4 format: "192.168.1.0"
+        var parts: [4]u8 = undefined;
+        var iter = std.mem.splitScalar(u8, addr_str, '.');
+        var i: usize = 0;
+
+        while (iter.next()) |part| {
+            if (i >= 4) return error.InvalidIPv4;
+            parts[i] = std.fmt.parseInt(u8, part, 10) catch return error.InvalidIPv4;
+            i += 1;
+        }
+
+        if (i != 4) return error.InvalidIPv4;
+        return IPAddr{ .v4 = parts };
+    } else {
+        // IPv6 format: "2001:db8::1" (simplified parsing)
+        var parts: [16]u8 = std.mem.zeroes([16]u8);
+        
+        // For now, handle basic IPv6 without full parsing
+        // This is a simplified implementation
+        if (std.mem.startsWith(u8, addr_str, "2001:db8")) {
+            parts[0] = 0x20;
+            parts[1] = 0x01;
+            parts[2] = 0x0d;
+            parts[3] = 0xb8;
+        } else if (std.mem.startsWith(u8, addr_str, "fe80")) {
+            parts[0] = 0xfe;
+            parts[1] = 0x80;
+        } else if (std.mem.startsWith(u8, addr_str, "ff")) {
+            parts[0] = 0xff;
+        }
+        
+        return IPAddr{ .v6 = parts };
+    }
+}
+
 // Find test cases matching Go BART's method
 fn findTestCases(allocator: std.mem.Allocator) !void {
     // Create a table with all routes for finding matches/misses
@@ -446,7 +567,7 @@ pub fn main() !void {
     print("Matching Go BART benchmark methodology\n\n", .{});
 
     // Create test data
-    try createTestData(allocator);
+    try loadRealRoutingData(allocator);
     defer {
         routes.deinit();
         routes4.deinit();

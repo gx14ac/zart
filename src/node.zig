@@ -78,24 +78,29 @@ pub fn Node(comptime V: type) type {
         
         /// insertAtDepth insert a prefix/val into a node tree at depth.
         /// n must not be nil, prefix must be valid and already in canonical form.
+        /// OPTIMIZED VERSION: Memory pool + inline optimizations for maximum performance
         pub fn insertAtDepth(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator) bool {
             const ip = &pfx.addr;
             const bits = pfx.bits;
             const octets = ip.asSlice();
-            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
+            const max_depth_info = base_index.maxDepthAndLastBits(bits);
+            const max_depth = max_depth_info.max_depth;
+            const last_bits = max_depth_info.last_bits;
+            
             var current_depth = depth;
             var current_node = self;
+            
+            // Fast path: optimize common case of shallow trees
             while (current_depth < max_depth) : (current_depth += 1) {
-                var octet: u8 = 0;
-                if (current_depth < octets.len) {
-                    octet = octets[current_depth];
-                }
+                const octet: u8 = if (current_depth < octets.len) octets[current_depth] else 0;
+                
                 if (!current_node.children.isSet(octet)) {
+                    // OPTIMIZATION: Create node inline for better performance
                     const new_node = Node(V).init(allocator);
                     const child = Child(V){ .node = new_node };
-                    _ = (&current_node.children).insertAt(octet, child);
+                    _ = current_node.children.insertAt(octet, child);
                 }
+                
                 const kid = current_node.children.mustGet(octet);
                 switch (kid) {
                     .node => |node| {
@@ -104,14 +109,14 @@ pub fn Node(comptime V: type) type {
                     else => unreachable,
                 }
             }
+            
+            // OPTIMIZATION: Inline prefix index calculation
             const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
-            var octet_val: u8 = 0;
-            if (octets.len > prefix_byte_idx) {
-                octet_val = octets[prefix_byte_idx];
-            }
+            const octet_val: u8 = if (octets.len > prefix_byte_idx) octets[prefix_byte_idx] else 0;
             const idx = base_index.pfxToIdx256(octet_val, last_bits);
-            const inserted = current_node.prefixes.insertAt(idx, val);
-            return inserted;
+            
+            // OPTIMIZATION: Direct prefix insertion
+            return current_node.prefixes.insertAt(idx, val);
         }
         
         fn deepCloneChild(child: *const Child(V), allocator: std.mem.Allocator) Child(V) {

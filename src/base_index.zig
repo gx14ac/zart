@@ -38,13 +38,42 @@ fn pfxToIdx(octet: u8, pfx_len: u8) usize {
 
 /// Map 8-bit prefix to numeric value (256 version)
 /// Value range is [1..255]. Values greater than 255 are shifted by >>1.
+/// OPTIMIZED: Uses precomputed lookup table for maximum performance
 pub fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
+    // OPTIMIZATION: Use precomputed lookup table
+    if (pfx_len <= 8) {
+        return pfxToIdx256LookupTable[pfx_len][octet];
+    }
+    // Fallback for pfx_len > 8 (rare case)
     var idx = pfxToIdx(octet, pfx_len);
     if (idx > 255) {
         idx >>= 1;
     }
     return @as(u8, @intCast(idx));
 }
+
+/// Precomputed lookup table for pfxToIdx256
+/// pfxToIdx256LookupTable[pfx_len][octet] = result
+/// This eliminates all runtime computation for common cases
+const pfxToIdx256LookupTable = blk: {
+    @setEvalBranchQuota(100000);
+    var table: [9][256]u8 = undefined;
+    
+    // Precompute for pfx_len 0-8 and all octets 0-255
+    for (0..9) |pfx_len| {
+        for (0..256) |octet| {
+            const shift: u6 = @intCast(pfx_len);
+            const right_shift: u6 = @intCast(8 - pfx_len);
+            var idx = (@as(usize, octet) >> right_shift) + (@as(usize, 1) << shift);
+            if (idx > 255) {
+                idx >>= 1;
+            }
+            table[pfx_len][octet] = @as(u8, @intCast(idx));
+        }
+    }
+    
+    break :blk table;
+};
 
 /// Return octet and prefix length from base index
 /// Inverse function of pfxToIdx256.
