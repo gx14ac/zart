@@ -214,9 +214,9 @@ pub fn Array256(comptime T: type) type {
             return self.bitset.intersectionTop(other);
         }
         
-        /// Go BART style insertItem - ultra-fast memory operations
-        /// Direct port of Go BART's high-performance insertItem
-        fn insertItem(self: *Self, index: usize, item: T) !void {
+        /// Go BART style insertItem - ULTRA-OPTIMIZED for 15ns/op target
+        /// Phase 5: Manual copy optimization for small arrays + @memcpy for large
+        inline fn insertItem(self: *Self, index: usize, item: T) !void {
             // Go BART style: fast resize if capacity available
             if (self.items.items.len < self.items.capacity) {
                 self.items.items.len += 1;
@@ -224,24 +224,43 @@ pub fn Array256(comptime T: type) type {
                 try self.items.append(undefined); // enlarge capacity efficiently
             }
             
-            // Ultra-fast memory move: Go BART's copy() equivalent
-            if (index < self.items.items.len - 1) {
-                // Use Zig's most optimized memory copy - equivalent to Go's copy()
-                const src = self.items.items[index..self.items.items.len - 1];
-                const dst = self.items.items[index + 1..];
-                @memcpy(dst[0..src.len], src);
+            // Phase 5: Ultra-optimized memory move based on size
+            const move_count = self.items.items.len - 1 - index;
+            if (move_count > 0) {
+                if (move_count <= 4) {
+                    // Small arrays: Manual copy faster than @memcpy overhead
+                    var i = self.items.items.len - 1;
+                    while (i > index) : (i -= 1) {
+                        self.items.items[i] = self.items.items[i - 1];
+                    }
+                } else {
+                    // Large arrays: Use @memcpy for bulk operations
+                    const src = self.items.items[index..self.items.items.len - 1];
+                    const dst = self.items.items[index + 1..];
+                    @memcpy(dst[0..src.len], src);
+                }
             }
             self.items.items[index] = item;
         }
         
-        /// Go BART style deleteItem - ultra-fast memory operations  
-        /// Direct port of Go BART's high-performance deleteItem
-        fn deleteItem(self: *Self, index: usize) void {
-            // Ultra-fast memory move: Go BART's copy() equivalent
-            if (index < self.items.items.len - 1) {
-                const src = self.items.items[index + 1..];
-                const dst = self.items.items[index..];
-                @memcpy(dst[0..src.len], src);
+        /// Go BART style deleteItem - ULTRA-OPTIMIZED for 15ns/op target  
+        /// Phase 5: Manual copy optimization for small arrays + @memcpy for large
+        inline fn deleteItem(self: *Self, index: usize) void {
+            // Phase 5: Ultra-optimized memory move based on size
+            const move_count = self.items.items.len - 1 - index;
+            if (move_count > 0) {
+                if (move_count <= 4) {
+                    // Small arrays: Manual copy faster than @memcpy overhead
+                    var i = index;
+                    while (i < self.items.items.len - 1) : (i += 1) {
+                        self.items.items[i] = self.items.items[i + 1];
+                    }
+                } else {
+                    // Large arrays: Use @memcpy for bulk operations
+                    const src = self.items.items[index + 1..];
+                    const dst = self.items.items[index..];
+                    @memcpy(dst[0..src.len], src);
+                }
             }
             
             // Go BART style: clear tail and resize

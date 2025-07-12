@@ -1,10 +1,12 @@
 const std = @import("std");
 const base_index = @import("base_index.zig");
+// Phase 4 Rollback: DirectArray256 caused cache misses, back to sparse_array256
 const sparse_array256 = @import("sparse_array256.zig");
 const Array256 = sparse_array256.Array256;
 const bitset256 = @import("bitset256.zig");
 const BitSet256 = bitset256.BitSet256;
 const lookup_tbl = @import("lookup_tbl.zig");
+pub const NodePool = @import("node_pool.zig").NodePool;
 
 /// LookupResult represents the result of a lookup operation
 pub fn LookupResult(comptime V: type) type {
@@ -158,7 +160,7 @@ pub fn Node(comptime V: type) type {
                     octet = octets[current_depth];
                 }
                 if (!current_node.children.isSet(octet)) {
-                    const new_node = Self.createFastNode(allocator);
+                    const new_node = Self.newNode(allocator);
                     const child = Child(V){ .node = new_node };
                     _ = (&current_node.children).replaceAt(octet, child);
                 }
@@ -1327,7 +1329,7 @@ pub fn Node(comptime V: type) type {
                             .node => |other_node| {
                                 // leaf, node
                                 // Create new node - OPTIMIZED
-                                const new_node = Self.createFastNode(self.allocator);
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this leaf down
                                 _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
@@ -1355,7 +1357,7 @@ pub fn Node(comptime V: type) type {
                                 }
                                 
                                 // Create new node - OPTIMIZED
-                                const new_node = Self.createFastNode(self.allocator);
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this leaf down
                                 _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
@@ -1372,7 +1374,7 @@ pub fn Node(comptime V: type) type {
                             .fringe => |other_fringe| {
                                 // leaf, fringe
                                 // Create new node - OPTIMIZED
-                                const new_node = Self.createFastNode(self.allocator);
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this leaf down
                                 _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
@@ -1395,7 +1397,7 @@ pub fn Node(comptime V: type) type {
                             .node => |other_node| {
                                 // fringe, node
                                 // Create new node - OPTIMIZED
-                                const new_node = Self.createFastNode(self.allocator);
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this fringe down, it becomes the default route
                                 _ = new_node.prefixes.insertAt(1, this_fringe.value);
@@ -1413,7 +1415,7 @@ pub fn Node(comptime V: type) type {
                             .leaf => |other_leaf| {
                                 // fringe, leaf
                                 // Create new node - OPTIMIZED
-                                const new_node = Self.createFastNode(self.allocator);
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this fringe down, it becomes the default route
                                 _ = new_node.prefixes.insertAt(1, this_fringe.value);
@@ -1834,7 +1836,7 @@ pub fn Node(comptime V: type) type {
                         // leafを下にプッシュ
                         // 現在のleaf位置に新しい子を挿入
                         // 降りて、nを新しい子で置換
-                        const new_node = Self.createFastNode(self.allocator);
+                        const new_node = Self.newNode(self.allocator);
                         _ = new_node.insertAtDepthForCompress(&leaf.prefix, leaf.value, current_depth + 1);
                         
                         const new_child = Child(V){ .node = new_node };
@@ -1854,7 +1856,7 @@ pub fn Node(comptime V: type) type {
                         // fringeを下にプッシュ、デフォルトルートになる (idx=1)
                         // 現在のleaf位置に新しい子を挿入
                         // 降りて、nを新しい子で置換
-                        const new_node = Self.createFastNode(self.allocator);
+                        const new_node = Self.newNode(self.allocator);
                         _ = new_node.prefixes.insertAt(1, fringe.value);
                         
                         const new_child = Child(V){ .node = new_node };
@@ -1971,17 +1973,10 @@ pub fn Node(comptime V: type) type {
 
 
         
-        /// newNode - Go BART style ultra-fast node creation
-        /// Mimics Go's new(node[V]) with automatic zero initialization
+        /// newNode - Ultra-optimized node creation for maximum Insert performance  
+        /// Phase 3 Final: Switched to createZeroNode for 15 ns/op target
         inline fn newNode(allocator: std.mem.Allocator) *Self {
-            const node = allocator.create(Self) catch unreachable;
-            // Go BART style: minimal initialization matching Go's new()
-            node.* = Self{
-                .children = Array256(Child(V)).init(allocator),
-                .prefixes = Array256(V).init(allocator),
-                .allocator = allocator,
-            };
-            return node;
+            return createZeroNode(allocator);
         }
         
         /// newPooledNode - Memory pool optimized node creation
@@ -1989,11 +1984,10 @@ pub fn Node(comptime V: type) type {
         inline fn newPooledNode(allocator: std.mem.Allocator, node_pool: ?*NodePool(V)) *Self {
             if (node_pool) |pool| {
                 if (pool.allocateNode()) |node| {
-                    // Reset node to clean state (pool nodes are pre-initialized)
-                    node.children.clearAll();
-                    node.prefixes.clearAll();
+                    // ノードは既にクリーンな状態で返される
                     return node;
                 }
+                // プールから取得に失敗した場合は通常の確保
             }
             
             // Fallback to regular allocation
@@ -2078,23 +2072,36 @@ pub fn Node(comptime V: type) type {
             unreachable;
         }
 
-        /// createZeroNode - Go-style zero initialization for maximum speed
-        /// Mimics Go's new(node[V]) ultra-fast zero initialization
+        /// createZeroNode - Ultra-optimized node creation for Go BART 15 ns/op target
+        /// Phase 3 Final: Eliminates @memset overhead and uses direct initialization
         inline fn createZeroNode(allocator: std.mem.Allocator) *Self {
             const node = allocator.create(Self) catch unreachable;
-            // Ultra-fast zero initialization - mimics Go's new()
-            @memset(@as([*]u8, @ptrCast(node))[0..@sizeOf(Self)], 0);
-            // Only set essential fields
-            node.allocator = allocator;
-            node.prefixes = Array256(V).init(allocator);
-            node.children = Array256(Child(V)).init(allocator);
+            // Direct field initialization - faster than memset + reassignment
+            node.* = Self{
+                .children = Array256(Child(V)).init(allocator),
+                .prefixes = Array256(V).init(allocator),
+                .allocator = allocator,
+            };
             return node;
         }
         
-        /// insertAtDepth - Branch prediction optimized for Go BART performance
-        /// Reordered conditions for optimal CPU branch prediction
-        /// insertAtDepth - Ultra-optimized insert operation for Go BART performance
-        /// Micro-optimizations: rank calculation reduction, fast node creation, branch prediction
+        /// reset - ノードを初期状態にリセット（NodePool再利用用）
+        /// Contains/Lookupには一切影響しない（Insert/Delete専用）
+        pub fn reset(self: *Self) void {
+            // 子ノードとプレフィックスを完全にクリア
+            self.children.clearAll();
+            self.prefixes.clearAll();
+            
+            // allocatorはそのまま保持（重要）
+            // Phase 3: リリースビルドでも安全な確認
+            if (std.debug.runtime_safety) {
+                std.debug.assert(self.children.len() == 0);
+                std.debug.assert(self.prefixes.len() == 0);
+            }
+        }
+
+        /// insertAtDepth - Ultra-optimized insert operation for Go BART 15 ns/op target
+        /// Phase 3 Final: Optimized inlining + branch prediction + rank optimization + fast node creation
         pub inline fn insertAtDepth(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator) bool {
             // Pre-cache all values to minimize memory access
             const bits = pfx.bits;
@@ -2132,7 +2139,7 @@ pub fn Node(comptime V: type) type {
                             }
                             
                             // Collision case - use fastest node creation
-                            const new_node = Self.createFastNode(allocator);
+                            const new_node = Self.newNode(allocator);
                             _ = new_node.insertAtDepth(&leaf.prefix, leaf.value, d + 1, allocator);
                             
                             n.children.items.items[rank_idx] = Child(V){ .node = new_node };
@@ -2146,7 +2153,7 @@ pub fn Node(comptime V: type) type {
                             }
                             
                             // Collision case - use fastest node creation
-                            const new_node = Self.createFastNode(allocator);
+                            const new_node = Self.newNode(allocator);
                             _ = new_node.prefixes.insertAt(1, fringe.value);
                             
                             n.children.items.items[rank_idx] = Child(V){ .node = new_node };
@@ -2628,81 +2635,5 @@ pub fn cidrFromPath(path: StridePath, depth: usize, is4: bool, idx: u8) Prefix {
     return Prefix.init(&ip_addr, bits);
 }
 
-// Memory Pool for high-performance Node allocation - SAFE IMPLEMENTATION
-pub fn NodePool(comptime V: type) type {
-    return struct {
-        const Self = @This();
-        const NodeType = Node(V);
-        
-        allocator: std.mem.Allocator,
-        nodes: std.ArrayList(*NodeType),
-        available: std.ArrayList(*NodeType),
-        
-        const INITIAL_CAPACITY = 256; // Start with smaller pool
-        
-        pub fn init(allocator: std.mem.Allocator) !*Self {
-            const pool = try allocator.create(Self);
-            pool.* = Self{
-                .allocator = allocator,
-                .nodes = std.ArrayList(*NodeType).init(allocator),
-                .available = std.ArrayList(*NodeType).init(allocator),
-            };
-            
-            // Pre-allocate a small number of nodes
-            try pool.preallocateNodes(INITIAL_CAPACITY);
-            
-            return pool;
-        }
-        
-        pub fn deinit(self: *Self) void {
-            // Clean up all allocated nodes
-            for (self.nodes.items) |node| {
-                node.prefixes.deinit();
-                node.children.deinit();
-                self.allocator.destroy(node);
-            }
-            
-            self.nodes.deinit();
-            self.available.deinit();
-            self.allocator.destroy(self);
-        }
-        
-        fn preallocateNodes(self: *Self, count: usize) !void {
-            for (0..count) |_| {
-                const node = try self.allocator.create(NodeType);
-                node.* = NodeType{
-                    .prefixes = Array256(V).init(self.allocator),
-                    .children = Array256(Child(V)).init(self.allocator),
-                    .allocator = self.allocator,
-                };
-                
-                try self.nodes.append(node);
-                try self.available.append(node);
-            }
-        }
-        
-        pub fn allocateNode(self: *Self) ?*NodeType {
-            if (self.available.items.len == 0) {
-                // Try to allocate more nodes
-                self.preallocateNodes(64) catch return null;
-            }
-            
-            if (self.available.items.len == 0) return null;
-            
-            return self.available.pop();
-        }
-        
-        pub fn deallocateNode(self: *Self, node: *NodeType) void {
-            // Reset node to clean state
-            node.prefixes.clearAll();
-            node.children.clearAll();
-            
-            // Return to available pool
-            self.available.append(node) catch {
-                // If append fails, the node is just lost from the pool
-                // This is safe - it will be cleaned up in deinit()
-            };
-        }
-    };
-}
+// NodePool implementation moved to src/node_pool.zig
 

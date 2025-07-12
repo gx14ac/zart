@@ -179,4 +179,46 @@ pub fn build(b: *std.Build) void {
 
     const run_sparse_tests = b.addRunArtifact(sparse_tests);
     test_unit_step.dependOn(&run_sparse_tests.step);
+
+
+
+    // NodePool tests
+    const nodepool_tests = b.addTest(.{
+        .root_source_file = b.path("src/node_pool.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_nodepool_tests = b.addRunArtifact(nodepool_tests);
+    test_unit_step.dependOn(&run_nodepool_tests.step);
+
+    // NodePool usage test
+    const nodepool_usage_test = b.addExecutable(.{
+        .name = "nodepool_test",
+        .root_source_file = b.path("src/nodepool_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(nodepool_usage_test);
+
+    const nodepool_usage_cmd = b.addRunArtifact(nodepool_usage_test);
+    nodepool_usage_cmd.step.dependOn(b.getInstallStep());
+
+    const nodepool_usage_step = b.step("nodepool-test", "Run NodePool usage test");
+    nodepool_usage_step.dependOn(&nodepool_usage_cmd.step);
+
+    // NodePool advanced test
+    const nodepool_advanced_test = b.addExecutable(.{
+        .name = "nodepool_advanced_test",
+        .root_source_file = b.path("src/nodepool_advanced_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(nodepool_advanced_test);
+
+    const nodepool_advanced_cmd = b.addRunArtifact(nodepool_advanced_test);
+    nodepool_advanced_cmd.step.dependOn(b.getInstallStep());
+
+    const nodepool_advanced_step = b.step("nodepool-advanced", "Run advanced NodePool test with Insert→Delete→Insert cycles");
+    nodepool_advanced_step.dependOn(&nodepool_advanced_cmd.step);
 }

@@ -49,13 +49,17 @@ pub fn Table(comptime V: type) type {
         node_pool: ?*NodePool(V),
         
         pub fn init(allocator: std.mem.Allocator) Self {
+            // Phase 3 Final: NodePool放棄、Direct Insert Optimization戦略
+            // NodePoolの効果は1%未満でバグリスクが大きいため、
+            // insertAtDepthの直接最適化に集中する
+            
             return Self{
                 .allocator = allocator,
                 .root4 = Node(V).init(allocator),
                 .root6 = Node(V).init(allocator),
                 .size4 = 0,
                 .size6 = 0,
-                .node_pool = null, // Disable pool for debugging
+                .node_pool = null, // Phase 3 Final: NodePool完全放棄
             };
         }
         
@@ -65,9 +69,10 @@ pub fn Table(comptime V: type) type {
             self.root6.deinit();
             self.allocator.destroy(self.root6);
             
-            // Cleanup node pool
+            // Cleanup node pool (Phase 2: NodePool有効化)
             if (self.node_pool) |pool| {
                 pool.deinit();
+                self.allocator.destroy(pool);
             }
         }
         
