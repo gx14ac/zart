@@ -2127,7 +2127,7 @@ pub fn Node(comptime V: type) type {
                             return true;
                         }
                         
-                        const new_node = Self.init(allocator);
+                        const new_node = Self.newNode(allocator);
                         _ = new_node.insertAtDepth(&leaf.prefix, leaf.value, d + 1, allocator);
                         _ = n.children.replaceAt(octet, Child(V){ .node = new_node });
                         n = new_node;
@@ -2138,7 +2138,7 @@ pub fn Node(comptime V: type) type {
                             return true;
                         }
                         
-                        const new_node = Self.init(allocator);
+                        const new_node = Self.newNode(allocator);
                         _ = new_node.prefixes.insertAt(1, fringe.value);
                         _ = n.children.replaceAt(octet, Child(V){ .node = new_node });
                         n = new_node;

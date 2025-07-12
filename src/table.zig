@@ -49,13 +49,19 @@ pub fn Table(comptime V: type) type {
         node_pool: ?*NodePool(V),
         
         pub fn init(allocator: std.mem.Allocator) Self {
+            // Stage 2: メモリプールを初期化してInsert性能を向上
+            const node_pool = allocator.create(NodePool(V)) catch null;
+            if (node_pool) |pool| {
+                pool.* = NodePool(V).init(allocator);
+            }
+            
             return Self{
                 .allocator = allocator,
                 .root4 = Node(V).init(allocator),
                 .root6 = Node(V).init(allocator),
                 .size4 = 0,
                 .size6 = 0,
-                .node_pool = null,
+                .node_pool = node_pool,
             };
         }
         
@@ -99,8 +105,8 @@ pub fn Table(comptime V: type) type {
             const is4 = canonical_pfx.addr.is4();
             var n: *Node(V) = self.rootNodeByVersion(is4);
             
-            // Phase 3: fast_allocator使用で高速化
-            if (n.insertAtDepth(&canonical_pfx, val, 0, self.allocator)) {
+            // Stage 1: 高性能版insertAtDepthPooledを使用
+            if (n.insertAtDepthPooled(&canonical_pfx, val, 0, self.allocator, self.node_pool)) {
                 self.sizeUpdate(is4, 1);
             }
         }
