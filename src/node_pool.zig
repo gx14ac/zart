@@ -105,29 +105,29 @@ test "NodePool basic operations" {
     defer pool.deinit();
     
     // Test 1: 新規作成
-    const node1 = try pool.allocateNode();
+    const node1 = pool.allocateNode();
     try std.testing.expect(pool.total_allocated == 1);
     try std.testing.expect(pool.pool_misses == 1);
     try std.testing.expect(pool.pool_hits == 0);
     
     // Test 2: プールに返却
-    try pool.releaseNode(node1);
+    try pool.releaseNode(node1.?);
     try std.testing.expect(pool.free_nodes.items.len == 1);
     
     // Test 3: プールから再取得
-    const node2 = try pool.allocateNode();
-    try std.testing.expect(node1 == node2); // 同じNodeが返却される
+    const node2 = pool.allocateNode();
+    try std.testing.expect(node1.? == node2.?); // 同じNodeが返却される
     try std.testing.expect(pool.pool_hits == 1);
     try std.testing.expect(pool.free_nodes.items.len == 0);
     
     // Test 4: 複数Node管理
-    const node3 = try pool.allocateNode();
-    try std.testing.expect(node2 != node3); // 異なるNode
+    const node3 = pool.allocateNode();
+    try std.testing.expect(node2.? != node3.?); // 異なるNode
     try std.testing.expect(pool.total_allocated == 2);
     
     // 正常に返却
-    try pool.releaseNode(node2);
-    try pool.releaseNode(node3);
+    try pool.releaseNode(node2.?);
+    try pool.releaseNode(node3.?);
     
     std.debug.print("✅ NodePool basic operations test passed!\n", .{});
 }
@@ -139,20 +139,20 @@ test "NodePool reset functionality" {
     defer pool.deinit();
     
     // ノードを取得してデータを設定
-    const node_ptr = try pool.allocateNode();
+    const node_ptr = pool.allocateNode();
     
     // TODO: ノードにテストデータを設定（Node.reset()実装後）
     // 現在はNode.reset()が未実装なので、基本的な確認のみ
     
     // プールに返却
-    try pool.releaseNode(node_ptr);
+    try pool.releaseNode(node_ptr.?);
     
     // 再取得して初期状態であることを確認
-    const node_ptr2 = try pool.allocateNode();
-    try std.testing.expect(node_ptr == node_ptr2);
+    const node_ptr2 = pool.allocateNode();
+    try std.testing.expect(node_ptr.? == node_ptr2.?);
     
     // 返却
-    try pool.releaseNode(node_ptr2);
+    try pool.releaseNode(node_ptr2.?);
     
     std.debug.print("✅ NodePool reset functionality test passed!\n", .{});
 }
@@ -169,7 +169,7 @@ test "NodePool performance characteristics" {
     // 大量確保
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        nodes[i] = try pool.allocateNode();
+        nodes[i] = pool.allocateNode().?;
     }
     
     // 大量返却
@@ -184,7 +184,7 @@ test "NodePool performance characteristics" {
     // 再確保（すべてプールヒット）
     i = 0;
     while (i < iterations) : (i += 1) {
-        nodes[i] = try pool.allocateNode();
+        nodes[i] = pool.allocateNode().?;
     }
     
     // ヒット率確認

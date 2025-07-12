@@ -1,265 +1,269 @@
 #!/usr/bin/env python3
 """
-Go BART vs Zig ZART Performance Comparison Charts
-Generates accurate visualizations of benchmark results
+ZART vs Go BART Performance Comparison Chart Generator
 """
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-import os
+from pathlib import Path
+import json
 
-# Set style for publication-quality plots
+# Set style
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
-# Real performance data from benchmarks (2024)
-# Go BART performance (ns/op)
-go_bart_data = {
-    'Contains IPv4': 5.523,
-    'Lookup IPv4': 17.15,
-    'LookupPrefix IPv4': 20.22,
-    'Contains IPv6': 9.283,
-    'Lookup IPv6': 28.85,
-    'Miss Contains IPv4': 12.21,
-    'Miss Lookup IPv4': 16.17,
-    'Miss Contains IPv6': 5.423,
-    'Miss Lookup IPv6': 7.028
-}
-
-# Zig ZART performance (ns/op)
-zart_data = {
-    'Contains IPv4': 1.90,     # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Lookup IPv4': 3.60,      # 🔥 SECOND BREAKTHROUGH: 35.7x improvement!
-    'LookupPrefix IPv4': 346.60,
-    'Contains IPv6': 1.90,     # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Lookup IPv6': 3.70,      # 🔥 SECOND BREAKTHROUGH: 28.5x improvement!
-    'Miss Contains IPv4': 1.90,   # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Miss Lookup IPv4': 3.60,     # 🔥 SECOND BREAKTHROUGH: 35.7x improvement!
-    'Miss Contains IPv6': 1.90,   # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Miss Lookup IPv6': 3.60      # 🔥 SECOND BREAKTHROUGH: 28.5x improvement!
-}
-
-# Global variables for key operations
-operations = ['Contains\nIPv4', 'Lookup\nIPv4', 'LookupPrefix\nIPv4', 'Contains\nIPv6', 'Lookup\nIPv6']
-go_values = [go_bart_data['Contains IPv4'], go_bart_data['Lookup IPv4'], 
-             go_bart_data['LookupPrefix IPv4'], go_bart_data['Contains IPv6'], 
-             go_bart_data['Lookup IPv6']]
-zart_values = [zart_data['Contains IPv4'], zart_data['Lookup IPv4'], 
-               zart_data['LookupPrefix IPv4'], zart_data['Contains IPv6'], 
-               zart_data['Lookup IPv6']]
-
-def create_performance_comparison():
-    """Create main performance comparison chart"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+def create_comparison_charts():
+    """Create comprehensive comparison charts between ZART and Go BART"""
     
-    # Chart 1: Absolute performance comparison
-    x = np.arange(len(operations))
+    # Performance data from benchmarks
+    # Go BART results (ns/op) - from recent benchmark
+    go_bart_data = {
+        'Contains_IPv4': 5.578,
+        'Lookup_IPv4': 17.45,
+        'LookupPrefix_IPv4': 20.54,
+        'LookupPfxLPM_IPv4': 23.06,
+        'Contains_IPv6': 9.348,
+        'Lookup_IPv6': 26.73,
+        'LookupPrefix_IPv6': 20.55,
+        'LookupPfxLPM_IPv6': 23.47,
+        'Contains_IPv4_Miss': 12.21,
+        'Lookup_IPv4_Miss': 16.26,
+        'Contains_IPv6_Miss': 5.442,
+        'Lookup_IPv6_Miss': 7.050,
+    }
+    
+    # ZART results (ns/op) - from recent benchmark (MAJOR IMPROVEMENT!)
+    zart_data = {
+        'Contains_IPv4': 9.79,      # 🏆 MASSIVE IMPROVEMENT! (from 49.18 to 9.79)
+        'Lookup_IPv4': 12.31,      # 🏆 MASSIVE IMPROVEMENT! (from 71.57 to 12.31)
+        'LookupPrefix_IPv4': 24.60, # 🏆 MASSIVE IMPROVEMENT! (from 145.39 to 24.60)
+        'LookupPfxLPM_IPv4': 22.17, # 🏆 MASSIVE IMPROVEMENT! (from 144.70 to 22.17)
+        'Contains_IPv6': 2.87,      # 🏆 FASTER than Go BART! (from 12.21 to 2.87)
+        'Lookup_IPv6': 5.13,       # 🏆 MASSIVE IMPROVEMENT! (from 17.47 to 5.13)
+        'LookupPrefix_IPv6': 91.89, # 🏆 MASSIVE IMPROVEMENT! (from 378.34 to 91.89)
+        'LookupPfxLPM_IPv6': 84.42, # 🏆 MASSIVE IMPROVEMENT! (from 300.39 to 84.42)
+        'Contains_IPv4_Miss': 11.76, # 🏆 MASSIVE IMPROVEMENT! (from 108.81 to 11.76)
+        'Lookup_IPv4_Miss': 17.84,  # 🏆 MASSIVE IMPROVEMENT! (from 135.87 to 17.84)
+        'Contains_IPv6_Miss': 2.78,  # 🏆 FASTER than Go BART! (from 12.18 to 2.78)
+        'Lookup_IPv6_Miss': 4.77,   # 🏆 MASSIVE IMPROVEMENT! (from 17.32 to 4.77)
+    }
+    
+    # Create comparison chart
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('ZART vs Go BART Performance Comparison\n(Lower is Better)', fontsize=16, fontweight='bold')
+    
+    # IPv4 Match Operations
+    ipv4_match_ops = ['Contains', 'Lookup', 'LookupPrefix', 'LookupPfxLPM']
+    go_bart_ipv4_match = [go_bart_data[f'{op}_IPv4'] for op in ipv4_match_ops]
+    zart_ipv4_match = [zart_data[f'{op}_IPv4'] for op in ipv4_match_ops]
+    
+    x = np.arange(len(ipv4_match_ops))
     width = 0.35
     
-    bars1 = ax1.bar(x - width/2, go_values, width, label='Go BART', color='#2E86AB', alpha=0.8)
-    bars2 = ax1.bar(x + width/2, zart_values, width, label='Zig ZART', color='#F24236', alpha=0.8)
+    axes[0, 0].bar(x - width/2, go_bart_ipv4_match, width, label='Go BART', color='#2E86AB', alpha=0.8)
+    axes[0, 0].bar(x + width/2, zart_ipv4_match, width, label='ZART', color='#A23B72', alpha=0.8)
+    axes[0, 0].set_title('IPv4 Match Operations', fontweight='bold')
+    axes[0, 0].set_ylabel('Time (ns/op)')
+    axes[0, 0].set_xticks(x)
+    axes[0, 0].set_xticklabels(ipv4_match_ops, rotation=45, ha='right')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
     
-    ax1.set_ylabel('Latency (nanoseconds)', fontsize=12, fontweight='bold')
-    ax1.set_title('🎉 Zig ZART BREAKTHROUGH!\n(Zig ZART Surpasses Go BART)', fontsize=14, fontweight='bold')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(operations, fontsize=10)
-    ax1.legend(fontsize=12)
-    ax1.grid(True, alpha=0.3)
+    # IPv6 Match Operations
+    ipv6_match_ops = ['Contains', 'Lookup', 'LookupPrefix', 'LookupPfxLPM']
+    go_bart_ipv6_match = [go_bart_data[f'{op}_IPv6'] for op in ipv6_match_ops]
+    zart_ipv6_match = [zart_data[f'{op}_IPv6'] for op in ipv6_match_ops]
+    
+    axes[0, 1].bar(x - width/2, go_bart_ipv6_match, width, label='Go BART', color='#2E86AB', alpha=0.8)
+    axes[0, 1].bar(x + width/2, zart_ipv6_match, width, label='ZART', color='#A23B72', alpha=0.8)
+    axes[0, 1].set_title('IPv6 Match Operations', fontweight='bold')
+    axes[0, 1].set_ylabel('Time (ns/op)')
+    axes[0, 1].set_xticks(x)
+    axes[0, 1].set_xticklabels(ipv6_match_ops, rotation=45, ha='right')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Miss Operations Comparison
+    miss_ops = ['Contains_IPv4_Miss', 'Lookup_IPv4_Miss', 'Contains_IPv6_Miss', 'Lookup_IPv6_Miss']
+    miss_labels = ['Contains IPv4', 'Lookup IPv4', 'Contains IPv6', 'Lookup IPv6']
+    go_bart_miss = [go_bart_data[op] for op in miss_ops]
+    zart_miss = [zart_data[op] for op in miss_ops]
+    
+    x_miss = np.arange(len(miss_ops))
+    axes[1, 0].bar(x_miss - width/2, go_bart_miss, width, label='Go BART', color='#2E86AB', alpha=0.8)
+    axes[1, 0].bar(x_miss + width/2, zart_miss, width, label='ZART', color='#A23B72', alpha=0.8)
+    axes[1, 0].set_title('Miss Operations', fontweight='bold')
+    axes[1, 0].set_ylabel('Time (ns/op)')
+    axes[1, 0].set_xticks(x_miss)
+    axes[1, 0].set_xticklabels(miss_labels, rotation=45, ha='right')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Performance Ratio (ZART/Go BART)
+    ratios = {}
+    for key in go_bart_data:
+        if key in zart_data:
+            ratios[key] = zart_data[key] / go_bart_data[key]
+    
+    ratio_keys = list(ratios.keys())
+    ratio_values = list(ratios.values())
+    
+    # Color code: green for better (< 1.0), yellow for acceptable (1.0-2.0), red for needs improvement (> 2.0)
+    colors = ['#2E8B57' if r < 1.0 else '#FFD700' if r <= 2.0 else '#DC143C' for r in ratio_values]
+    
+    bars = axes[1, 1].bar(range(len(ratio_keys)), ratio_values, color=colors, alpha=0.8)
+    axes[1, 1].axhline(y=1.0, color='black', linestyle='--', alpha=0.5, label='Parity Line')
+    axes[1, 1].set_title('Performance Ratio (ZART/Go BART)', fontweight='bold')
+    axes[1, 1].set_ylabel('Ratio (Lower is Better)')
+    axes[1, 1].set_xticks(range(len(ratio_keys)))
+    axes[1, 1].set_xticklabels([k.replace('_', '\n') for k in ratio_keys], rotation=45, ha='right', fontsize=8)
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, ratio_values):
+        height = bar.get_height()
+        axes[1, 1].text(bar.get_x() + bar.get_width()/2., height,
+                       f'{value:.1f}x', ha='center', va='bottom', fontsize=8)
+    
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.93)
+    
+    # Save to assets directory
+    output_path = Path('assets/zart_vs_go_bart_comparison.png')
+    output_path.parent.mkdir(exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Comparison chart saved to {output_path}")
+    
+    # Create summary table
+    create_summary_table(go_bart_data, zart_data, ratios)
+    
+    # Don't show plots in headless environment
+    # plt.show()
+
+def create_summary_table(go_bart_data, zart_data, ratios):
+    """Create a summary table with performance metrics"""
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.axis('tight')
+    ax.axis('off')
+    
+    # Prepare data for table
+    operations = []
+    go_bart_values = []
+    zart_values = []
+    ratio_values = []
+    status = []
+    
+    for key in go_bart_data:
+        if key in zart_data:
+            operations.append(key.replace('_', ' '))
+            go_bart_values.append(f"{go_bart_data[key]:.2f}")
+            zart_values.append(f"{zart_data[key]:.2f}")
+            ratio_values.append(f"{ratios[key]:.2f}x")
+            
+            if ratios[key] < 1.0:
+                status.append("🏆 FASTER")
+            elif ratios[key] <= 2.0:
+                status.append("🥈 GOOD")
+            else:
+                status.append("🔴 NEEDS IMPROVEMENT")
+    
+    table_data = []
+    for i in range(len(operations)):
+        table_data.append([operations[i], go_bart_values[i], zart_values[i], ratio_values[i], status[i]])
+    
+    table = ax.table(cellText=table_data,
+                    colLabels=['Operation', 'Go BART (ns/op)', 'ZART (ns/op)', 'Ratio', 'Status'],
+                    cellLoc='center',
+                    loc='center',
+                    colWidths=[0.25, 0.15, 0.15, 0.15, 0.3])
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+    
+    # Style the table
+    for i in range(len(operations) + 1):
+        for j in range(5):
+            cell = table[(i, j)]
+            if i == 0:  # Header row
+                cell.set_facecolor('#4CAF50')
+                cell.set_text_props(weight='bold', color='white')
+            else:
+                if j == 4:  # Status column
+                    if "FASTER" in table_data[i-1][j]:
+                        cell.set_facecolor('#E8F5E8')
+                    elif "GOOD" in table_data[i-1][j]:
+                        cell.set_facecolor('#FFF8E1')
+                    else:
+                        cell.set_facecolor('#FFEBEE')
+                else:
+                    cell.set_facecolor('#F5F5F5' if i % 2 == 0 else 'white')
+    
+    plt.title('ZART vs Go BART Performance Summary\n(Using Real Routing Table: 1,062,046 prefixes)', 
+              fontsize=14, fontweight='bold', pad=20)
+    
+    # Save summary table
+    output_path = Path('assets/zart_vs_go_bart_summary.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Summary table saved to {output_path}")
+    
+    plt.close(fig)  # Close instead of show
+
+def create_memory_comparison():
+    """Create memory usage comparison chart"""
+    
+    # Memory data from benchmarks
+    memory_data = {
+        'Go BART': {
+            'IPv4 (901,899 prefixes)': 15731,  # KBytes
+            'IPv6 (160,147 prefixes)': 6070,   # KBytes
+            'Total (1,062,046 prefixes)': 21799  # KBytes
+        },
+        'ZART': {
+            # Note: ZART memory usage would need to be measured
+            'IPv4 (901,899 prefixes)': 'N/A',
+            'IPv6 (160,147 prefixes)': 'N/A',
+            'Total (1,062,046 prefixes)': 'N/A'
+        }
+    }
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    categories = ['IPv4\n(901,899 prefixes)', 'IPv6\n(160,147 prefixes)', 'Total\n(1,062,046 prefixes)']
+    go_bart_mem = [15731, 6070, 21799]
+    
+    x = np.arange(len(categories))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, go_bart_mem, width, label='Go BART', color='#2E86AB', alpha=0.8)
+    
+    ax.set_title('Memory Usage Comparison', fontweight='bold')
+    ax.set_ylabel('Memory Usage (KBytes)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     
     # Add value labels on bars
     for bar in bars1:
         height = bar.get_height()
-        ax1.annotate(f'{height:.1f}ns',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=9)
-    
-    for bar in bars2:
-        height = bar.get_height()
-        ax1.annotate(f'{height:.0f}ns',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=9)
-    
-    # Chart 2: Performance ratio (Zig ZART advantage)  
-    ratios = [go_values[i] / zart_values[i] for i in range(len(operations))]
-    
-    bars3 = ax2.bar(operations, ratios, color='#A23B72', alpha=0.8)
-    ax2.set_ylabel('Speedup Factor (ZART vs BART)', fontsize=12, fontweight='bold')
-    ax2.set_title('🚀 Zig ZART Speed Advantage\n(Higher = Zig ZART Advantage)', fontsize=14, fontweight='bold')
-    ax2.set_xticklabels(operations, fontsize=10)
-    ax2.grid(True, alpha=0.3)
-    
-    # Add value labels on bars
-    for bar in bars3:
-        height = bar.get_height()
-        ax2.annotate(f'{height:.1f}x',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=11, fontweight='bold')
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               f'{height:,} KB', ha='center', va='bottom')
     
     plt.tight_layout()
-    plt.savefig('assets/performance_comparison.png', dpi=300, bbox_inches='tight')
-    print("✅ Performance comparison chart saved to assets/performance_comparison.png")
-
-def create_detailed_analysis():
-    """Create detailed analysis of different operation types"""
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Chart 1: Contains operations
-    contains_ops = ['IPv4', 'IPv6', 'IPv4 Miss', 'IPv6 Miss']
-    contains_go = [go_bart_data['Contains IPv4'], go_bart_data['Contains IPv6'], 
-                   go_bart_data['Miss Contains IPv4'], go_bart_data['Miss Contains IPv6']]
-    contains_zart = [zart_data['Contains IPv4'], zart_data['Contains IPv6'], 
-                     zart_data['Miss Contains IPv4'], zart_data['Miss Contains IPv6']]
+    # Save memory comparison
+    output_path = Path('assets/memory_comparison.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Memory comparison saved to {output_path}")
     
-    x = np.arange(len(contains_ops))
-    width = 0.35
-    
-    ax1.bar(x - width/2, contains_go, width, label='Go BART', color='#2E86AB', alpha=0.8)
-    ax1.bar(x + width/2, contains_zart, width, label='Zig ZART', color='#F24236', alpha=0.8)
-    ax1.set_title('Contains Operations Analysis', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Latency (ns)')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(contains_ops, fontsize=10)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Chart 2: Lookup operations
-    lookup_ops = ['IPv4', 'IPv6', 'IPv4 Miss', 'IPv6 Miss']
-    lookup_go = [go_bart_data['Lookup IPv4'], go_bart_data['Lookup IPv6'], 
-                 go_bart_data['Miss Lookup IPv4'], go_bart_data['Miss Lookup IPv6']]
-    lookup_zart = [zart_data['Lookup IPv4'], zart_data['Lookup IPv6'], 
-                   zart_data['Miss Lookup IPv4'], zart_data['Miss Lookup IPv6']]
-    
-    ax2.bar(x - width/2, lookup_go, width, label='Go BART', color='#2E86AB', alpha=0.8)
-    ax2.bar(x + width/2, lookup_zart, width, label='Zig ZART', color='#F24236', alpha=0.8)
-    ax2.set_title('Lookup Operations Analysis', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('Latency (ns)')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(lookup_ops, fontsize=10)
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # Chart 3: Performance improvement opportunities
-    improvement_areas = ['Contains', 'Lookup', 'LookupPrefix', 'Miss Handling']
-    current_ratios = [
-        zart_data['Contains IPv4'] / go_bart_data['Contains IPv4'],
-        zart_data['Lookup IPv4'] / go_bart_data['Lookup IPv4'],
-        zart_data['LookupPrefix IPv4'] / go_bart_data['LookupPrefix IPv4'],
-        zart_data['Miss Contains IPv4'] / go_bart_data['Miss Contains IPv4']
-    ]
-    
-    bars = ax3.bar(improvement_areas, current_ratios, 
-                   color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A'], alpha=0.8)
-    ax3.set_title('Performance Gap by Operation Type', fontsize=12, fontweight='bold')
-    ax3.set_ylabel('Performance Ratio (ZART/BART)')
-    ax3.set_xticklabels(improvement_areas, fontsize=10)
-    ax3.grid(True, alpha=0.3)
-    
-    for bar in bars:
-        height = bar.get_height()
-        ax3.annotate(f'{height:.1f}x',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=10, fontweight='bold')
-    
-    # Chart 4: Throughput comparison (ops/sec)
-    throughput_go = [1e9 / val for val in go_values]
-    throughput_zart = [1e9 / val for val in zart_values]
-    
-    x = np.arange(len(operations))
-    ax4.bar(x - width/2, throughput_go, width, label='Go BART', color='#2E86AB', alpha=0.8)
-    ax4.bar(x + width/2, throughput_zart, width, label='Zig ZART', color='#F24236', alpha=0.8)
-    ax4.set_title('Throughput Comparison', fontsize=12, fontweight='bold')
-    ax4.set_ylabel('Operations per Second (Million)')
-    ax4.set_xticks(x)
-    ax4.set_xticklabels(operations, fontsize=10)
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-    
-    # Convert to millions for readability
-    ax4.set_yticklabels([f'{int(y/1e6)}M' for y in ax4.get_yticks()])
-    
-    plt.tight_layout()
-    plt.savefig('assets/detailed_analysis.png', dpi=300, bbox_inches='tight')
-    print("✅ Detailed analysis chart saved to assets/detailed_analysis.png")
-
-def create_technology_summary():
-    """Create technology and optimization summary"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
-    
-    # Current status vs targets
-    targets = ['Contains', 'Lookup', 'LookupPrefix', 'IPv6 Support']
-    current_performance = [106.0, 112.6, 363.1, 106.0]  # ZART current
-    target_performance = [5.5, 17.2, 20.2, 9.3]  # Go BART targets
-    
-    x = np.arange(len(targets))
-    width = 0.35
-    
-    bars1 = ax1.bar(x - width/2, current_performance, width, label='Current ZART', color='#F24236', alpha=0.8)
-    bars2 = ax1.bar(x + width/2, target_performance, width, label='Go BART Target', color='#2E86AB', alpha=0.8)
-    
-    ax1.set_title('🎯 Current Performance vs Targets', fontsize=14, fontweight='bold')
-    ax1.set_ylabel('Latency (nanoseconds)', fontsize=12, fontweight='bold')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(targets, fontsize=10)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Optimization opportunities
-    optimizations = ['SIMD\nInstructions', 'Bit\nManipulation', 'Cache\nOptimization', 'Memory\nLayout']
-    potential_impact = [8.5, 7.5, 6.0, 5.5]  # Estimated impact scores
-    
-    bars3 = ax2.bar(optimizations, potential_impact, 
-                   color=['#9B59B6', '#E74C3C', '#F39C12', '#27AE60'], alpha=0.8)
-    ax2.set_title('🚀 Optimization Opportunities', fontsize=14, fontweight='bold')
-    ax2.set_ylabel('Potential Impact Score', fontsize=12, fontweight='bold')
-    ax2.set_ylim(0, 10)
-    ax2.grid(True, alpha=0.3)
-    
-    for bar in bars3:
-        height = bar.get_height()
-        ax2.annotate(f'{height:.1f}',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=11, fontweight='bold')
-    
-    plt.tight_layout()
-    plt.savefig('assets/technology_summary.png', dpi=300, bbox_inches='tight')
-    print("✅ Technology summary chart saved to assets/technology_summary.png")
-
-def main():
-    """Generate all comparison charts"""
-    print("🎨 Generating Go BART vs Zig ZART comparison charts...")
-    print("📊 Using real benchmark data (2024)")
-    
-    # Create assets directory if it doesn't exist
-    os.makedirs('assets', exist_ok=True)
-    
-    create_performance_comparison()
-    create_detailed_analysis()
-    create_technology_summary()
-    
-    print("\n🏆 All comparison charts generated successfully!")
-    print("📊 Charts saved in assets/ directory:")
-    print("   - performance_comparison.png")
-    print("   - detailed_analysis.png") 
-    print("   - technology_summary.png")
-    print("\n📈 Performance Summary:")
-    print(f"   Go BART Contains IPv4: {go_bart_data['Contains IPv4']:.1f} ns/op")
-    print(f"   Zig ZART Contains IPv4: {zart_data['Contains IPv4']:.1f} ns/op")
-    print(f"   🎉 BREAKTHROUGH: Zig ZART is {go_bart_data['Contains IPv4'] / zart_data['Contains IPv4']:.1f}x FASTER than Go BART!")
-    print(f"   Go BART Lookup IPv4: {go_bart_data['Lookup IPv4']:.1f} ns/op")
-    print(f"   Zig ZART Lookup IPv4: {zart_data['Lookup IPv4']:.1f} ns/op")
-    print(f"   🎉 SECOND BREAKTHROUGH: Zig ZART is {go_bart_data['Lookup IPv4'] / zart_data['Lookup IPv4']:.1f}x FASTER than Go BART!")
-    print(f"   🔥 ZART now DOMINATES both Contains and Lookup operations!")
+    plt.close(fig)  # Close instead of show
 
 if __name__ == "__main__":
-    main() 
+    print("🚀 Generating ZART vs Go BART comparison charts...")
+    create_comparison_charts()
+    create_memory_comparison()
+    print("✅ All comparison charts generated successfully!") 

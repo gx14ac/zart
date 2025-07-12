@@ -91,58 +91,17 @@ pub const BitSet256 = struct {
         return @as(u8, @intCast(cnt));
     }
 
-    /// Return count of set bits up to specified position (rank) - ULTRA-HOT PATH: Force inline
-    /// Phase 6: Ultra-optimized rank calculation with early termination and direct bit manipulation
+    /// Return count of set bits up to specified position (rank) - HOTTEST PATH: Force inline
+    /// Go BART compatible implementation using precomputed rankMask table
     pub inline fn rank(self: *const BitSet256, idx: u8) u16 {
-        const word_idx = idx >> 6;
-        const bit_pos = idx & 63;
+        // Use precomputed rankMask table for ultra-fast rank calculation
+        // Same as Go BART: rnk += bits.OnesCount64(b[i] & rankMask[idx][i])
+        const mask = &rankMask[idx];
         var cnt: u32 = 0;
-        
-        // Phase 6: Early termination optimization - process only necessary words
-        if (word_idx == 0) {
-            // Only need to process first word
-            if (bit_pos == 63) {
-                // Special case: all bits in word
-                cnt += @popCount(self.data[0]);
-            } else {
-                const mask = (@as(u64, 1) << @as(u6, @intCast(bit_pos + 1))) - 1;
-                cnt += @popCount(self.data[0] & mask);
-            }
-        } else if (word_idx == 1) {
-            // Process first word completely, second word partially
-            cnt += @popCount(self.data[0]);
-            if (bit_pos == 63) {
-                // Special case: all bits in word
-                cnt += @popCount(self.data[1]);
-            } else {
-                const mask = (@as(u64, 1) << @as(u6, @intCast(bit_pos + 1))) - 1;
-                cnt += @popCount(self.data[1] & mask);
-            }
-        } else if (word_idx == 2) {
-            // Process first two words completely, third word partially
-            cnt += @popCount(self.data[0]);
-            cnt += @popCount(self.data[1]);
-            if (bit_pos == 63) {
-                // Special case: all bits in word
-                cnt += @popCount(self.data[2]);
-            } else {
-                const mask = (@as(u64, 1) << @as(u6, @intCast(bit_pos + 1))) - 1;
-                cnt += @popCount(self.data[2] & mask);
-            }
-        } else {
-            // Process first three words completely, fourth word partially
-            cnt += @popCount(self.data[0]);
-            cnt += @popCount(self.data[1]);
-            cnt += @popCount(self.data[2]);
-            if (bit_pos == 63) {
-                // Special case: all bits in word
-                cnt += @popCount(self.data[3]);
-            } else {
-                const mask = (@as(u64, 1) << @as(u6, @intCast(bit_pos + 1))) - 1;
-                cnt += @popCount(self.data[3] & mask);
-            }
-        }
-        
+        cnt += @popCount(self.data[0] & mask.data[0]);
+        cnt += @popCount(self.data[1] & mask.data[1]);
+        cnt += @popCount(self.data[2] & mask.data[2]);
+        cnt += @popCount(self.data[3] & mask.data[3]);
         return @as(u16, @intCast(cnt));
     }
 

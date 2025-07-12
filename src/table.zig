@@ -49,17 +49,13 @@ pub fn Table(comptime V: type) type {
         node_pool: ?*NodePool(V),
         
         pub fn init(allocator: std.mem.Allocator) Self {
-            // Phase 3 Final: NodePool放棄、Direct Insert Optimization戦略
-            // NodePoolの効果は1%未満でバグリスクが大きいため、
-            // insertAtDepthの直接最適化に集中する
-            
             return Self{
                 .allocator = allocator,
                 .root4 = Node(V).init(allocator),
                 .root6 = Node(V).init(allocator),
                 .size4 = 0,
                 .size6 = 0,
-                .node_pool = null, // Phase 3 Final: NodePool完全放棄
+                .node_pool = null,
             };
         }
         
@@ -69,7 +65,7 @@ pub fn Table(comptime V: type) type {
             self.root6.deinit();
             self.allocator.destroy(self.root6);
             
-            // Cleanup node pool (Phase 2: NodePool有効化)
+            // Cleanup node pool
             if (self.node_pool) |pool| {
                 pool.deinit();
                 self.allocator.destroy(pool);
@@ -103,8 +99,8 @@ pub fn Table(comptime V: type) type {
             const is4 = canonical_pfx.addr.is4();
             var n: *Node(V) = self.rootNodeByVersion(is4);
             
-            // Memory pool optimized insertAtDepth
-            if (n.insertAtDepthPooled(&canonical_pfx, val, 0, self.allocator, self.node_pool)) {
+            // Phase 3: fast_allocator使用で高速化
+            if (n.insertAtDepth(&canonical_pfx, val, 0, self.allocator)) {
                 self.sizeUpdate(is4, 1);
             }
         }
@@ -259,13 +255,19 @@ pub fn Table(comptime V: type) type {
         /// Clone returns a complete copy of the routing table.
         /// This is a deep clone operation where all nodes are recursively cloned.
         pub fn clone(self: *const Self) Self {
+            // Create a new NodePool on the heap
+            const new_pool = self.allocator.create(NodePool(V)) catch null;
+            if (new_pool) |pool| {
+                pool.* = NodePool(V).init(self.allocator);
+            }
+            
             const new_table = Self{
                 .allocator = self.allocator,
                 .root4 = self.root4.cloneRec(self.allocator),
                 .root6 = self.root6.cloneRec(self.allocator),
                 .size4 = self.size4,
                 .size6 = self.size6,
-                .node_pool = NodePool(V).init(self.allocator) catch null,
+                .node_pool = new_pool,
             };
             return new_table;
         }

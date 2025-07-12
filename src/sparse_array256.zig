@@ -3,15 +3,14 @@
 const std = @import("std");
 const BitSet256 = @import("bitset256.zig").BitSet256;
 
-/// Go BART compatible Array256 - Dynamic slice for maximum performance  
-/// Uses popcount compression exactly like Go BART with dynamic memory allocation
-/// Direct port of Go BART's sparse array implementation
+/// A sparse array with a maximum of 256 items
+/// Uses a bitset to track which indices are set
+/// and a dynamic array to store the actual values
 pub fn Array256(comptime T: type) type {
     return struct {
         const Self = @This();
         
         bitset: BitSet256,
-        // Go BART style: Dynamic slice for optimal memory usage
         items: std.ArrayList(T),
         
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -42,14 +41,12 @@ pub fn Array256(comptime T: type) type {
         }
         
         /// Clear all entries and reset the array to empty state
-        /// Go BART style: clear slice efficiently
         pub fn clearAll(self: *Self) void {
             self.bitset = BitSet256.init();
             self.items.clearRetainingCapacity();
         }
         
         /// Get the value at i from sparse array.
-        /// Go BART compatible implementation
         pub fn get(self: Self, i: u8) ?T {
             if (self.bitset.isSet(i)) {
                 const rank_idx = self.bitset.rank(i);
@@ -60,14 +57,12 @@ pub fn Array256(comptime T: type) type {
         
         /// MustGet use it only after a successful test
         /// or the behavior is undefined, it will NOT PANIC.
-        /// Go BART compatible implementation
         pub inline fn mustGet(self: Self, i: u8) T {
             const rank_idx = self.bitset.rank(i);
             return self.items.items[rank_idx - 1];
         }
         
         /// MustGetPtr: Get pointer to value at i (assumes isSet)
-        /// Go BART compatible pointer access
         pub fn mustGetPtr(self: *Self, i: u8) *T {
             if (!self.bitset.isSet(i)) @panic("mustGetPtr: index not set");
             const rank_idx = self.bitset.rank(i);
@@ -91,7 +86,6 @@ pub fn Array256(comptime T: type) type {
         
         /// UpdateAt or set the value at i via callback. The new value is returned
         /// and true if the value was already present.
-        /// Go BART compatible implementation
         pub fn updateAt(self: *Self, i: u8, callback: fn (current: ?T) T) bool {
             if (self.bitset.isSet(i)) {
                 const rank_idx = self.bitset.rank(i);
@@ -103,15 +97,14 @@ pub fn Array256(comptime T: type) type {
                 const rank_idx: usize = @as(usize, self.bitset.rank(i));
                 self.bitset.set(i);
                 
-                // Go BART style: efficient insertion
-                self.insertItem(rank_idx, callback(null)) catch unreachable;
+                // Insert at the calculated rank position
+                self.items.insert(rank_idx, callback(null)) catch unreachable;
                 
                 return false;  // New value
             }
         }
         
         /// DeleteAt removes the value at i and returns it if it existed
-        /// Go BART compatible implementation
         pub fn deleteAt(self: *Self, i: u8) ?T {
             if (!self.bitset.isSet(i)) {
                 return null;
@@ -120,8 +113,8 @@ pub fn Array256(comptime T: type) type {
             const rank_idx = self.bitset.rank(i) - 1;
             const old_val = self.items.items[rank_idx];
             
-            // Go BART style: efficient deletion
-            self.deleteItem(rank_idx);
+            // Remove from items array
+            _ = self.items.orderedRemove(rank_idx);
             
             // Clear bit after item removal
             self.bitset.clear(i);
@@ -131,56 +124,45 @@ pub fn Array256(comptime T: type) type {
         
         /// Clone creates a deep copy of the sparse array
         pub fn clone(self: *const Self, allocator: std.mem.Allocator) Self {
-            var new_array = Self{
-                .bitset = self.bitset,
-                .items = std.ArrayList(T).init(allocator),
-            };
-            new_array.items.appendSlice(self.items.items) catch unreachable;
-            return new_array;
+            var result = Self.init(allocator);
+            result.bitset = self.bitset;
+            result.items.appendSlice(self.items.items) catch unreachable;
+            return result;
         }
         
         /// DeepCopy creates a deep copy using custom clone function
         pub fn deepCopy(self: *const Self, allocator: std.mem.Allocator, cloneFn: fn (*const T, std.mem.Allocator) T) Self {
-            var new_array = Self{
-                .bitset = self.bitset,
-                .items = std.ArrayList(T).init(allocator),
-            };
+            var result = Self.init(allocator);
+            result.bitset = self.bitset;
             
-            // Deep copy active items
+            // Deep copy items
             for (self.items.items) |*item| {
-                new_array.items.append(cloneFn(item, allocator)) catch unreachable;
+                result.items.append(cloneFn(item, allocator)) catch unreachable;
             }
             
-            return new_array;
+            return result;
         }
         
-        /// InsertAt - ULTRA-HOTTEST PATH: Force inline for maximum performance
+        /// InsertAt - Simple implementation for good performance
         /// If the value already exists, overwrite it with val and return false.
         /// If the value is new, insert it and return true.
-        /// Go BART compatible implementation with micro-optimizations
         pub inline fn insertAt(self: *Self, i: u8, value: T) bool {
-            // Go BART style: minimize branch mispredictions
-            const is_set = self.bitset.isSet(i);
-            const rank_idx = self.bitset.rank(i);
-            
-            // Fast path: slot exists, overwrite value - HOTTEST CASE
-            if (is_set) {
-                self.items.items[rank_idx - 1] = value;
-                return false;  // Existing value overwritten
+            if (self.bitset.isSet(i)) {
+                // Existing slot - just update value
+                const rank_idx = self.bitset.rank(i) - 1;
+                self.items.items[rank_idx] = value;
+                return false;
+            } else {
+                // New slot - insert new value
+                const rank_idx = self.bitset.rank(i);
+                self.bitset.set(i);
+                self.items.insert(rank_idx, value) catch unreachable;
+                return true;
             }
-            
-            // New insertion path - rank already calculated
-            self.bitset.set(i);
-            
-            // Go BART style: efficient insertion
-            self.insertItem(rank_idx, value) catch unreachable;
-            
-            return true;  // New insertion
         }
         
         /// ReplaceAt replaces the value at i and returns the old value if it existed.
         /// If the value didn't exist, inserts the new value and returns null.
-        /// Go BART compatible implementation
         pub fn replaceAt(self: *Self, i: u8, value: T) ?T {
             if (self.bitset.isSet(i)) {
                 const rank_idx = self.bitset.rank(i);
@@ -213,64 +195,10 @@ pub fn Array256(comptime T: type) type {
         pub fn intersectionTop(self: *const Self, other: *const BitSet256) ?u8 {
             return self.bitset.intersectionTop(other);
         }
-        
-        /// Go BART style insertItem - ULTRA-OPTIMIZED for 15ns/op target
-        /// Phase 5: Manual copy optimization for small arrays + @memcpy for large
-        inline fn insertItem(self: *Self, index: usize, item: T) !void {
-            // Go BART style: fast resize if capacity available
-            if (self.items.items.len < self.items.capacity) {
-                self.items.items.len += 1;
-            } else {
-                try self.items.append(undefined); // enlarge capacity efficiently
-            }
-            
-            // Phase 5: Ultra-optimized memory move based on size
-            const move_count = self.items.items.len - 1 - index;
-            if (move_count > 0) {
-                if (move_count <= 4) {
-                    // Small arrays: Manual copy faster than @memcpy overhead
-                    var i = self.items.items.len - 1;
-                    while (i > index) : (i -= 1) {
-                        self.items.items[i] = self.items.items[i - 1];
-                    }
-                } else {
-                    // Large arrays: Use @memcpy for bulk operations
-                    const src = self.items.items[index..self.items.items.len - 1];
-                    const dst = self.items.items[index + 1..];
-                    @memcpy(dst[0..src.len], src);
-                }
-            }
-            self.items.items[index] = item;
-        }
-        
-        /// Go BART style deleteItem - ULTRA-OPTIMIZED for 15ns/op target  
-        /// Phase 5: Manual copy optimization for small arrays + @memcpy for large
-        inline fn deleteItem(self: *Self, index: usize) void {
-            // Phase 5: Ultra-optimized memory move based on size
-            const move_count = self.items.items.len - 1 - index;
-            if (move_count > 0) {
-                if (move_count <= 4) {
-                    // Small arrays: Manual copy faster than @memcpy overhead
-                    var i = index;
-                    while (i < self.items.items.len - 1) : (i += 1) {
-                        self.items.items[i] = self.items.items[i + 1];
-                    }
-                } else {
-                    // Large arrays: Use @memcpy for bulk operations
-                    const src = self.items.items[index + 1..];
-                    const dst = self.items.items[index..];
-                    @memcpy(dst[0..src.len], src);
-                }
-            }
-            
-            // Go BART style: clear tail and resize
-            const new_len = self.items.items.len - 1;
-            self.items.shrinkRetainingCapacity(new_len);
-        }
     };
 }
 
-test "Go BART compatible SparseArray256" {
+test "SparseArray256 basic operations" {
     const allocator = std.testing.allocator;
     
     var arr = Array256(u32).init(allocator);
@@ -304,10 +232,10 @@ test "Go BART compatible SparseArray256" {
     const top = arr.intersectionTop(&test_bitset);
     try std.testing.expectEqual(@as(u8, 50), top.?); // Highest set bit
     
-    std.debug.print("✅ Go BART compatible SparseArray256 test passed!\n", .{});
+    std.debug.print("✅ SparseArray256 basic operations test passed!\n", .{});
 }
 
-test "Go BART SparseArray256 performance test" {
+test "SparseArray256 performance test" {
     const allocator = std.testing.allocator;
     const Timer = std.time.Timer;
     
@@ -341,10 +269,10 @@ test "Go BART SparseArray256 performance test" {
     const elapsed = timer.read();
     const ns_per_op = elapsed / iterations;
     
-    std.debug.print("SparseArray256 Go BART intersectsAny: {d:.2} ns/op ({d:.2} million ops/sec) [hits: {d}]\n", 
+    std.debug.print("SparseArray256 intersectsAny: {d:.2} ns/op ({d:.2} million ops/sec) [hits: {d}]\n", 
                    .{ ns_per_op, 1000.0 / @as(f64, @floatFromInt(ns_per_op)), hit_count });
     
     try std.testing.expectEqual(iterations, hit_count); // Should always hit
     
-    std.debug.print("✅ Go BART SparseArray256 performance test completed!\n", .{});
+    std.debug.print("✅ SparseArray256 performance test completed!\n", .{});
 } 
