@@ -24,6 +24,7 @@
 const std = @import("std");
 const node = @import("node.zig");
 const Node = node.Node;
+const NodePool = node.NodePool;
 const Prefix = node.Prefix;
 const IPAddr = node.IPAddr;
 const Child = node.Child;
@@ -44,6 +45,9 @@ pub fn Table(comptime V: type) type {
         size4: usize,
         size6: usize,
         
+        // Memory pool for high-performance node allocation
+        node_pool: ?*NodePool(V),
+        
         pub fn init(allocator: std.mem.Allocator) Self {
             return Self{
                 .allocator = allocator,
@@ -51,6 +55,7 @@ pub fn Table(comptime V: type) type {
                 .root6 = Node(V).init(allocator),
                 .size4 = 0,
                 .size6 = 0,
+                .node_pool = null, // Disable pool for debugging
             };
         }
         
@@ -59,6 +64,11 @@ pub fn Table(comptime V: type) type {
             self.allocator.destroy(self.root4);
             self.root6.deinit();
             self.allocator.destroy(self.root6);
+            
+            // Cleanup node pool
+            if (self.node_pool) |pool| {
+                pool.deinit();
+            }
         }
         
         /// deinitAndDestroy: insertPersist等で作成されたテーブルを完全にクリーンアップ
@@ -87,7 +97,9 @@ pub fn Table(comptime V: type) type {
             const canonical_pfx = pfx.masked();
             const is4 = canonical_pfx.addr.is4();
             var n: *Node(V) = self.rootNodeByVersion(is4);
-            if (n.ultraFastInsertAtDepth(&canonical_pfx, val, 0, self.allocator, null)) {
+            
+            // Memory pool optimized insertAtDepth
+            if (n.insertAtDepthPooled(&canonical_pfx, val, 0, self.allocator, self.node_pool)) {
                 self.sizeUpdate(is4, 1);
             }
         }
@@ -124,10 +136,93 @@ pub fn Table(comptime V: type) type {
         }
         
         /// Lookup performs a longest prefix match for the given IP address.
+        /// Direct port of Go BART's Lookup implementation
         pub fn lookup(self: *const Self, addr: *const IPAddr) node.LookupResult(V) {
             const is4 = addr.is4();
-            const root = self.rootNodeByVersionConst(is4);
-            return root.ultraFastLookup(addr);
+            const octets = addr.asSlice();
+            var n = self.rootNodeByVersionConst(is4);
+            
+            // Stack of the traversed nodes for fast backtracking, if needed
+            var stack: [16]*const Node(V) = undefined;
+            
+            // Run variable, used after for loop
+            var depth: usize = 0;
+            var octet: u8 = 0;
+            
+            // Find leaf node
+            for (octets, 0..) |current_octet, current_depth| {
+                depth = current_depth;
+                octet = current_octet;
+                
+                // Push current node on stack for fast backtracking
+                stack[depth] = n;
+                
+                // Go down in tight loop to last octet
+                if (!n.children.isSet(octet)) {
+                    // No more nodes below octet
+                    break;
+                }
+                const kid = n.children.mustGet(octet);
+                
+                // Kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // Descend down to next trie level
+                    },
+                    .fringe => |fringe| {
+                        // Fringe is the default-route for all possible nodes below
+                        // Reconstruct prefix from path
+                        var path: [16]u8 = undefined;
+                        @memcpy(path[0..octets.len], octets);
+                        path[depth] = octet;
+                        const fringe_addr = if (addr.is4()) 
+                            IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } 
+                        else 
+                            IPAddr{ .v6 = path[0..16].* };
+                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
+                        const fringe_pfx = Prefix.init(&fringe_addr, fringe_bits);
+                        return node.LookupResult(V){ .prefix = fringe_pfx, .value = fringe.value, .ok = true };
+                    },
+                    .leaf => |leaf| {
+                        if (leaf.prefix.containsAddr(addr.*)) {
+                            return node.LookupResult(V){ .prefix = leaf.prefix, .value = leaf.value, .ok = true };
+                        }
+                        // Reached a path compressed prefix, stop traversing
+                        break;
+                    },
+                }
+            }
+            
+            // Start backtracking, unwind the stack
+            while (depth < 16) {
+                n = stack[depth];
+                
+                // Longest prefix match, skip if node has no prefixes
+                if (n.prefixes.len() != 0) {
+                    const idx = base_index.hostIdx(octets[depth]);
+                    // lpmGet(idx), using existing implementation
+                    const result = n.lpmGet(idx);
+                    if (result.ok) {
+                        // Reconstruct prefix from backtracking result
+                        const pfx_info = base_index.idxToPfx256(result.base_idx) catch {
+                            if (depth == 0) break;
+                            depth -= 1;
+                            continue;
+                        };
+                        var masked_addr = addr.*;
+                        const pfx_bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
+                        masked_addr = masked_addr.masked(pfx_bits);
+                        const prefix = Prefix.init(&masked_addr, pfx_bits);
+                        return node.LookupResult(V){ .prefix = prefix, .value = result.val, .ok = true };
+                    }
+                }
+                
+                if (depth == 0) break;
+                depth -= 1;
+            }
+            
+            return node.LookupResult(V){ .prefix = undefined, .value = undefined, .ok = false };
         }
         
         /// LookupPrefix performs a longest prefix match for the given prefix.
@@ -165,6 +260,7 @@ pub fn Table(comptime V: type) type {
                 .root6 = self.root6.cloneRec(self.allocator),
                 .size4 = self.size4,
                 .size6 = self.size6,
+                .node_pool = NodePool(V).init(self.allocator) catch null,
             };
             return new_table;
         }
@@ -485,13 +581,12 @@ pub fn Table(comptime V: type) type {
                             return .{ .table = new_table, .value = new_val };
                         }
                         
-                        // 新しいノードを作成
+                        // 新しいノードを作成 - OPTIMIZED
                         // リーフを下に押し下げ
                         // 現在のリーフ位置（addr）に新しい子を挿入
                         // 降下し、nを新しい子で置き換え
-                        const new_node = current_node.allocator.create(Node(V)) catch unreachable;
-                        new_node.* = Node(V).init(current_node.allocator);
-                        _ = new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, current_node.allocator, null);
+                        const new_node = Node(V).createFastNode(current_node.allocator);
+                        _ = new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, current_node.allocator);
                         
                         _ = current_node.children.replaceAt(addr, Child(V){ .node = new_node });
                         current_node = new_node;
@@ -506,12 +601,11 @@ pub fn Table(comptime V: type) type {
                             return .{ .table = new_table, .value = new_val };
                         }
                         
-                        // 新しいノードを作成
+                        // 新しいノードを作成 - OPTIMIZED
                         // フリンジを下に押し下げ、デフォルトルート（idx=1）になる
                         // 現在のリーフ位置（addr）に新しい子を挿入
                         // 降下し、nを新しい子で置き換え
-                        const new_node = current_node.allocator.create(Node(V)) catch unreachable;
-                        new_node.* = Node(V).init(current_node.allocator);
+                        const new_node = Node(V).createFastNode(current_node.allocator);
                         _ = new_node.prefixes.insertAt(1, cloned_fringe.value);
                         
                         _ = current_node.children.replaceAt(addr, Child(V){ .node = new_node });
@@ -849,23 +943,44 @@ pub fn Table(comptime V: type) type {
             _ = self.root6.allRecSorted(path, 0, false, yield);
         }
 
-        /// contains: Go BART互換の超高速Contains実装
-        /// バックトラッキングなし、任意のLPMマッチで十分
+        /// Contains performs a route lookup for IP and returns true if any route matched.
+        /// Direct port of Go BART's Contains implementation
         pub fn contains(self: *const Self, addr: *const IPAddr) bool {
             const is4 = addr.is4();
-            const root = self.rootNodeByVersionConst(is4);
-            return root.contains(addr);
+            var n = self.rootNodeByVersionConst(is4);
+            
+            for (addr.asSlice()) |octet| {
+                // For contains, any lpm match is good enough, no backtracking needed
+                if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(octet))) {
+                    return true;
+                }
+                
+                // Stop traversing?
+                if (!n.children.isSet(octet)) {
+                    return false;
+                }
+                const kid = n.children.mustGet(octet);
+                
+                // Kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // Descend down to next trie level
+                    },
+                    .fringe => {
+                        // Fringe is the default-route for all possible octets below
+                        return true;
+                    },
+                    .leaf => |leaf| {
+                        return leaf.prefix.containsAddr(addr.*);
+                    },
+                }
+            }
+            
+            return false;
         }
         
-        /// fastLookup: Go BART互換の高速Lookup実装
-        /// 効率的なバックトラッキングと最適化されたLPM
-        pub fn fastLookup(self: *const Self, addr: *const IPAddr) ?V {
-            const is4 = addr.is4();
-            const root = self.rootNodeByVersionConst(is4);
-            const result = root.fastLookup(addr);
-            
-            return if (result.ok) result.value else null;
-        }
+
     };
 }
 

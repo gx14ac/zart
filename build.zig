@@ -29,8 +29,44 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/bart_benchmark.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = true, // Strip symbols for maximum performance
+        .link_libc = false, // Avoid libc overhead
     });
+    
+    // Go BART Compatible Benchmark - exact same conditions as fulltable_test.go
+    const go_bart_bench = b.addExecutable(.{
+        .name = "go_bart_benchmark", 
+        .root_source_file = b.path("src/go_bart_compatible_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = true, // Strip symbols for maximum performance
+        .link_libc = false, // Avoid libc overhead
+    });
+    
+    // Add aggressive optimization for ReleaseFast builds
+    if (optimize == .ReleaseFast) {
+        bart_bench.root_module.single_threaded = true; // Single-threaded optimization
+        go_bart_bench.root_module.single_threaded = true; // Single-threaded optimization
+    }
+
+    const contains_lookup_bench = b.addExecutable(.{
+        .name = "contains_lookup_bench", 
+        .root_source_file = b.path("src/benchmark_contains_lookup.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const insert_bench = b.addExecutable(.{
+        .name = "insert_bench", 
+        .root_source_file = b.path("src/benchmark_insert.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
     b.installArtifact(bart_bench);
+    b.installArtifact(go_bart_bench);
+    b.installArtifact(contains_lookup_bench);
+    b.installArtifact(insert_bench);
 
     // Test executable
     const test_exe = b.addExecutable(.{
@@ -55,6 +91,27 @@ pub fn build(b: *std.Build) void {
         bench_cmd.addArgs(args);
     }
 
+    // Contains & Lookup Benchmark run command
+    const contains_lookup_cmd = b.addRunArtifact(contains_lookup_bench);
+    contains_lookup_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        contains_lookup_cmd.addArgs(args);
+    }
+
+    // Insert Benchmark run command
+    const insert_cmd = b.addRunArtifact(insert_bench);
+    insert_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        insert_cmd.addArgs(args);
+    }
+
+    // Go BART Compatible Benchmark run command
+    const go_bart_cmd = b.addRunArtifact(go_bart_bench);
+    go_bart_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        go_bart_cmd.addArgs(args);
+    }
+
     // Test run command  
     const test_cmd = b.addRunArtifact(test_exe);
     test_cmd.step.dependOn(b.getInstallStep());
@@ -68,6 +125,15 @@ pub fn build(b: *std.Build) void {
 
     const bench_step = b.step("bench", "Run BART benchmarks (matches Go BART's fulltable_test.go)");
     bench_step.dependOn(&bench_cmd.step);
+
+    const go_bart_step = b.step("go-bench", "Run Go BART Compatible benchmarks (exact same conditions as fulltable_test.go)");
+    go_bart_step.dependOn(&go_bart_cmd.step);
+
+    const contains_lookup_step = b.step("contains_lookup", "Run contains_lookup benchmarks");
+    contains_lookup_step.dependOn(&contains_lookup_cmd.step);
+
+    const insert_step = b.step("insert", "Run insert benchmarks"); 
+    insert_step.dependOn(&insert_cmd.step);
 
     const test_step = b.step("test-basic", "Run basic tests");
     test_step.dependOn(&test_cmd.step);

@@ -13,8 +13,8 @@ pub const BitSet256 = struct {
         return BitSet256{ .data = [_]u64{0} ** 4 };
     }
 
-    /// Set bit to 1
-    pub fn set(self: *BitSet256, bit: u8) void {
+    /// Set bit to 1 - HOTTEST PATH: Force inline
+    pub inline fn set(self: *BitSet256, bit: u8) void {
         const word_idx = bit >> 6;
         const bit_pos = @as(u6, @intCast(bit & 63));
         self.data[word_idx] |= @as(u64, 1) << bit_pos;
@@ -27,8 +27,8 @@ pub const BitSet256 = struct {
         self.data[word_idx] &= ~(@as(u64, 1) << bit_pos);
     }
 
-    /// Check if bit is set
-    pub fn isSet(self: *const BitSet256, bit: u8) bool {
+    /// Check if bit is set - HOTTEST PATH: Force inline
+    pub inline fn isSet(self: *const BitSet256, bit: u8) bool {
         const word_idx = bit >> 6;
         const bit_pos = @as(u6, @intCast(bit & 63));
         return (self.data[word_idx] & (@as(u64, 1) << bit_pos)) != 0;
@@ -91,9 +91,9 @@ pub const BitSet256 = struct {
         return @as(u8, @intCast(cnt));
     }
 
-    /// Return count of set bits up to specified position (rank)
-    /// Uses POPCNT instruction with precomputed masks
-    pub fn rank(self: *const BitSet256, idx: u8) u16 {
+    /// Return count of set bits up to specified position (rank) - ULTRA-HOT PATH: Force inline
+    /// Uses POPCNT instruction with precomputed masks for optimal performance
+    pub inline fn rank(self: *const BitSet256, idx: u8) u16 {
         const mask = &rankMask[idx];
         var cnt: u32 = 0;
         cnt += @popCount(self.data[0] & mask.data[0]);

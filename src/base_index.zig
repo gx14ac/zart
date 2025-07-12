@@ -37,11 +37,10 @@ fn pfxToIdx(octet: u8, pfx_len: u8) usize {
     return (@as(usize, octet) >> right_shift) + (@as(usize, 1) << shift);
 }
 
-/// Map 8-bit prefix to numeric value (256 version)
-/// Value range is [1..255]. Values greater than 255 are shifted by >>1.
-/// OPTIMIZED: Uses precomputed lookup table for maximum performance
-pub fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
-    // OPTIMIZATION: Use precomputed lookup table
+/// Convert prefix to index in sparse array256 - HOTTEST PATH: Force inline + Lookup Table
+/// ULTRA-OPTIMIZED: Uses precomputed lookup table for maximum performance
+pub inline fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
+    // OPTIMIZATION: Use precomputed lookup table for maximum speed
     if (pfx_len <= 8) {
         return pfxToIdx256LookupTable[pfx_len][octet];
     }
@@ -238,10 +237,9 @@ pub fn maxDepthAndLastBits(bits: u8) struct { max_depth: usize, last_bits: u8 } 
     return .{ .max_depth = @as(usize, entry.max_depth), .last_bits = entry.last_bits };
 }
 
-/// isFringe: leaves with /8, /16, ... /128 bits at special positions
-/// in the trie. Go実装のisFringeを移植
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table
-pub fn isFringe(depth: usize, bits: u8) bool {
+/// Check if prefix is a fringe - HOT PATH: Force inline + Lookup Table
+/// ULTRA-OPTIMIZED: Uses precomputed lookup table for maximum performance
+pub inline fn isFringe(depth: usize, bits: u8) bool {
     if (depth >= 32) return false; // Bounds check
     return isFringeLookupTable[depth][bits];
 }
