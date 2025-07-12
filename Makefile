@@ -52,6 +52,16 @@ advanced-bench:
 all-bench: bench rt-bench advanced-bench
 	python3 scripts/plot_benchmarks.py
 
+# Generate performance comparison charts
+.PHONY: charts
+charts:
+	python3 scripts/generate_comparison_charts.py
+
+# Generate performance comparison with fresh benchmark data
+.PHONY: benchmark-charts
+benchmark-charts: bench
+	python3 scripts/generate_comparison_charts.py
+
 # Install dependencies (if using nix)
 .PHONY: deps
 deps:
@@ -70,5 +80,7 @@ help:
 	@echo "  rt-bench     - Run realistic benchmarks"
 	@echo "  advanced-bench - Run advanced benchmarks"
 	@echo "  all-bench    - Run all benchmarks and generate graphs"
+	@echo "  charts       - Generate performance comparison charts"
+	@echo "  benchmark-charts - Run benchmarks and generate charts"
 	@echo "  deps         - Install dependencies (nix)"
 	@echo "  help         - Show this help message"

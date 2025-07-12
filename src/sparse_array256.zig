@@ -3,8 +3,8 @@
 const std = @import("std");
 const BitSet256 = @import("bitset256.zig").BitSet256;
 
-/// Optimized Array256 - Fixed-size array for maximum performance  
-/// Eliminates linear-time insertItem/deleteItem operations
+/// Go BART compatible Array256 - Fixed-size array for maximum performance  
+/// Uses popcount compression exactly like Go BART
 /// Cache-efficient design for Go BART compatibility and beyond
 pub fn Array256(comptime T: type) type {
     return struct {
@@ -14,7 +14,7 @@ pub fn Array256(comptime T: type) type {
         bitset: BitSet256,
         // Fixed-size array - no ArrayList overhead
         items: [MAX_ITEMS]T,
-        count: u8, // Real item count (0-256)
+        count: u16, // Real item count (0-256), using u16 to prevent overflow
         
         pub fn init(allocator: std.mem.Allocator) Self {
             _ = allocator; // No longer needed for fixed array
@@ -37,16 +37,24 @@ pub fn Array256(comptime T: type) type {
             @panic("forbidden, use insertAt");
         }
         
+        /// Clear an entry by index, set the corresponding bit to 0 in the underlying bitset.
         /// Clear of the underlying bitset is forbidden. The bitset and the items are coupled.
         /// An unsynchronized Clear() disturbs the coupling between bitset and Items[].
         pub fn clear(self: *Self, _i: u8) void {
-            _ = self;
-            _ = _i;
-            @panic("forbidden, use deleteAt");
+            _ = self; _ = _i;
+            @panic("clear(_i) not implemented yet for sparse_array256"); // TODO: Implement clear
+        }
+        
+        /// Clear all entries and reset the array to empty state
+        /// Used by memory pool for efficient node reuse
+        pub fn clearAll(self: *Self) void {
+            self.bitset = BitSet256.init();
+            self.count = 0;
+            // No need to clear items - count tracks valid range
         }
         
         /// Get the value at i from sparse array.
-        /// Optimized with direct array access - no bounds checking in release mode
+        /// Go BART compatible implementation
         pub fn get(self: Self, i: u8) ?T {
             if (self.bitset.isSet(i)) {
                 const rank_idx = self.bitset.rank(i);
@@ -57,69 +65,88 @@ pub fn Array256(comptime T: type) type {
         
         /// MustGet use it only after a successful test
         /// or the behavior is undefined, it will NOT PANIC.
-        /// Optimized for maximum performance - no bounds checking
+        /// Go BART compatible implementation
         pub fn mustGet(self: Self, i: u8) T {
             const rank_idx = self.bitset.rank(i);
             return self.items[rank_idx - 1];
         }
         
-        /// MustGetPtr: 書き込み用に、iの値へのポインタを返す（isSet前提）
-        /// Optimized pointer access for in-place modifications
+        /// MustGetPtr: Get pointer to value at i (assumes isSet)
+        /// Go BART compatible pointer access
         pub fn mustGetPtr(self: *Self, i: u8) *T {
             if (!self.bitset.isSet(i)) @panic("mustGetPtr: index not set");
             const rank_idx = self.bitset.rank(i);
             return &self.items[rank_idx - 1];
         }
         
-        /// UpdateAt or set the value at i via callback. The new value is returned
-        /// and true if the value was already present.
-        /// Optimized to minimize rank calculations
-        pub fn updateAt(self: *Self, i: u8, cb: fn (T, bool) T) struct { new_value: T, was_present: bool } {
-            const was_present = self.bitset.isSet(i);
-            
-            if (was_present) {
-                // Existing item - optimize for common case
-                const rank_idx = self.bitset.rank(i);
-                const old_value = self.items[rank_idx - 1];
-                const new_value = cb(old_value, true);
-                self.items[rank_idx - 1] = new_value;
-                return .{ .new_value = new_value, .was_present = true };
-            }
-            
-            // New item - use optimized insertion
-            const new_value = cb(undefined, false);
-            self.bitset.set(i);
-            const rank_idx = self.bitset.rank(i);
-            
-            // Fast fixed-array insertion - shift only necessary elements
-            self.fastInsert(rank_idx - 1, new_value);
-            self.count += 1;
-            
-            return .{ .new_value = new_value, .was_present = false };
+        /// Test if index i is set
+        pub fn isSet(self: Self, i: u8) bool {
+            return self.bitset.isSet(i);
         }
         
-        /// Len returns the number of items in sparse array.
+        /// Length returns the number of items in sparse array
         pub fn len(self: Self) usize {
             return self.count;
         }
         
-        /// Copy returns a shallow copy of the Array.
-        /// Optimized for fixed-array copying
-        pub fn copy(self: *const Self) Self {
-            var new_array = Self{
+        /// Size returns the number of items in sparse array
+        pub fn size(self: Self) usize {
+            return self.count;
+        }
+        
+        /// UpdateAt or set the value at i via callback. The new value is returned
+        /// and true if the value was already present.
+        /// Go BART compatible implementation
+        pub fn updateAt(self: *Self, i: u8, callback: fn (current: ?T) T) bool {
+            if (self.bitset.isSet(i)) {
+                const rank_idx = self.bitset.rank(i);
+                const old_val = self.items[rank_idx - 1];
+                self.items[rank_idx - 1] = callback(old_val);
+                return true;  // Value was already present
+            } else {
+                // New insertion
+                const rank_idx: usize = @as(usize, self.bitset.rank(i));
+                self.bitset.set(i);
+                
+                // Shift items to make room
+                self.shiftRight(rank_idx);
+                self.items[rank_idx] = callback(null);
+                self.count += 1;
+                
+                return false;  // New value
+            }
+        }
+        
+        /// DeleteAt removes the value at i and returns it if it existed
+        /// Go BART compatible implementation
+        pub fn deleteAt(self: *Self, i: u8) ?T {
+            if (!self.bitset.isSet(i)) {
+                return null;
+            }
+            
+            const rank_idx = self.bitset.rank(i) - 1;
+            const old_val = self.items[rank_idx];
+            
+            // Clear bit and shift items left
+            self.bitset.clear(i);
+            self.shiftLeft(rank_idx);
+            self.count -= 1;
+            
+            return old_val;
+        }
+        
+        /// Clone creates a deep copy of the sparse array
+        pub fn clone(self: *const Self, allocator: std.mem.Allocator) Self {
+            _ = allocator;
+            const new_array = Self{
                 .bitset = self.bitset,
-                .items = undefined,
+                .items = self.items,
                 .count = self.count,
             };
-            // Copy only the active items
-            if (self.count > 0) {
-                @memcpy(new_array.items[0..self.count], self.items[0..self.count]);
-            }
             return new_array;
         }
         
-        /// deepCopy: ディープコピー（要素がポインタや構造体の場合も再帰的にコピー）
-        /// Optimized for minimal allocations
+        /// DeepCopy creates a deep copy using custom clone function
         pub fn deepCopy(self: *const Self, allocator: std.mem.Allocator, cloneFn: fn (*const T, std.mem.Allocator) T) Self {
             var new_array = Self{
                 .bitset = self.bitset,
@@ -138,124 +165,101 @@ pub fn Array256(comptime T: type) type {
         /// InsertAt a value at i into the sparse array.
         /// If the value already exists, overwrite it with val and return false.
         /// If the value is new, insert it and return true.
-        /// OPTIMIZED: Combined bitset operations and rank calculation
+        /// Go BART compatible implementation
         pub fn insertAt(self: *Self, i: u8, value: T) bool {
             // Fast path: slot exists, overwrite value
             if (self.bitset.isSet(i)) {
                 const rank_idx = self.bitset.rank(i);
                 self.items[rank_idx - 1] = value;
-                return false;  // 既存値の上書き時はfalse
+                return false;  // Existing value overwritten
             }
             
-            // OPTIMIZATION: Calculate rank before setting bit for better cache performance
-            const rank_idx = self.bitset.rank(i) + 1;
-            
             // New insertion path
+            const rank_idx: usize = @as(usize, self.bitset.rank(i));
             self.bitset.set(i);
             
-            // OPTIMIZATION: Use calculated rank directly
-            self.fastInsert(rank_idx - 1, value);
+            // Shift items to make room and insert
+            self.shiftRight(rank_idx);
+            self.items[rank_idx] = value;
             self.count += 1;
             
-            return true;  // 新規挿入時はtrue
+            return true;  // New insertion
         }
         
         /// ReplaceAt replaces the value at i and returns the old value if it existed.
         /// If the value didn't exist, inserts the new value and returns null.
-        /// Optimized with single rank calculation when possible
+        /// Go BART compatible implementation
         pub fn replaceAt(self: *Self, i: u8, value: T) ?T {
-            // Fast path: slot exists, replace value and return old
             if (self.bitset.isSet(i)) {
                 const rank_idx = self.bitset.rank(i);
-                const old_value = self.items[rank_idx - 1];
+                const old_val = self.items[rank_idx - 1];
                 self.items[rank_idx - 1] = value;
-                return old_value;
-            }
-            
-            // New insertion path
-            self.bitset.set(i);
-            const rank_idx = self.bitset.rank(i);
-            
-            // Fast fixed-array insertion
-            self.fastInsert(rank_idx - 1, value);
-            self.count += 1;
-            
-            return null;  // 新規挿入時はnull
-        }
-        
-        /// DeleteAt a value at i from the sparse array, zeroes the tail.
-        /// Optimized with fast fixed-array deletion
-        pub fn deleteAt(self: *Self, i: u8) ?T {
-            if (self.count == 0 or !self.bitset.isSet(i)) {
+                return old_val;
+            } else {
+                // Insert new value
+                _ = self.insertAt(i, value);
                 return null;
             }
-            
-            const rank_idx = self.bitset.rank(i);
-            const value = self.items[rank_idx - 1];
-            
-            // Fast fixed-array deletion
-            self.fastDelete(rank_idx - 1);
-            self.count -= 1;
-            
-            // Delete from bitset
-            self.bitset.clear(i);
-            
-            return value;
         }
         
-        /// IsSet tests if bit i is set
-        pub fn isSet(self: Self, i: u8) bool {
-            return self.bitset.isSet(i);
+        /// FirstSet returns the first set bit if any
+        pub fn firstSet(self: *const Self) ?u8 {
+            return self.bitset.firstSet();
         }
         
-        /// IntersectsAny returns true if the intersection of this array's bitset with the compare bitset
-        /// is not the empty set.
+        /// NextSet returns the next set bit after the given bit
+        pub fn nextSet(self: *const Self, bit: u8) ?u8 {
+            return self.bitset.nextSet(bit);
+        }
+        
+        /// IntersectsAny returns true if this array intersects with the given bitset
         pub fn intersectsAny(self: *const Self, other: *const BitSet256) bool {
             return self.bitset.intersectsAny(other);
         }
         
-        /// IntersectionTop returns the top (highest) bit in the intersection of this array's bitset
-        /// with the compare bitset, if any intersection exists.
+        /// IntersectionTop returns the highest bit in the intersection
         pub fn intersectionTop(self: *const Self, other: *const BitSet256) ?u8 {
             return self.bitset.intersectionTop(other);
         }
         
-        /// Fast fixed-array insertion - optimized for minimal memory operations
-        /// SIMD-optimized version for maximum performance
-        fn fastInsert(self: *Self, index: usize, item: T) void {
-            if (index < self.count) {
-                // OPTIMIZATION: Use optimized loop (simple and fast)
-                var i: usize = self.count;
-                while (i > index) : (i -= 1) {
-                    self.items[i] = self.items[i - 1];
-                }
+        /// Go BART compatible array shifting - optimized for cache efficiency
+        fn shiftRight(self: *Self, index: usize) void {
+            if (index >= self.count) {
+                return;
             }
-            // Insert new item
-            self.items[index] = item;
+            
+            const move_count = self.count - index;
+            if (move_count == 0) return;
+            
+            // Shift elements right to make room for new element
+            var i: usize = self.count;
+            while (i > index) : (i -= 1) {
+                self.items[i] = self.items[i - 1];
+            }
         }
         
-        /// Fast fixed-array deletion - optimized for minimal memory operations
-        /// Only shifts necessary elements, uses SIMD when available
-        fn fastDelete(self: *Self, index: usize) void {
-            if (index < self.count - 1) {
-                // Shift left: move [index+1..count) to [index..count-1)
-                const move_count = self.count - index - 1;
-                for (0..move_count) |i| {
-                    self.items[index + i] = self.items[index + i + 1];
-                }
+        /// Go BART compatible array shifting - optimized for cache efficiency
+        fn shiftLeft(self: *Self, index: usize) void {
+            if (index >= self.count) return;
+            
+            const move_count = self.count - index - 1;
+            if (move_count == 0) return;
+            
+            // Shift elements left to close the gap
+            for (0..move_count) |i| {
+                self.items[index + i] = self.items[index + i + 1];
             }
-            // Note: No need to clear last element - count tracks valid range
         }
     };
 }
 
-test "SparseArray256 with SIMD BitSet256" {
+test "Go BART compatible SparseArray256" {
     const allocator = std.testing.allocator;
     
     var arr = Array256(u32).init(allocator);
     defer arr.deinit();
     
-    // 基本操作テスト
+    // Basic operations test
     _ = arr.insertAt(10, 100);
     _ = arr.insertAt(50, 200);
     _ = arr.insertAt(200, 300);
@@ -272,34 +276,34 @@ test "SparseArray256 with SIMD BitSet256" {
     
     try std.testing.expectEqual(@as(usize, 3), arr.len());
     
-    // ビットセット操作テスト（SIMD最適化の恩恵）
+    // Bitset operations test (real bit manipulation)
     var test_bitset = BitSet256.init();
     test_bitset.set(10);
     test_bitset.set(50);
-    test_bitset.set(100); // 存在しない要素
+    test_bitset.set(100); // Non-existent element
     
     try std.testing.expect(arr.intersectsAny(&test_bitset));
     
     const top = arr.intersectionTop(&test_bitset);
-    try std.testing.expectEqual(@as(u8, 50), top.?); // 最高位のセットビット
+    try std.testing.expectEqual(@as(u8, 50), top.?); // Highest set bit
     
-    std.debug.print("✅ SparseArray256 with SIMD BitSet256 test passed!\n", .{});
+    std.debug.print("✅ Go BART compatible SparseArray256 test passed!\n", .{});
 }
 
-test "SparseArray256 SIMD performance test" {
+test "Go BART SparseArray256 performance test" {
     const allocator = std.testing.allocator;
     const Timer = std.time.Timer;
     
     var arr = Array256(u32).init(allocator);
     defer arr.deinit();
     
-    // 高密度データを準備
+    // High-density data preparation
     var i: u16 = 0;
     while (i < 256) : (i += 2) {
         _ = arr.insertAt(@as(u8, @intCast(i)), @as(u32, @intCast(i * 10)));
     }
     
-    // ビットセット検索テスト
+    // Bitset search test
     var test_bitset = BitSet256.init();
     i = 0;
     while (i < 256) : (i += 4) {
@@ -320,10 +324,10 @@ test "SparseArray256 SIMD performance test" {
     const elapsed = timer.read();
     const ns_per_op = elapsed / iterations;
     
-    std.debug.print("SparseArray256 SIMD intersectsAny: {d:.2} ns/op ({d:.2} million ops/sec) [hits: {d}]\n", 
+    std.debug.print("SparseArray256 Go BART intersectsAny: {d:.2} ns/op ({d:.2} million ops/sec) [hits: {d}]\n", 
                    .{ ns_per_op, 1000.0 / @as(f64, @floatFromInt(ns_per_op)), hit_count });
     
-    try std.testing.expectEqual(iterations, hit_count); // 常にヒットするはず
+    try std.testing.expectEqual(iterations, hit_count); // Should always hit
     
-    std.debug.print("✅ SparseArray256 SIMD performance test completed!\n", .{});
+    std.debug.print("✅ Go BART SparseArray256 performance test completed!\n", .{});
 } 

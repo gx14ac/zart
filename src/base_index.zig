@@ -13,8 +13,9 @@ const std = @import("std");
 
 /// Calculate host address index
 /// This is a fast version of PfxToIdx(octet/8).
+/// OPTIMIZED: Uses precomputed lookup table
 pub fn hostIdx(octet: u8) usize {
-    return @as(usize, octet) + 256;
+    return hostIdxLookupTable[octet];
 }
 
 /// Map 8-bit prefix to numeric value
@@ -55,7 +56,7 @@ pub fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
 /// Precomputed lookup table for pfxToIdx256
 /// pfxToIdx256LookupTable[pfx_len][octet] = result
 /// This eliminates all runtime computation for common cases
-const pfxToIdx256LookupTable = blk: {
+pub const pfxToIdx256LookupTable = blk: {
     @setEvalBranchQuota(100000);
     var table: [9][256]u8 = undefined;
     
@@ -75,58 +76,120 @@ const pfxToIdx256LookupTable = blk: {
     break :blk table;
 };
 
+/// Precomputed network mask lookup table
+/// netMaskLookupTable[bits] = mask for given bit count
+/// Eliminates runtime shifting operations
+pub const netMaskLookupTable = [_]u8{
+    0b0000_0000, // bits == 0
+    0b1000_0000, // bits == 1
+    0b1100_0000, // bits == 2
+    0b1110_0000, // bits == 3
+    0b1111_0000, // bits == 4
+    0b1111_1000, // bits == 5
+    0b1111_1100, // bits == 6
+    0b1111_1110, // bits == 7
+    0b1111_1111, // bits == 8
+};
+
+/// Precomputed max depth and last bits lookup table
+/// maxDepthLastBitsLookupTable[bits] = {max_depth, last_bits}
+/// Eliminates runtime division and modulo operations
+pub const maxDepthLastBitsLookupTable = blk: {
+    @setEvalBranchQuota(10000);
+    var table: [256]struct { max_depth: u8, last_bits: u8 } = undefined;
+    
+    for (0..256) |bits| {
+        const max_depth = @as(u8, @intCast(bits / 8));
+        const last_bits = @as(u8, @intCast(bits % 8));
+        table[bits] = .{ .max_depth = max_depth, .last_bits = last_bits };
+    }
+    
+    break :blk table;
+};
+
+/// Precomputed hostIdx lookup table
+/// hostIdxLookupTable[octet] = hostIdx(octet)
+/// Eliminates runtime addition operations
+pub const hostIdxLookupTable = blk: {
+    @setEvalBranchQuota(1000);
+    var table: [256]usize = undefined;
+    
+    for (0..256) |octet| {
+        table[octet] = @as(usize, octet) + 256;
+    }
+    
+    break :blk table;
+};
+
+/// Precomputed idxToPfx256 reverse lookup table
+/// idxToPfxLookupTable[idx] = {octet, pfx_len}
+/// Eliminates complex reverse calculation
+pub const idxToPfxLookupTable = blk: {
+    @setEvalBranchQuota(10000);
+    var table: [256]struct { octet: u8, pfx_len: u8, valid: bool } = undefined;
+    
+    // Initialize all entries as invalid
+    for (0..256) |i| {
+        table[i] = .{ .octet = 0, .pfx_len = 0, .valid = false };
+    }
+    
+    // Precompute valid entries by reverse mapping
+    for (0..9) |pfx_len| {
+        for (0..256) |octet| {
+            const shift: u6 = @intCast(pfx_len);
+            const right_shift: u6 = @intCast(8 - pfx_len);
+            var idx = (@as(usize, octet) >> right_shift) + (@as(usize, 1) << shift);
+            if (idx > 255) {
+                idx >>= 1;
+            }
+            const idx_u8 = @as(u8, @intCast(idx));
+            
+            // Only set if not already set (prefer lower pfx_len for conflicts)
+            if (!table[idx_u8].valid) {
+                table[idx_u8] = .{ 
+                    .octet = @as(u8, @intCast(octet)), 
+                    .pfx_len = @as(u8, @intCast(pfx_len)), 
+                    .valid = true 
+                };
+            }
+        }
+    }
+    
+    break :blk table;
+};
+
+/// Precomputed isFringe lookup table
+/// isFringeLookupTable[depth][bits] = isFringe(depth, bits)
+/// Eliminates runtime modulo and comparison operations
+pub const isFringeLookupTable = blk: {
+    @setEvalBranchQuota(50000);
+    var table: [32][256]bool = undefined;
+    
+    for (0..32) |depth| {
+        for (0..256) |bits| {
+            const max_depth = bits / 8;
+            const last_bits = bits % 8;
+            table[depth][bits] = (depth == max_depth - 1) and (last_bits == 0);
+        }
+    }
+    
+    break :blk table;
+};
+
 /// Return octet and prefix length from base index
 /// Inverse function of pfxToIdx256.
+/// ULTRA-OPTIMIZED: Uses precomputed lookup table
 /// 
 /// Returns error for invalid input.
 pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
-    if (idx == 0) {
+    const entry = idxToPfxLookupTable[idx];
+    if (!entry.valid) {
         return error.InvalidIndex;
     }
     
-    // idx == 1 は特別ケース: デフォルトルート (0/0)
-    if (idx == 1) {
-        return .{
-            .octet = 0,
-            .pfx_len = 0,
-        };
-    }
-
-    // Go実装の逆変換ロジック
-    // pfxToIdx では: return (octet >> (8-pfx_len)) + (1 << pfx_len)
-    // 逆変換: idx = prefix_value + (1 << pfx_len)
-    // つまり: prefix_value = idx - (1 << pfx_len)
-    
-    // pfx_lenを見つける: 最上位ビットの位置
-    var pfx_len: u8 = 0;
-    var test_val = idx;
-    while (test_val > 1) {
-        test_val >>= 1;
-        pfx_len += 1;
-    }
-    
-    if (pfx_len == 0) {
-        return .{
-            .octet = 0,
-            .pfx_len = 0,
-        };
-    }
-    
-    // prefix_value = idx - (1 << pfx_len)
-    const base_value = @as(u8, 1) << @as(u3, @intCast(pfx_len));
-    if (idx < base_value) {
-        return error.InvalidIndex;
-    }
-    
-    const prefix_value = idx - base_value;
-    
-    // octet = prefix_value << (8 - pfx_len)
-    const shift_bits = 8 - pfx_len;
-    const octet = if (shift_bits < 8) prefix_value << @as(u3, @intCast(shift_bits)) else 0;
-
     return .{
-        .octet = octet,
-        .pfx_len = pfx_len,
+        .octet = entry.octet,
+        .pfx_len = entry.pfx_len,
     };
 }
 
@@ -151,6 +214,7 @@ pub fn idxToRange256(idx: u8) !struct { first: u8, last: u8 } {
 }
 
 /// Generate network mask based on bit count
+/// ULTRA-OPTIMIZED: Uses precomputed lookup table
 /// 
 /// 0b0000_0000, // bits == 0
 /// 0b1000_0000, // bits == 1
@@ -163,25 +227,22 @@ pub fn idxToRange256(idx: u8) !struct { first: u8, last: u8 } {
 /// 0b1111_1111, // bits == 8
 pub fn netMask(bits: u8) u8 {
     std.debug.assert(bits <= 8);
-    if (bits == 0) return 0;
-    const shift: u3 = @intCast(8 - bits);
-    return @as(u8, 0xff) << shift;
+    return netMaskLookupTable[bits];
 }
 
 /// Return max_depth (stride数) と last_bits (最後のstride未満のビット数)
+/// ULTRA-OPTIMIZED: Uses precomputed lookup table
 pub fn maxDepthAndLastBits(bits: u8) struct { max_depth: usize, last_bits: u8 } {
-    const max_depth = bits / 8;
-    const last_bits = bits % 8;
-    return .{ .max_depth = max_depth, .last_bits = last_bits };
+    const entry = maxDepthLastBitsLookupTable[bits];
+    return .{ .max_depth = @as(usize, entry.max_depth), .last_bits = entry.last_bits };
 }
 
 /// isFringe: leaves with /8, /16, ... /128 bits at special positions
 /// in the trie. Go実装のisFringeを移植
+/// ULTRA-OPTIMIZED: Uses precomputed lookup table
 pub fn isFringe(depth: usize, bits: u8) bool {
-    const info = maxDepthAndLastBits(bits);
-    const max_depth = info.max_depth;
-    const last_bits = info.last_bits;
-    return depth == max_depth - 1 and last_bits == 0;
+    if (depth >= 32) return false; // Bounds check
+    return isFringeLookupTable[depth][bits];
 }
 
 

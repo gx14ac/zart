@@ -12,12 +12,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true, 
     });
-    lib.installHeader(b.path("src/bart.h"), "bart.h");
     b.installArtifact(lib);
 
     // Main executable
     const exe = b.addExecutable(.{
-        .name = "zart",
+        .name = "ZART",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -85,36 +84,6 @@ pub fn build(b: *std.Build) void {
     const test_unit_step = b.step("test", "Run unit tests");
     test_unit_step.dependOn(&run_lib_unit_tests.step);
 
-    // Advanced benchmarks
-    const advanced_bench = b.addExecutable(.{
-        .name = "advanced_bench",
-        .root_source_file = b.path("src/advanced_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(advanced_bench);
-
-    const advanced_bench_cmd = b.addRunArtifact(advanced_bench);
-    advanced_bench_cmd.step.dependOn(b.getInstallStep());
-
-    const advanced_bench_step = b.step("advanced-bench", "Run advanced benchmarks");
-    advanced_bench_step.dependOn(&advanced_bench_cmd.step);
-
-    // vs Go benchmark
-    const vs_go_bench = b.addExecutable(.{
-        .name = "vs_go_benchmark",
-        .root_source_file = b.path("src/vs_go_benchmark.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(vs_go_bench);
-
-    const vs_go_bench_cmd = b.addRunArtifact(vs_go_bench);
-    vs_go_bench_cmd.step.dependOn(b.getInstallStep());
-
-    const vs_go_bench_step = b.step("vs-go", "Run Go vs Zig comparison benchmarks");
-    vs_go_bench_step.dependOn(&vs_go_bench_cmd.step);
-
     // Bitset tests
     const bitset_tests = b.addTest(.{
         .root_source_file = b.path("src/bitset256.zig"),
@@ -134,4 +103,14 @@ pub fn build(b: *std.Build) void {
 
     const run_lookup_tests = b.addRunArtifact(lookup_tests);
     test_unit_step.dependOn(&run_lookup_tests.step);
+
+    // Sparse array tests
+    const sparse_tests = b.addTest(.{
+        .root_source_file = b.path("src/sparse_array256.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_sparse_tests = b.addRunArtifact(sparse_tests);
+    test_unit_step.dependOn(&run_sparse_tests.step);
 }

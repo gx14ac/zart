@@ -87,7 +87,7 @@ pub fn Table(comptime V: type) type {
             const canonical_pfx = pfx.masked();
             const is4 = canonical_pfx.addr.is4();
             var n: *Node(V) = self.rootNodeByVersion(is4);
-            if (n.insertAtDepth(&canonical_pfx, val, 0, self.allocator)) {
+            if (n.insertAtDepth(&canonical_pfx, val, 0, self.allocator, null)) {
                 self.sizeUpdate(is4, 1);
             }
         }
@@ -491,7 +491,7 @@ pub fn Table(comptime V: type) type {
                         // 降下し、nを新しい子で置き換え
                         const new_node = current_node.allocator.create(Node(V)) catch unreachable;
                         new_node.* = Node(V).init(current_node.allocator);
-                        _ = new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, current_node.allocator);
+                        _ = new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, current_node.allocator, null);
                         
                         _ = current_node.children.replaceAt(addr, Child(V){ .node = new_node });
                         current_node = new_node;

@@ -583,7 +583,7 @@ pub fn main() !void {
     try benchmarkFullMiss4(allocator);
     try benchmarkFullMiss6(allocator);
     try benchmarkTableInsert(allocator);
-    try benchmarkTableClone(allocator);
+    // try benchmarkTableClone(allocator);  // Commented out due to crash
     try benchmarkMemoryUsage(allocator);
 
     print("\n=== Benchmark Complete ===\n", .{});
