@@ -84,6 +84,101 @@ pub fn Node(comptime V: type) type {
             return ((depth + 1) * 8) == bits;
         }
         
+        /// ultraFastInsertAtDepth implements Go BART-style ultra-fast insertion
+        /// Target: 5-10 ns/op (vs Go BART 10-15 ns/op, current 310-320 ns/op)
+        /// Direct port of Go BART's simple and efficient insertion algorithm
+        pub fn ultraFastInsertAtDepth(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator, _: ?*anyopaque) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth = bits >> 3; // bits / 8 - fastest division
+            const last_bits = @as(u8, @intCast(bits & 7)); // bits % 8 - bitwise AND
+            
+            var current_depth = depth;
+            var current_node = self;
+            
+            // Go BART style: simple loop over octets
+            while (current_depth < octets.len) : (current_depth += 1) {
+                const octet = octets[current_depth];
+                
+                // Last masked octet: insert/override prefix/val into node
+                if (current_depth == max_depth) {
+                    const idx = base_index.pfxToIdx256(octet, last_bits);
+                    return current_node.prefixes.insertAt(idx, val);
+                }
+                
+                // Reached end of trie path ...
+                if (!current_node.children.isSet(octet)) {
+                    // Insert prefix path compressed as leaf or fringe
+                    if (base_index.isFringe(current_depth, bits)) {
+                        return current_node.children.insertAt(octet, Child(V){ .fringe = FringeNode(V).init(val) });
+                    }
+                    return current_node.children.insertAt(octet, Child(V){ .leaf = LeafNode(V).init(pfx.*, val) });
+                }
+                
+                // ... or descend down the trie
+                const kid = current_node.children.mustGet(octet);
+                
+                // Kid is node or leaf at octet
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        continue; // Descend down to next trie level
+                    },
+                    .leaf => |leaf| {
+                        // Reached a path compressed prefix
+                        // Override value in slot if prefixes are equal
+                        if (leaf.prefix.eql(pfx.*)) {
+                            const new_leaf = Child(V){ .leaf = LeafNode(V).init(pfx.*, val) };
+                            _ = current_node.children.replaceAt(octet, new_leaf);
+                            return false; // Existing value overwritten
+                        }
+                        
+                        // Create new node - Go BART style
+                        // Push the leaf down
+                        // Insert new child at current leaf position (octet)
+                        // Descend down, replace current_node with new child
+                        const new_node = allocator.create(Self) catch unreachable;
+                        new_node.* = Self{
+                            .children = Array256(Child(V)).init(allocator),
+                            .prefixes = Array256(V).init(allocator),
+                            .allocator = allocator,
+                        };
+                        _ = new_node.ultraFastInsertAtDepth(&leaf.prefix, leaf.value, current_depth + 1, allocator, null);
+                        
+                        _ = current_node.children.replaceAt(octet, Child(V){ .node = new_node });
+                        current_node = new_node;
+                    },
+                    .fringe => |fringe| {
+                        // Reached a path compressed fringe
+                        // Override value in slot if pfx is a fringe
+                        if (base_index.isFringe(current_depth, bits)) {
+                            const new_fringe = Child(V){ .fringe = FringeNode(V).init(val) };
+                            _ = current_node.children.replaceAt(octet, new_fringe);
+                            return false; // Existing value overwritten
+                        }
+                        
+                        // Create new node - Go BART style
+                        // Push the fringe down, it becomes a default route (idx=1)
+                        // Insert new child at current leaf position (octet)
+                        // Descend down, replace current_node with new child
+                        const new_node = allocator.create(Self) catch unreachable;
+                        new_node.* = Self{
+                            .children = Array256(Child(V)).init(allocator),
+                            .prefixes = Array256(V).init(allocator),
+                            .allocator = allocator,
+                        };
+                        _ = new_node.prefixes.insertAt(1, fringe.value);
+                        
+                        _ = current_node.children.replaceAt(octet, Child(V){ .node = new_node });
+                        current_node = new_node;
+                    },
+                }
+            }
+            
+            unreachable; // Should never reach here in valid code path
+        }
+        
         /// insertAtDepth implements extreme optimization for Go BART level performance.
         /// Target: 10-13 ns/op through aggressive Zig optimizations
         /// Based on Go BART implementation with Zig-specific enhancements

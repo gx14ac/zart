@@ -169,7 +169,8 @@ pub const isFringeLookupTable = blk: {
         for (0..256) |bits| {
             const max_depth = bits / 8;
             const last_bits = bits % 8;
-            table[depth][bits] = (depth == max_depth - 1) and (last_bits == 0);
+            // Fix overflow: check max_depth > 0 before subtraction
+            table[depth][bits] = (max_depth > 0) and (depth == max_depth - 1) and (last_bits == 0);
         }
     }
     

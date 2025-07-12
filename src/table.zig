@@ -87,7 +87,7 @@ pub fn Table(comptime V: type) type {
             const canonical_pfx = pfx.masked();
             const is4 = canonical_pfx.addr.is4();
             var n: *Node(V) = self.rootNodeByVersion(is4);
-            if (n.insertAtDepth(&canonical_pfx, val, 0, self.allocator, null)) {
+            if (n.ultraFastInsertAtDepth(&canonical_pfx, val, 0, self.allocator, null)) {
                 self.sizeUpdate(is4, 1);
             }
         }
