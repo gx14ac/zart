@@ -4,6 +4,13 @@ const Table = @import("table.zig").Table;
 const Prefix = node.Prefix;
 const IPAddr = node.IPAddr;
 
+pub fn main() !void {
+    std.log.info("Running basic tests...", .{});
+    // This is just a placeholder main function
+    // All the actual tests are in the test blocks below
+    std.log.info("Basic test file - use 'zig test' to run tests", .{});
+}
+
 test "Basic operations" {
     const allocator = std.testing.allocator;
     var table = Table(u32).init(allocator);

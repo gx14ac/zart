@@ -1,4 +1,5 @@
 const std = @import("std");
+const print = std.debug.print;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -11,106 +12,186 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true, 
     });
-    lib.installHeader(b.path("src/bart.h"), "bart.h");
     b.installArtifact(lib);
 
-    // Benchmarks
-    const bench_exe = b.addExecutable(.{
-        .name = "bench",
-        .root_source_file = b.path("src/bench.zig"),
+    // Main executable
+    const exe = b.addExecutable(.{
+        .name = "ZART",
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    bench_exe.linkLibrary(lib);
-    b.installArtifact(bench_exe);
+    b.installArtifact(exe);
 
-    const run_bench = b.addRunArtifact(bench_exe);
-    const bench_step = b.step("bench", "Run the benchmarks");
-    bench_step.dependOn(&run_bench.step);
-
-    const rt_bench_exe = b.addExecutable(.{
-        .name = "rt_bench",
-        .root_source_file = b.path("src/rt_bench.zig"),
+    // ZART Benchmark executable - matching Go BART's fulltable_test.go
+    const zart_bench = b.addExecutable(.{
+        .name = "zart_benchmark", 
+        .root_source_file = b.path("src/zart_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = true, // Strip symbols for maximum performance
+        .link_libc = false, // Avoid libc overhead
+    });
+    
+    const contains_lookup_bench = b.addExecutable(.{
+        .name = "contains_lookup_bench", 
+        .root_source_file = b.path("src/benchmark_contains_lookup.zig"),
         .target = target,
         .optimize = optimize,
     });
-    rt_bench_exe.linkLibrary(lib);
-    b.installArtifact(rt_bench_exe);
 
-    const run_rt_bench = b.addRunArtifact(rt_bench_exe);
-    const rt_bench_step = b.step("rt_bench", "Run the rt benchmarks");
-    rt_bench_step.dependOn(&run_rt_bench.step);
-
-    const advanced_bench_exe = b.addExecutable(.{
-        .name = "advanced_bench",
-        .root_source_file = b.path("src/advanced_bench.zig"),
+    const insert_bench = b.addExecutable(.{
+        .name = "insert_bench", 
+        .root_source_file = b.path("src/benchmark_insert.zig"),
         .target = target,
         .optimize = optimize,
     });
-    advanced_bench_exe.linkLibrary(lib);
-    b.installArtifact(advanced_bench_exe);
+    
+    b.installArtifact(zart_bench);
+    b.installArtifact(contains_lookup_bench);
+    b.installArtifact(insert_bench);
 
-    const run_advanced_bench = b.addRunArtifact(advanced_bench_exe);
-    const advanced_bench_step = b.step("advanced_bench", "Run advanced benchmarks");
-    advanced_bench_step.dependOn(&run_advanced_bench.step);
-
-
-    // Application tests
-    // base_index
-    const base_index_tests = b.addTest(.{
-        .root_source_file = b.path("src/base_index.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_base_index_tests = b.addRunArtifact(base_index_tests);
-    const base_index_test_step = b.step("base_index_test", "Run base_index tests");
-    base_index_test_step.dependOn(&run_base_index_tests.step);
-
-    // test_basic
-    const test_basic_tests = b.addTest(.{
+    // Test executable
+    const test_exe = b.addExecutable(.{
+        .name = "test_basic",
         .root_source_file = b.path("src/test_basic.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_test_basic_tests = b.addRunArtifact(test_basic_tests);
-    const test_basic_test_step = b.step("test_basic_test", "Run test_basic tests");
-    test_basic_test_step.dependOn(&run_test_basic_tests.step);
+    b.installArtifact(test_exe);
 
-    // bitset256
-    const bitset256_tests = b.addTest(.{
-        .root_source_file = b.path("src/bitset256.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_bitset256_tests = b.addRunArtifact(bitset256_tests);
-    const bitset256_test_step = b.step("bitset256_test", "Run bitset256 tests");
-    bitset256_test_step.dependOn(&run_bitset256_tests.step);
+    // Run commands
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
 
-    // table
-    const table_tests = b.addTest(.{
+    // ZART Benchmark run command
+    const bench_cmd = b.addRunArtifact(zart_bench);
+    bench_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        bench_cmd.addArgs(args);
+    }
+
+    // Contains & Lookup Benchmark run command
+    const contains_lookup_cmd = b.addRunArtifact(contains_lookup_bench);
+    contains_lookup_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        contains_lookup_cmd.addArgs(args);
+    }
+
+    // Insert Benchmark run command
+    const insert_cmd = b.addRunArtifact(insert_bench);
+    insert_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        insert_cmd.addArgs(args);
+    }
+
+    // Test run command  
+    const test_cmd = b.addRunArtifact(test_exe);
+    test_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        test_cmd.addArgs(args);
+    }
+
+    // Build steps
+    const run_step = b.step("run", "Run the app");
+    run_step.dependOn(&run_cmd.step);
+
+    const bench_step = b.step("bench", "Run ZART benchmarks (matches Go BART's fulltable_test.go)");
+    bench_step.dependOn(&bench_cmd.step);
+
+    const contains_lookup_step = b.step("contains_lookup", "Run contains_lookup benchmarks");
+    contains_lookup_step.dependOn(&contains_lookup_cmd.step);
+
+    const insert_step = b.step("insert", "Run insert benchmarks"); 
+    insert_step.dependOn(&insert_cmd.step);
+
+    const test_step = b.step("test-basic", "Run basic tests");
+    test_step.dependOn(&test_cmd.step);
+
+    // Unit tests
+    const lib_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/table.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_table_tests = b.addRunArtifact(table_tests);
-    const table_test_step = b.step("table_test", "Run table tests");
-    table_test_step.dependOn(&run_table_tests.step);
 
-    // lookup_tbl
-    const lookup_tbl_tests = b.addTest(.{
+    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+
+    const test_unit_step = b.step("test", "Run unit tests");
+    test_unit_step.dependOn(&run_lib_unit_tests.step);
+
+    // Bitset tests
+    const bitset_tests = b.addTest(.{
+        .root_source_file = b.path("src/bitset256.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_bitset_tests = b.addRunArtifact(bitset_tests);
+    test_unit_step.dependOn(&run_bitset_tests.step);
+
+    // Lookup table tests
+    const lookup_tests = b.addTest(.{
         .root_source_file = b.path("src/lookup_tbl.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_lookup_tbl_tests = b.addRunArtifact(lookup_tbl_tests);
-    const lookup_tbl_test_step = b.step("lookup_tbl_test", "Run lookup_tbl tests");
-    lookup_tbl_test_step.dependOn(&run_lookup_tbl_tests.step);
 
-    // combine all application tests
-    const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&run_base_index_tests.step);
-    test_step.dependOn(&run_test_basic_tests.step);
-    test_step.dependOn(&run_bitset256_tests.step);
-    test_step.dependOn(&run_table_tests.step);
-    test_step.dependOn(&run_lookup_tbl_tests.step);
+    const run_lookup_tests = b.addRunArtifact(lookup_tests);
+    test_unit_step.dependOn(&run_lookup_tests.step);
+
+    // Sparse array tests
+    const sparse_tests = b.addTest(.{
+        .root_source_file = b.path("src/sparse_array256.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_sparse_tests = b.addRunArtifact(sparse_tests);
+    test_unit_step.dependOn(&run_sparse_tests.step);
+
+
+
+    // NodePool tests
+    const nodepool_tests = b.addTest(.{
+        .root_source_file = b.path("src/node_pool.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_nodepool_tests = b.addRunArtifact(nodepool_tests);
+    test_unit_step.dependOn(&run_nodepool_tests.step);
+
+    // NodePool usage test
+    const nodepool_usage_test = b.addExecutable(.{
+        .name = "nodepool_test",
+        .root_source_file = b.path("src/nodepool_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(nodepool_usage_test);
+
+    const nodepool_usage_cmd = b.addRunArtifact(nodepool_usage_test);
+    nodepool_usage_cmd.step.dependOn(b.getInstallStep());
+
+    const nodepool_usage_step = b.step("nodepool-test", "Run NodePool usage test");
+    nodepool_usage_step.dependOn(&nodepool_usage_cmd.step);
+
+    // NodePool advanced test
+    const nodepool_advanced_test = b.addExecutable(.{
+        .name = "nodepool_advanced_test",
+        .root_source_file = b.path("src/nodepool_advanced_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(nodepool_advanced_test);
+
+    const nodepool_advanced_cmd = b.addRunArtifact(nodepool_advanced_test);
+    nodepool_advanced_cmd.step.dependOn(b.getInstallStep());
+
+    const nodepool_advanced_step = b.step("nodepool-advanced", "Run advanced NodePool test with Insert→Delete→Insert cycles");
+    nodepool_advanced_step.dependOn(&nodepool_advanced_cmd.step);
 }

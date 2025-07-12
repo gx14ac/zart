@@ -1,171 +1,201 @@
 const std = @import("std");
-const bitset256 = @import("bitset256.zig");
+const node = @import("node.zig");
+const Node = node.Node;
+// Phase 4 Rollback: Back to sparse_array256 due to cache miss issues
+const sparse_array256 = @import("sparse_array256.zig");
 
-// Node pool for memory management optimization
-// 
-// Node pool pre-allocates node memory and reuses it to
-// improve memory management efficiency. Main benefits:
-// - Reduce memory allocation calls
-// - Improve memory locality
-// - Better cache efficiency
-// - Prevent memory fragmentation
-
-// Pool configuration
-// - NODE_POOL_SIZE: number of nodes to allocate in pool
-// - NODE_POOL_ALIGN: cache line size (64 bytes for x86_64)
-
-pub const NODE_POOL_SIZE = 1024;
-pub const NODE_POOL_ALIGN = 64;
-
-// Node structure
-// Cache-efficient layout
-pub const Node = struct {
-    // Bitmap (256 bits = 4 * 64 bits)
-    // Aligned to cache line size
-    // Each bit indicates presence of child node
-    bitmap: [4]u64 align(NODE_POOL_ALIGN),
-
-    // Array of pointers to child nodes
-    // Same number of elements as 1s in bitmap
-    children: ?[]*Node,
-
-    // Whether this is a prefix terminal
-    prefix_set: bool,
-
-    // Value when this is a prefix terminal
-    prefix_value: usize,
-
-    // Find child node
-    // 1. Check bit corresponding to key
-    // 2. If bit is 1, return corresponding child node
-    // 3. If bit is 0, return null
-    //
-    // Bitmap structure (4 u64s, total 256 bits)
-    // [0..63] [64..127] [128..191] [192..255]
-    pub fn findChild(self: *const Node, key: u8) ?*Node {
-        // LPM search: return largest child node <= key
-        const idx = bitset256.lpmSearch(&self.bitmap, key);
-        if (idx) |i| {
-            // Calculate child node index
-            var index: usize = 0;
-            const chunk_index: usize = i >> 6;
-            const bit_offset: u6 = @as(u6, @truncate(i & 0x3F));
-            var j: usize = 0;
-            while (j < chunk_index) : (j += 1) {
-                index += @popCount(self.bitmap[j]);
-            }
-            const mask = if (bit_offset == 0) 0 else (~(@as(u64, 1) << bit_offset));
-            index += @popCount(self.bitmap[chunk_index] & mask);
-            return self.children.?[index];
-        }
-        return null;
-    }
-};
-
-// Node pool structure
-// -------------------
-// nodes: pre-allocated array of nodes
-// free_list: array of pointers to unused nodes
-// free_count: number of unused nodes
-pub const NodePool = struct {
-    // Aligned node array
-    // Aligned to cache line size to prevent false sharing
-    nodes: []Node align(NODE_POOL_ALIGN),
-    
-    // Array of pointers to unused nodes
-    // Used as stack for O(1) node allocation/deallocation
-    free_list: []?*Node,
-    
-    // Number of unused nodes
-    // Manages valid elements in free_list
-    free_count: usize,
-
-    // Initialize pool
-    // --------------
-    // 1. Allocate memory for pool itself
-    // 2. Allocate node array (aligned to cache line size)
-    // 3. Initialize free list
-    // 4. Set each node to initial state
-    pub fn init(allocator: std.mem.Allocator) !*NodePool {
-        // Allocate memory for pool itself
-        const pool = try allocator.create(NodePool);
-        errdefer allocator.destroy(pool);
-
-        // Allocate aligned node array
-        pool.nodes = try allocator.alignedAlloc(Node, NODE_POOL_ALIGN, NODE_POOL_SIZE);
-        errdefer allocator.free(pool.nodes);
-
-        // Allocate free list
-        pool.free_list = try allocator.alloc(?*Node, NODE_POOL_SIZE);
-        errdefer allocator.free(pool.free_list);
-
-        // Set initial state
-        pool.free_count = NODE_POOL_SIZE;
-
-        // Initialize free list
-        // Register each node as unused
-        for (0..NODE_POOL_SIZE) |i| {
-            // Initialize node
-            pool.nodes[i] = Node{
-                .bitmap = [_]u64{ 0, 0, 0, 0 },
-                .children = null,
-                .prefix_set = false,
-                .prefix_value = 0,
+/// NodePool - 高速Node確保/解放のためのメモリプール
+/// 内部実装のみ、外部からは見えない
+/// Contains/Lookupには一切影響しない（Insert/Delete専用）
+pub fn NodePool(comptime V: type) type {
+    return struct {
+        const Self = @This();
+        const NodeType = node.Node(V);
+        
+        // 再利用可能Nodeのスタック
+        free_nodes: std.ArrayList(*NodeType),
+        allocator: std.mem.Allocator,
+        
+        // 統計（デバッグ用、リリースでは削除予定）
+        total_allocated: usize,
+        pool_hits: usize,
+        pool_misses: usize,
+        
+        /// 初期化
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return Self{
+                .free_nodes = std.ArrayList(*NodeType).init(allocator),
+                .allocator = allocator,
+                .total_allocated = 0,
+                .pool_hits = 0,
+                .pool_misses = 0,
             };
-            // Add to free list
-            pool.free_list[i] = &pool.nodes[i];
         }
-
-        return pool;
-    }
-
-    // Free pool
-    // -----------
-    // Free all allocated memory
-    pub fn deinit(self: *NodePool, allocator: std.mem.Allocator) void {
-        allocator.free(self.free_list);
-        allocator.free(self.nodes);
-        allocator.destroy(self);
-    }
-
-    // Allocate node
-    // ---------------
-    // 1. Get unused node from free list
-    // 2. Return null if no unused nodes
-    // 3. Mark obtained node as in use
-    pub fn allocate(self: *NodePool) ?*Node {
-        if (self.free_count == 0) return null;
-        self.free_count -= 1;
-        return self.free_list[self.free_count];
-    }
-
-    // Free node
-    // -----------
-    // 1. Return used node to free list
-    // 2. Do nothing if pool is full
-    // Note: node contents not cleared, overwritten on reuse
-    pub fn free(self: *NodePool, node: *Node) void {
-        if (self.free_count >= NODE_POOL_SIZE) return;
-        self.free_list[self.free_count] = node;
-        self.free_count += 1;
-    }
-
-    // Recursively free node
-    // ------------------
-    // 1. Recursively free child nodes
-    // 2. Free child node array
-    // 3. Return node itself to free list
-    pub fn freeNodeRecursive(self: *NodePool, node: *Node) void {
-        if (node.children) |children| {
-            // Recursively free child nodes
-            for (children) |child| {
-                self.freeNodeRecursive(child);
+        
+        /// Node確保（プールから取得 or 新規作成）
+        /// Contains/Lookupには使用されない（Insert/Delete専用）
+        pub fn allocateNode(self: *Self) ?*NodeType {
+            if (self.free_nodes.items.len > 0) {
+                // プールから再利用
+                if (self.free_nodes.pop()) |node_ptr| {
+                    // Phase 3: 安全なリセット - 新しいArray256で完全に置き換え
+                    node_ptr.children.deinit();
+                    node_ptr.prefixes.deinit();
+                    node_ptr.children = sparse_array256.Array256(node.Child(V)).init(self.allocator);
+                    node_ptr.prefixes = sparse_array256.Array256(V).init(self.allocator);
+                    self.pool_hits += 1;
+                    return node_ptr;
+                }
             }
-            // Free child node array
-            std.heap.c_allocator.free(children);
-            node.children = null;
+            
+            // 新規作成
+            const node_ptr = NodeType.init(self.allocator);
+            self.total_allocated += 1;
+            self.pool_misses += 1;
+            return node_ptr;
         }
-        // Return node to free list
-        self.free(node);
+        
+        /// Node解放（プールに返却）
+        /// Contains/Lookupには使用されない（Insert/Delete専用）
+        pub fn releaseNode(self: *Self, node_ptr: *NodeType) !void {
+            // ノードを初期状態にリセット
+            // Phase 3: 安全なリセット - 完全に新しいArray256で置き換え
+            node_ptr.children.deinit();
+            node_ptr.prefixes.deinit();
+            node_ptr.children = sparse_array256.Array256(node.Child(V)).init(self.allocator);
+            node_ptr.prefixes = sparse_array256.Array256(V).init(self.allocator);
+            
+            // プールに返却
+            try self.free_nodes.append(node_ptr);
+        }
+        
+        /// プール統計表示（デバッグ用）
+        pub fn printStats(self: *const Self) void {
+            std.debug.print("NodePool Stats:\n", .{});
+            std.debug.print("  Total allocated: {}\n", .{self.total_allocated});
+            std.debug.print("  Pool hits: {}\n", .{self.pool_hits});
+            std.debug.print("  Pool misses: {}\n", .{self.pool_misses});
+            std.debug.print("  Current pool size: {}\n", .{self.free_nodes.items.len});
+            if (self.pool_hits + self.pool_misses > 0) {
+                const hit_rate = @as(f64, @floatFromInt(self.pool_hits)) / @as(f64, @floatFromInt(self.pool_hits + self.pool_misses)) * 100.0;
+                std.debug.print("  Hit rate: {d:.1}%\n", .{hit_rate});
+            }
+        }
+        
+        /// 終了処理
+        pub fn deinit(self: *Self) void {
+            // プール内の全Nodeを解放
+            for (self.free_nodes.items) |node_ptr| {
+                node_ptr.deinit();
+                self.allocator.destroy(node_ptr);
+            }
+            self.free_nodes.deinit();
+        }
+    };
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+
+test "NodePool basic operations" {
+    const allocator = std.testing.allocator;
+    
+    var pool = NodePool(u32).init(allocator);
+    defer pool.deinit();
+    
+    // Test 1: 新規作成
+    const node1 = pool.allocateNode();
+    try std.testing.expect(pool.total_allocated == 1);
+    try std.testing.expect(pool.pool_misses == 1);
+    try std.testing.expect(pool.pool_hits == 0);
+    
+    // Test 2: プールに返却
+    try pool.releaseNode(node1.?);
+    try std.testing.expect(pool.free_nodes.items.len == 1);
+    
+    // Test 3: プールから再取得
+    const node2 = pool.allocateNode();
+    try std.testing.expect(node1.? == node2.?); // 同じNodeが返却される
+    try std.testing.expect(pool.pool_hits == 1);
+    try std.testing.expect(pool.free_nodes.items.len == 0);
+    
+    // Test 4: 複数Node管理
+    const node3 = pool.allocateNode();
+    try std.testing.expect(node2.? != node3.?); // 異なるNode
+    try std.testing.expect(pool.total_allocated == 2);
+    
+    // 正常に返却
+    try pool.releaseNode(node2.?);
+    try pool.releaseNode(node3.?);
+    
+    std.debug.print("✅ NodePool basic operations test passed!\n", .{});
+}
+
+test "NodePool reset functionality" {
+    const allocator = std.testing.allocator;
+    
+    var pool = NodePool(u32).init(allocator);
+    defer pool.deinit();
+    
+    // ノードを取得してデータを設定
+    const node_ptr = pool.allocateNode();
+    
+    // TODO: ノードにテストデータを設定（Node.reset()実装後）
+    // 現在はNode.reset()が未実装なので、基本的な確認のみ
+    
+    // プールに返却
+    try pool.releaseNode(node_ptr.?);
+    
+    // 再取得して初期状態であることを確認
+    const node_ptr2 = pool.allocateNode();
+    try std.testing.expect(node_ptr.? == node_ptr2.?);
+    
+    // 返却
+    try pool.releaseNode(node_ptr2.?);
+    
+    std.debug.print("✅ NodePool reset functionality test passed!\n", .{});
+}
+
+test "NodePool performance characteristics" {
+    const allocator = std.testing.allocator;
+    
+    var pool = NodePool(u32).init(allocator);
+    defer pool.deinit();
+    
+    const iterations = 1000;
+    var nodes: [iterations]*node.Node(u32) = undefined;
+    
+    // 大量確保
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        nodes[i] = pool.allocateNode().?;
     }
-}; 
+    
+    // 大量返却
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        try pool.releaseNode(nodes[i]);
+    }
+    
+    // プールサイズ確認
+    try std.testing.expect(pool.free_nodes.items.len == iterations);
+    
+    // 再確保（すべてプールヒット）
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        nodes[i] = pool.allocateNode().?;
+    }
+    
+    // ヒット率確認
+    try std.testing.expect(pool.pool_hits == iterations);
+    
+    // 最終返却
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        try pool.releaseNode(nodes[i]);
+    }
+    
+    pool.printStats();
+    std.debug.print("✅ NodePool performance characteristics test passed!\n", .{});
+} 

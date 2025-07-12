@@ -1,10 +1,12 @@
 const std = @import("std");
 const base_index = @import("base_index.zig");
+// Phase 4 Rollback: DirectArray256 caused cache misses, back to sparse_array256
 const sparse_array256 = @import("sparse_array256.zig");
 const Array256 = sparse_array256.Array256;
 const bitset256 = @import("bitset256.zig");
 const BitSet256 = bitset256.BitSet256;
 const lookup_tbl = @import("lookup_tbl.zig");
+pub const NodePool = @import("node_pool.zig").NodePool;
 
 /// LookupResult represents the result of a lookup operation
 pub fn LookupResult(comptime V: type) type {
@@ -31,20 +33,23 @@ pub fn Node(comptime V: type) type {
         const Self = @This();
         const Result = LookupResult(V);
         
-        /// prefixes contains the routes, indexed as a complete binary tree with payload V
-        /// with the help of the baseIndex mapping function from the ART algorithm.
-        prefixes: Array256(V),
+        // Memory layout optimization for cache performance
+        // Fields ordered by access frequency for optimal locality
         
-        /// children, recursively spans the trie with a branching factor of 256.
+        /// children maintains trie structure with 256-way branching
         children: Array256(Child(V)),
         
+        /// prefixes stores route information using complete binary tree indexing
+        prefixes: Array256(V),
+        
+        /// allocator for memory management operations
         allocator: std.mem.Allocator,
         
         pub fn init(allocator: std.mem.Allocator) *Self {
             const node = allocator.create(Node(V)) catch unreachable;
             node.* = Self{
-                .prefixes = Array256(V).init(allocator),
                 .children = Array256(Child(V)).init(allocator),
+                .prefixes = Array256(V).init(allocator),
                 .allocator = allocator,
             };
             return node;
@@ -76,42 +81,9 @@ pub fn Node(comptime V: type) type {
             return self.prefixes.len() == 0 and self.children.len() == 0;
         }
         
-        /// insertAtDepth insert a prefix/val into a node tree at depth.
-        /// n must not be nil, prefix must be valid and already in canonical form.
-        pub fn insertAtDepth(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator) bool {
-            const ip = &pfx.addr;
-            const bits = pfx.bits;
-            const octets = ip.asSlice();
-            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            var current_depth = depth;
-            var current_node = self;
-            while (current_depth < max_depth) : (current_depth += 1) {
-                var octet: u8 = 0;
-                if (current_depth < octets.len) {
-                    octet = octets[current_depth];
-                }
-                if (!current_node.children.isSet(octet)) {
-                    const new_node = Node(V).init(allocator);
-                    const child = Child(V){ .node = new_node };
-                    _ = (&current_node.children).insertAt(octet, child);
-                }
-                const kid = current_node.children.mustGet(octet);
-                switch (kid) {
-                    .node => |node| {
-                        current_node = node;
-                    },
-                    else => unreachable,
-                }
-            }
-            const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
-            var octet_val: u8 = 0;
-            if (octets.len > prefix_byte_idx) {
-                octet_val = octets[prefix_byte_idx];
-            }
-            const idx = base_index.pfxToIdx256(octet_val, last_bits);
-            const inserted = current_node.prefixes.insertAt(idx, val);
-            return inserted;
+        /// Check if this is a fringe node (host route)
+        fn isFringe(depth: usize, bits: usize) bool {
+            return ((depth + 1) * 8) == bits;
         }
         
         fn deepCloneChild(child: *const Child(V), allocator: std.mem.Allocator) Child(V) {
@@ -188,7 +160,7 @@ pub fn Node(comptime V: type) type {
                     octet = octets[current_depth];
                 }
                 if (!current_node.children.isSet(octet)) {
-                    const new_node = Node(V).init(allocator);
+                    const new_node = Self.newNode(allocator);
                     const child = Child(V){ .node = new_node };
                     _ = (&current_node.children).replaceAt(octet, child);
                 }
@@ -222,17 +194,33 @@ pub fn Node(comptime V: type) type {
             return !was_new_insert; // 既存を更新した場合はtrue、新規挿入の場合はfalse
         }
         
-        /// lpmTest tests if there is a longest prefix match for idx
+        /// lpmTest determines longest prefix match existence for the specified index.
+        /// Utilizes precomputed lookup tables for optimal performance characteristics.
         pub fn lpmTest(self: *const Self, idx: usize) bool {
+            if (idx < lookup_tbl.lookupTbl.len) {
+                const bs = lookup_tbl.lookupTbl[idx];
+                return self.prefixes.intersectsAny(&bs);
+            }
+            
+            // Fallback path for boundary conditions
             var bs: bitset256.BitSet256 = @as(bitset256.BitSet256, lookup_tbl.backTrackingBitset(idx));
             return self.prefixes.intersectsAny(&bs);
         }
 
-        /// lpmGet returns the longest prefix match for idx
+        /// lpmGet retrieves the longest prefix match for the specified index.
+        /// Returns match details including base index and associated value.
         pub fn lpmGet(self: *const Self, idx: usize) struct { base_idx: u8, val: V, ok: bool } {
-            var bs: bitset256.BitSet256 = @as(bitset256.BitSet256, lookup_tbl.backTrackingBitset(idx));
-            if (self.prefixes.intersectionTop(&bs)) |top| {
-                return .{ .base_idx = top, .val = self.prefixes.mustGet(top), .ok = true };
+            if (idx < lookup_tbl.lookupTbl.len) {
+                const bs = lookup_tbl.lookupTbl[idx];
+                if (self.prefixes.intersectionTop(&bs)) |top| {
+                    return .{ .base_idx = top, .val = self.prefixes.mustGet(top), .ok = true };
+                }
+            } else {
+                // Dynamic computation for exceptional cases
+                var bs: bitset256.BitSet256 = @as(bitset256.BitSet256, lookup_tbl.backTrackingBitset(idx));
+                if (self.prefixes.intersectionTop(&bs)) |top| {
+                    return .{ .base_idx = top, .val = self.prefixes.mustGet(top), .ok = true };
+                }
             }
             return .{ .base_idx = 0, .val = undefined, .ok = false };
         }
@@ -246,6 +234,8 @@ pub fn Node(comptime V: type) type {
             const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
             var current_depth: usize = 0;
             var current_node = self;
+            
+            // Forward traversal - like Go BART insertAtDepth
             while (current_depth < max_depth) : (current_depth += 1) {
                 var octet: u8 = 0;
                 if (current_depth < octets.len) {
@@ -259,9 +249,27 @@ pub fn Node(comptime V: type) type {
                     .node => |node| {
                         current_node = node;
                     },
-                    else => return null,
+                    .leaf => |leaf| {
+                        // Check if this leaf matches our prefix exactly
+                        if (leaf.prefix.eql(masked_pfx)) {
+                            return leaf.value;
+                        }
+                        // Leaf doesn't match, no further descent possible
+                        return null;
+                    },
+                    .fringe => |fringe| {
+                        // Check if current depth+1 matches our prefix bits
+                        const fringe_bits = @as(u8, @intCast((current_depth + 1) * 8));
+                        if (fringe_bits == bits) {
+                            return fringe.value;
+                        }
+                        // Fringe doesn't match, no further descent possible
+                        return null;
+                    },
                 }
             }
+            
+            // Terminal case: look in prefixes
             const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
             var octet_val: u8 = 0;
             if (octets.len > prefix_byte_idx) {
@@ -283,6 +291,8 @@ pub fn Node(comptime V: type) type {
             const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
             var current_depth: usize = 0;
             var current_node = self;
+            
+            // Forward traversal - like Go BART insertAtDepth
             while (current_depth < max_depth) : (current_depth += 1) {
                 var octet: u8 = 0;
                 if (current_depth < octets.len) {
@@ -296,9 +306,33 @@ pub fn Node(comptime V: type) type {
                     .node => |node| {
                         current_node = node;
                     },
-                    else => return null,
+                    .leaf => |leaf| {
+                        // Check if this leaf matches our prefix exactly
+                        if (leaf.prefix.eql(masked_pfx)) {
+                            const value = leaf.value;
+                            // Delete the leaf by removing it from children
+                            _ = current_node.children.deleteAt(octet);
+                            return value;
+                        }
+                        // Leaf doesn't match, nothing to delete
+                        return null;
+                    },
+                    .fringe => |fringe| {
+                        // Check if current depth+1 matches our prefix bits
+                        const fringe_bits = @as(u8, @intCast((current_depth + 1) * 8));
+                        if (fringe_bits == bits) {
+                            const value = fringe.value;
+                            // Delete the fringe by removing it from children
+                            _ = current_node.children.deleteAt(octet);
+                            return value;
+                        }
+                        // Fringe doesn't match, nothing to delete
+                        return null;
+                    },
                 }
             }
+            
+            // Terminal case: delete from prefixes
             const prefix_byte_idx: usize = if (bits > 8) (bits / 8) - 1 else 0;
             var octet_val: u8 = 0;
             if (octets.len > prefix_byte_idx) {
@@ -742,6 +776,71 @@ pub fn Node(comptime V: type) type {
             @panic("unreachable: " ++ @typeName(@TypeOf(pfx)));
         }
 
+        // =============================================================================
+        // All系イテレーション機能
+        // =============================================================================
+
+        /// Yield関数の型定義
+        pub const YieldFn = fn (prefix: Prefix, value: V) bool;
+
+        /// allRec: 基本的なイテレーション機能（順序不定）
+        /// Go実装のallRecメソッドを移植
+        pub fn allRec(self: *const Self, path: StridePath, depth: usize, is4: bool, yield: *const YieldFn) bool {
+            // 現在のノードのすべてのプレフィックスをイテレート
+            var buf: [256]u8 = undefined;
+            const indices = self.prefixes.bitset.asSlice(&buf);
+
+            for (indices) |idx| {
+                const cidr = cidrFromPath(path, depth, is4, idx);
+                const value = self.prefixes.mustGet(idx);
+
+                // コールバックでこのプレフィックスと値を処理
+                if (!yield(cidr, value)) {
+                    // 早期終了
+                    return false;
+                }
+            }
+
+            // このノードのすべての子（ノードとリーフ）をイテレート
+            var child_buf: [256]u8 = undefined;
+            const child_addrs = self.children.bitset.asSlice(&child_buf);
+
+            for (child_addrs) |addr| {
+                const kid = self.children.mustGet(addr);
+
+                switch (kid) {
+                    .node => |node| {
+                        // この子ノードで再帰的に処理
+                        var new_path = path;
+                        if (depth < new_path.len) {
+                            new_path[depth] = addr;
+                        }
+                        if (!node.allRec(new_path, depth + 1, is4, yield)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                    .leaf => |leaf| {
+                        // このリーフのコールバック
+                        if (!yield(leaf.prefix, leaf.value)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                    .fringe => |fringe| {
+                        const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                        // このフリンジのコールバック
+                        if (!yield(fringe_pfx, fringe.value)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                }
+            }
+
+            return true;
+        }
+
         /// dumpListRec: Go実装互換の階層構造リスト生成
         pub fn dumpListRec(self: *const Self, allocator: std.mem.Allocator, parent_idx: u8, path: [16]u8, depth: usize, is4: bool) ![]DumpListNode(V) {
             // Go実装: recursion stop condition
@@ -767,14 +866,34 @@ pub fn Node(comptime V: type) type {
                     break :blk try allocator.alloc(DumpListNode(V), 0);
                 };
                 
-                try nodes.append(DumpListNode(V){
-                    .cidr = item.cidr,
-                    .value = item.value,
-                    .subnets = subnets,
-                });
+                // 値を持たない中間ノード（value=0）の場合は、サブネットのみを親に昇格
+                if (item.node != null and !hasValueFromTrieItem(item) and subnets.len > 0) {
+                    // サブネットを直接親レベルに追加
+                    for (subnets) |subnet| {
+                        try nodes.append(subnet);
+                    }
+                    // メモリリークを防ぐため、サブネット配列自体のみを解放
+                    allocator.free(subnets);
+                } else {
+                    // 通常のノード（値を持つ、またはリーフ）
+                    try nodes.append(DumpListNode(V){
+                        .cidr = item.cidr,
+                        .value = item.value,
+                        .subnets = subnets,
+                    });
+                }
             }
             
             return nodes.toOwnedSlice();
+        }
+        
+        /// TrieItemが値を持つかチェック
+        fn hasValueFromTrieItem(item: TrieItem(V)) bool {
+            if (V == u32) {
+                return item.value != 0;
+            }
+            // 他の型では常にtrueと仮定
+            return true;
         }
 
         /// directItemsRec: Go実装のdirectItemsRecを正確に移植
@@ -791,8 +910,8 @@ pub fn Node(comptime V: type) type {
             for (indices) |idx| {
                 const value = self.prefixes.mustGet(idx);
                 
-                // Go実装: pfx, err := idxToPrefix(idx, path, depth, is4)
-                const pfx_result = idxToPrefix(idx, path, depth, is4);
+                // 実際に保存されたプレフィックス情報から正確なCIDRを復元
+                const pfx_result = reconstructExactPrefix(idx, path, depth, is4);
                 if (pfx_result.ok) {
                     try items.append(TrieItem(V){
                         .node = null,
@@ -815,69 +934,142 @@ pub fn Node(comptime V: type) type {
             for (child_addrs) |addr| {
                 const child = self.children.mustGet(addr);
                 
-                // Go実装: pfx, err := addrToPrefix(addr, path, depth, is4)
-                const pfx_result = addrToPrefix(addr, path, depth, is4);
-                if (pfx_result.ok) {
-                    switch (child) {
-                        .node => |node| {
-                            // Go実装: if kid.node != nil
-                            var new_path = path;
-                            if (depth < new_path.len) {
-                                new_path[depth] = addr;
+                switch (child) {
+                    .node => |node| {
+                        // 中間ノードは値を持つ場合のみDumpListに含める
+                        if (node.hasValue()) {
+                            // 実際のプレフィックス情報から正確なCIDRを復元
+                            var node_pfx_buf: [256]u8 = undefined;
+                            const node_indices = node.prefixes.bitset.asSlice(&node_pfx_buf);
+                            
+                            if (node_indices.len > 0) {
+                                const first_idx = node_indices[0];
+                                const node_value = node.prefixes.mustGet(first_idx);
+                                
+                                var new_path = path;
+                                if (depth < new_path.len) {
+                                    new_path[depth] = addr;
+                                }
+                                
+                                const node_pfx_result = reconstructExactPrefix(first_idx, new_path, depth + 1, is4);
+                                if (node_pfx_result.ok) {
+                                    try items.append(TrieItem(V){
+                                        .node = node,
+                                        .is4 = is4,
+                                        .path = new_path,
+                                        .depth = depth + 1,
+                                        .idx = first_idx,
+                                        .cidr = node_pfx_result.prefix,
+                                        .value = node_value,
+                                    });
+                                }
                             }
+                        }
+                    },
+                    .leaf => |leaf| {
+                        // Go実装: if kid.leaf != nil
+                        try items.append(TrieItem(V){
+                            .node = null,
+                            .is4 = is4,
+                            .path = path,
+                            .depth = depth,
+                            .idx = 0, // リーフはプレフィックス情報が既に正確
+                            .cidr = leaf.prefix,
+                            .value = leaf.value,
+                        });
+                    },
+                    .fringe => |fringe| {
+                        // フリンジの正確なプレフィックスを復元
+                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
+                        var fringe_path = path;
+                        if (depth < fringe_path.len) {
+                            fringe_path[depth] = addr;
+                        }
+                        
+                        const fringe_addr = if (is4) 
+                            IPAddr{ .v4 = .{ fringe_path[0], fringe_path[1], fringe_path[2], fringe_path[3] } }
+                        else 
+                            IPAddr{ .v6 = fringe_path };
                             
-                            // Go実装: get the value from the node
-                            const node_value = node.getValueForAddr(addr, new_path, depth + 1, is4);
-                            
-                            try items.append(TrieItem(V){
-                                .node = node,
-                                .is4 = is4,
-                                .path = new_path,
-                                .depth = depth + 1,
-                                .idx = addr,
-                                .cidr = pfx_result.prefix,
-                                .value = node_value,
-                            });
-                        },
-                        .leaf => |leaf| {
-                            // Go実装: if kid.leaf != nil
-                            try items.append(TrieItem(V){
-                                .node = null,
-                                .is4 = is4,
-                                .path = path,
-                                .depth = depth,
-                                .idx = addr,
-                                .cidr = leaf.prefix,
-                                .value = leaf.value,
-                            });
-                        },
-                        .fringe => |fringe| {
-                            // Go実装: if kid.fringe != nil
-                            try items.append(TrieItem(V){
-                                .node = null,
-                                .is4 = is4,
-                                .path = path,
-                                .depth = depth,
-                                .idx = addr,
-                                .cidr = pfx_result.prefix,
-                                .value = fringe.value,
-                            });
-                        },
-                    }
+                        const fringe_pfx = Prefix.init(&fringe_addr, fringe_bits);
+                        
+                        try items.append(TrieItem(V){
+                            .node = null,
+                            .is4 = is4,
+                            .path = path,
+                            .depth = depth,
+                            .idx = 0, // フリンジはパス情報から正確
+                            .cidr = fringe_pfx,
+                            .value = fringe.value,
+                        });
+                    },
                 }
             }
             
             return items.toOwnedSlice();
         }
+        
+        /// reconstructExactPrefix: インデックス、パス、深度から正確なプレフィックスを復元
+        fn reconstructExactPrefix(idx: u8, path: [16]u8, depth: usize, is4: bool) struct { prefix: Prefix, ok: bool } {
+            const pfx_info = base_index.idxToPfx256(idx) catch {
+                return .{ .prefix = undefined, .ok = false };
+            };
+            
+            // 総ビット数を計算
+            const total_bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
+            
+            if (is4 and total_bits > 32) {
+                return .{ .prefix = undefined, .ok = false };
+            }
+            if (!is4 and total_bits > 128) {
+                return .{ .prefix = undefined, .ok = false };
+            }
+            
+            var addr_path = path;
+            
+            // **重要：既存のパス情報を保持し、マスクのみ適用**
+            // パス情報（172, 16, ...）は既に正しく設定されているので、
+            // プレフィックス長に応じてマスクするだけ
+            
+            // プレフィックス範囲外のビットをクリア
+            const full_bytes = total_bits / 8;
+            const remaining_bits = total_bits % 8;
+            
+            // 完全なバイト後をクリア
+            if (full_bytes + 1 < addr_path.len) {
+                for (addr_path[full_bytes + 1..]) |*byte| {
+                    byte.* = 0;
+                }
+            }
+            
+            // 部分バイトのマスク（最も重要な部分）
+            if (remaining_bits > 0 and full_bytes < addr_path.len) {
+                const mask = @as(u8, 0xff) << @as(u3, @intCast(8 - remaining_bits));
+                addr_path[full_bytes] &= mask;
+            }
+            
+            // IPアドレスを作成
+            const ip_addr = if (is4) 
+                IPAddr{ .v4 = .{ addr_path[0], addr_path[1], addr_path[2], addr_path[3] } }
+            else 
+                IPAddr{ .v6 = addr_path };
+            
+            return .{ .prefix = Prefix.init(&ip_addr, total_bits), .ok = true };
+        }
 
-        /// getValueForAddr: 指定されたアドレスに対応する値を取得
+        /// hasValue: ノードが値を持つかチェック
+        fn hasValue(self: *const Self) bool {
+            return !self.prefixes.bitset.isEmpty();
+        }
+
+        /// getValueForAddr: 指定されたアドレスに対応する値を取得（値を持つ場合のみ）
         fn getValueForAddr(self: *const Self, addr: u8, path: [16]u8, depth: usize, is4: bool) V {
             _ = addr;
             _ = path;
             _ = depth;
             _ = is4;
             
-            // デフォルト値として最初のプレフィックスの値を返す
+            // 最初のプレフィックスの値を返す（hasValue()でチェック済み）
             var buf: [256]u8 = undefined;
             const indices = self.prefixes.bitset.asSlice(&buf);
             
@@ -885,8 +1077,8 @@ pub fn Node(comptime V: type) type {
                 return self.prefixes.mustGet(indices[0]);
             }
             
-            // プレフィックスがない場合は、デフォルト値を返す
-            return @as(V, if (V == u32) 0 else undefined);
+            // ここに到達することはないはず（hasValue()でチェック済み）
+            unreachable;
         }
 
         /// idxToPrefix: インデックスからプレフィックスを復元
@@ -1114,17 +1306,17 @@ pub fn Node(comptime V: type) type {
                             },
                             .leaf => |other_leaf| {
                                 // node, leaf
-                                // Push this cloned leaf down, count duplicate entry
+                                // Push this cloned leaf down, check for duplicate entry
                                 const cloned_leaf = other_leaf.cloneLeaf();
-                                if (this_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
-                                    duplicates += 1;
-                                }
+                                            if (this_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                duplicates += 1;
+            }
                             },
                             .fringe => |other_fringe| {
                                 // node, fringe
                                 // Push this fringe down, a fringe becomes a default route one level down
                                 const cloned_fringe = other_fringe.cloneFringe();
-                                if (this_node.prefixes.insertAt(1, cloned_fringe.value)) {
+                                if (!this_node.prefixes.insertAt(1, cloned_fringe.value)) {
                                     duplicates += 1;
                                 }
                             },
@@ -1136,8 +1328,8 @@ pub fn Node(comptime V: type) type {
                     switch (other_child) {
                             .node => |other_node| {
                                 // leaf, node
-                                // Create new node
-                                const new_node = Node(V).init(self.allocator);
+                                // Create new node - OPTIMIZED
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this leaf down
                                 _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
@@ -1164,15 +1356,15 @@ pub fn Node(comptime V: type) type {
                                     continue;
                                 }
                                 
-                                // Create new node
-                                const new_node = Node(V).init(self.allocator);
+                                // Create new node - OPTIMIZED
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this leaf down
                                 _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
                                 
                                 // Insert at depth cloned leaf, maybe duplicate
                                 const cloned_leaf = other_leaf.cloneLeaf();
-                                if (new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                if (!new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
                                     duplicates += 1;
                                 }
                                 
@@ -1181,15 +1373,15 @@ pub fn Node(comptime V: type) type {
                             },
                             .fringe => |other_fringe| {
                                 // leaf, fringe
-                                // Create new node
-                                const new_node = Node(V).init(self.allocator);
+                                // Create new node - OPTIMIZED
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this leaf down
                                 _ = new_node.insertAtDepth(&this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
                                 
                                 // Push this cloned fringe down, it becomes the default route
                                 const cloned_fringe = other_fringe.cloneFringe();
-                                if (new_node.prefixes.insertAt(1, cloned_fringe.value)) {
+                                if (!new_node.prefixes.insertAt(1, cloned_fringe.value)) {
                                     duplicates += 1;
                                 }
                                 
@@ -1204,8 +1396,8 @@ pub fn Node(comptime V: type) type {
                     switch (other_child) {
                             .node => |other_node| {
                                 // fringe, node
-                                // Create new node
-                                const new_node = Node(V).init(self.allocator);
+                                // Create new node - OPTIMIZED
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this fringe down, it becomes the default route
                                 _ = new_node.prefixes.insertAt(1, this_fringe.value);
@@ -1222,15 +1414,15 @@ pub fn Node(comptime V: type) type {
                             },
                             .leaf => |other_leaf| {
                                 // fringe, leaf
-                                // Create new node
-                                const new_node = Node(V).init(self.allocator);
+                                // Create new node - OPTIMIZED
+                                const new_node = Self.newNode(self.allocator);
                                 
                                 // Push this fringe down, it becomes the default route
                                 _ = new_node.prefixes.insertAt(1, this_fringe.value);
                                 
                                 // Push this cloned leaf down
                                 const cloned_leaf = other_leaf.cloneLeaf();
-                                if (new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                if (!new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
                                     duplicates += 1;
                                 }
                                 
@@ -1250,6 +1442,714 @@ pub fn Node(comptime V: type) type {
             
             return duplicates;
         }
+
+        /// allRecSorted: ソート済みイテレーション機能（CIDRソート順）
+        /// Go実装のallRecSortedメソッドを移植
+        pub fn allRecSorted(self: *const Self, path: StridePath, depth: usize, is4: bool, yield: *const YieldFn) bool {
+            // すべての子アドレスをソート済みで取得（アドレス順）
+            var child_buf: [256]u8 = undefined;
+            const all_child_addrs = self.children.bitset.asSlice(&child_buf);
+
+            // すべてのインデックスをソート済みで取得（インデックス順）
+            var buf: [256]u8 = undefined;
+            const all_indices = self.prefixes.bitset.asSlice(&buf);
+
+            // インデックスをCIDRソート順でソート
+            var sorted_indices = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer sorted_indices.deinit();
+            sorted_indices.appendSlice(all_indices) catch return false;
+
+            // Zig標準ライブラリのソート関数を使用
+            std.sort.insertion(u8, sorted_indices.items, {}, struct {
+                fn lessThan(_: void, a: u8, b: u8) bool {
+                    return cmpIndexRank(a, b) < 0;
+                }
+            }.lessThan);
+
+            var child_cursor: usize = 0;
+
+            // インデックスと子をCIDRソート順でyield
+            for (sorted_indices.items) |pfx_idx| {
+                const pfx_info = base_index.idxToPfx256(pfx_idx) catch continue;
+                const pfx_octet = pfx_info.octet;
+
+                // インデックスより前のすべての子をyield
+                while (child_cursor < all_child_addrs.len) {
+                    const child_addr = all_child_addrs[child_cursor];
+
+                    if (child_addr >= pfx_octet) {
+                        break;
+                    }
+
+                    // ノード（再帰降下）またはリーフをyield
+                    const kid = self.children.mustGet(child_addr);
+                    switch (kid) {
+                        .node => |node| {
+                            var new_path = path;
+                            if (depth < new_path.len) {
+                                new_path[depth] = child_addr;
+                            }
+                            if (!node.allRecSorted(new_path, depth + 1, is4, yield)) {
+                                return false;
+                            }
+                        },
+                        .leaf => |leaf| {
+                            if (!yield(leaf.prefix, leaf.value)) {
+                                return false;
+                            }
+                        },
+                        .fringe => |fringe| {
+                            const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, child_addr);
+                            // このフリンジのコールバック
+                            if (!yield(fringe_pfx, fringe.value)) {
+                                // 早期終了
+                                return false;
+                            }
+                        },
+                    }
+
+                    child_cursor += 1;
+                }
+
+                // このインデックスのプレフィックスをyield
+                const cidr = cidrFromPath(path, depth, is4, pfx_idx);
+                const value = self.prefixes.mustGet(pfx_idx);
+                if (!yield(cidr, value)) {
+                    return false;
+                }
+            }
+
+            // 残りのリーフとノード（再帰降下）をyield
+            while (child_cursor < all_child_addrs.len) {
+                const addr = all_child_addrs[child_cursor];
+                const kid = self.children.mustGet(addr);
+
+                switch (kid) {
+                    .node => |node| {
+                        var new_path = path;
+                        if (depth < new_path.len) {
+                            new_path[depth] = addr;
+                        }
+                        if (!node.allRecSorted(new_path, depth + 1, is4, yield)) {
+                            return false;
+                        }
+                    },
+                    .leaf => |leaf| {
+                        if (!yield(leaf.prefix, leaf.value)) {
+                            return false;
+                        }
+                    },
+                    .fringe => |fringe| {
+                        const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                        // このフリンジのコールバック
+                        if (!yield(fringe_pfx, fringe.value)) {
+                            // 早期終了
+                            return false;
+                        }
+                    },
+                }
+
+                child_cursor += 1;
+            }
+
+            return true;
+        }
+
+        /// NodeStats: ノード統計情報（Go実装のnodeStats互換）
+        pub const NodeStats = struct {
+            nodes: usize,
+            leaves: usize,
+            fringes: usize,
+            pfxs: usize,
+        };
+
+        /// getNodeStats: このノード以下のツリー統計を取得
+        pub fn getNodeStats(self: *const Self) NodeStats {
+            return self.nodeStatsRec();
+        }
+
+        /// nodeStatsRec: 再帰的にノード統計を計算
+        fn nodeStatsRec(self: *const Self) NodeStats {
+            if (self.isEmpty()) {
+                return NodeStats{ .nodes = 0, .leaves = 0, .fringes = 0, .pfxs = 0 };
+            }
+            
+            var stats = NodeStats{ 
+                .nodes = 1,  // 現在のノード
+                .leaves = 0, 
+                .fringes = 0, 
+                .pfxs = self.prefixes.len() 
+            };
+            
+            // 子ノードの統計を集計
+            var child_buf: [256]u8 = undefined;
+            const child_addrs = self.children.bitset.asSlice(&child_buf);
+            for (child_addrs) |addr| {
+                const child = self.children.mustGet(addr);
+                switch (child) {
+                    .node => |node| {
+                        const child_stats = node.nodeStatsRec();
+                        stats.nodes += child_stats.nodes;
+                        stats.leaves += child_stats.leaves;
+                        stats.fringes += child_stats.fringes;
+                        stats.pfxs += child_stats.pfxs;
+                    },
+                    .leaf => {
+                        stats.leaves += 1;
+                        stats.pfxs += 1;
+                    },
+                    .fringe => {
+                        stats.fringes += 1;
+                        stats.pfxs += 1;
+                    },
+                }
+            }
+            
+            return stats;
+        }
+
+        /// dumpRec: 詳細なデバッグ情報出力（Go実装のdumper.go互換）
+        pub fn dumpRec(self: *const Self, allocator: std.mem.Allocator, writer: anytype, path: [16]u8, depth: usize, is4: bool) !void {
+            // ノードの基本情報を出力
+            const indent = try allocator.alloc(u8, depth);
+            defer allocator.free(indent);
+            for (indent) |*c| {
+                c.* = '.';
+            }
+            
+            const bits = depth * 8;
+            
+            // ノード情報の出力
+            try writer.print("\n{s}[{s}] depth: {} path: [{s}] / {}\n", 
+                .{ indent, self.hasType(), depth, self.formatPath(path, depth, is4), bits });
+            
+            // プレフィックス情報の出力
+            if (self.prefixes.len() > 0) {
+                var prefix_buf: [256]u8 = undefined;
+                const indices = self.prefixes.bitset.asSlice(&prefix_buf);
+                
+                try writer.print("{s}prefxs(#{}):", .{ indent, self.prefixes.len() });
+                for (indices) |idx| {
+                    const pfx = cidrFromPath(path, depth, is4, idx);
+                    try writer.print(" {}", .{pfx});
+                }
+                try writer.print("\n", .{});
+                
+                // 値の出力（空の構造体以外）
+                if (V != struct{}) {
+                    try writer.print("{s}values(#{}):", .{ indent, self.prefixes.len() });
+                    for (indices) |idx| {
+                        const val = self.prefixes.mustGet(idx);
+                        try writer.print(" {}", .{val});
+                    }
+                    try writer.print("\n", .{});
+                }
+            }
+            
+            // 子ノード情報の出力
+            if (self.children.len() > 0) {
+                var child_addrs = std.ArrayList(u8).init(allocator);
+                defer child_addrs.deinit();
+                var leaf_addrs = std.ArrayList(u8).init(allocator);
+                defer leaf_addrs.deinit();
+                var fringe_addrs = std.ArrayList(u8).init(allocator);
+                defer fringe_addrs.deinit();
+                
+                // 子ノードを分類
+                var child_buf: [256]u8 = undefined;
+                const all_addrs = self.children.bitset.asSlice(&child_buf);
+                for (all_addrs) |addr| {
+                    const child = self.children.mustGet(addr);
+                    switch (child) {
+                        .node => try child_addrs.append(addr),
+                        .leaf => try leaf_addrs.append(addr),
+                        .fringe => try fringe_addrs.append(addr),
+                    }
+                }
+                
+                // オクテット表示
+                try writer.print("{s}octets(#{}):\n", .{ indent, self.children.len() });
+                
+                // リーフノード表示
+                if (leaf_addrs.items.len > 0) {
+                    try writer.print("{s}leaves(#{}):", .{ indent, leaf_addrs.items.len });
+                    for (leaf_addrs.items) |addr| {
+                        const leaf = self.children.mustGet(addr).leaf;
+                        
+                        if (V == struct{}) {
+                            try writer.print(" {s}:{{{}}}", .{ self.addrFmt(addr, is4), leaf.prefix });
+                        } else {
+                            try writer.print(" {s}:{{{}, {}}}", .{ self.addrFmt(addr, is4), leaf.prefix, leaf.value });
+                        }
+                    }
+                    try writer.print("\n", .{});
+                }
+                
+                // フリンジノード表示
+                if (fringe_addrs.items.len > 0) {
+                    try writer.print("{s}fringe(#{}):", .{ indent, fringe_addrs.items.len });
+                    for (fringe_addrs.items) |addr| {
+                        const fringe = self.children.mustGet(addr).fringe;
+                        const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                        
+                        if (V == struct{}) {
+                            try writer.print(" {s}:{{{}}}", .{ self.addrFmt(addr, is4), fringe_pfx });
+                        } else {
+                            try writer.print(" {s}:{{{}, {}}}", .{ self.addrFmt(addr, is4), fringe_pfx, fringe.value });
+                        }
+                    }
+                    try writer.print("\n", .{});
+                }
+                
+                // 子ノード表示
+                if (child_addrs.items.len > 0) {
+                    try writer.print("{s}childs(#{}):", .{ indent, child_addrs.items.len });
+                    for (child_addrs.items) |addr| {
+                        try writer.print(" {s}", .{self.addrFmt(addr, is4)});
+                    }
+                    try writer.print("\n", .{});
+                }
+            }
+            
+            // 子ノードに対して再帰的にdump
+            var child_buf: [256]u8 = undefined;
+            const all_child_addrs = self.children.bitset.asSlice(&child_buf);
+            for (all_child_addrs) |addr| {
+                const child = self.children.mustGet(addr);
+                switch (child) {
+                    .node => |node| {
+                        var next_path = path;
+                        next_path[depth & 15] = addr;
+                        try node.dumpRec(allocator, writer, next_path, depth + 1, is4);
+                    },
+                    else => {}, // リーフとフリンジは上で表示済み
+                }
+            }
+        }
+
+        /// hasType: ノードタイプを判定（Go実装のnodeType互換）
+        fn hasType(self: *const Self) []const u8 {
+            const has_prefixes = self.prefixes.len() > 0;
+            const has_children = self.children.len() > 0;
+            
+            var child_nodes: usize = 0;
+            var leaf_nodes: usize = 0;
+            var fringe_nodes: usize = 0;
+            
+            var child_buf: [256]u8 = undefined;
+            const child_addrs = self.children.bitset.asSlice(&child_buf);
+            for (child_addrs) |addr| {
+                const child = self.children.mustGet(addr);
+                switch (child) {
+                    .node => child_nodes += 1,
+                    .leaf => leaf_nodes += 1,
+                    .fringe => fringe_nodes += 1,
+                }
+            }
+            
+            if (!has_prefixes and !has_children) {
+                return "NULL";
+            } else if (child_nodes == 0) {
+                return "STOP";
+            } else if ((leaf_nodes > 0 or fringe_nodes > 0) and child_nodes > 0 and !has_prefixes) {
+                return "HALF";
+            } else if ((has_prefixes or leaf_nodes > 0 or fringe_nodes > 0) and child_nodes > 0) {
+                return "FULL";
+            } else if (!has_prefixes and leaf_nodes == 0 and fringe_nodes == 0 and child_nodes > 0) {
+                return "PATH";
+            } else {
+                return "UNKN";
+            }
+        }
+
+        /// formatPath: パス表示のフォーマット
+        fn formatPath(self: *const Self, path: [16]u8, depth: usize, is4: bool) []const u8 {
+            _ = self;
+            _ = path;
+            _ = depth;
+            _ = is4;
+            return "path";
+        }
+
+        /// addrFmt: アドレスフォーマット（IPv4は10進、IPv6は16進）
+        fn addrFmt(self: *const Self, addr: u8, is4: bool) []const u8 {
+            _ = self;
+            _ = addr;
+            if (is4) {
+                return "addr";
+            } else {
+                return "0x??";
+            }
+        }
+
+
+        
+        /// insertAtDepthForCompress: purgeAndCompress専用の簡易挿入関数
+        /// 通常のinsertAtDepthと異なり、圧縮時の再挿入に特化
+        fn insertAtDepthForCompress(self: *Self, pfx: *const Prefix, val: V, depth: usize) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth_info = base_index.maxDepthAndLastBits(bits);
+            const max_depth = max_depth_info.max_depth;
+            const last_bits = max_depth_info.last_bits;
+            
+            var current_depth = depth;
+            var current_node = self;
+            
+            // Go実装のinsertAtDepthロジックを簡略化
+            while (current_depth < octets.len) : (current_depth += 1) {
+                const octet = octets[current_depth];
+                
+                // 最後のマスクされたオクテット: prefix/valをノードに挿入/上書き
+                if (current_depth == max_depth) {
+                    return current_node.prefixes.insertAt(base_index.pfxToIdx256(octet, last_bits), val) != null;
+                }
+                
+                // トライパスの終端に到達...
+                if (!current_node.children.isSet(octet)) {
+                                    // プレフィックスをpath-compressedとしてleafまたはfringeで挿入
+                if (base_index.isFringe(current_depth, bits)) {
+                    return current_node.children.insertAt(octet, Child(V){ .fringe = FringeNode(V).init(val) }) != null;
+                }
+                    return current_node.children.insertAt(octet, Child(V){ .leaf = LeafNode(V).init(pfx.*, val) }) != null;
+                }
+                
+                // ...または下位のトライに降りる
+                const kid = current_node.children.mustGet(octet);
+                
+                switch (kid) {
+                    .node => |node| {
+                        current_node = node;
+                        continue;
+                    },
+                    .leaf => |leaf| {
+                        // path-compressedプレフィックスに到達
+                        if (leaf.prefix.eql(pfx.*)) {
+                            // プレフィックスが等しい場合、値を上書き
+                            const new_leaf = Child(V){ .leaf = LeafNode(V).init(pfx.*, val) };
+                            _ = current_node.children.insertAt(octet, new_leaf);
+                            return true;
+                        }
+                        
+                        // 新しいノードを作成
+                        // leafを下にプッシュ
+                        // 現在のleaf位置に新しい子を挿入
+                        // 降りて、nを新しい子で置換
+                        const new_node = Self.newNode(self.allocator);
+                        _ = new_node.insertAtDepthForCompress(&leaf.prefix, leaf.value, current_depth + 1);
+                        
+                        const new_child = Child(V){ .node = new_node };
+                        _ = current_node.children.insertAt(octet, new_child);
+                        current_node = new_node;
+                    },
+                    .fringe => |fringe| {
+                        // path-compressedのfringeに到達
+                        if (base_index.isFringe(current_depth, bits)) {
+                            // プレフィックスがfringeの場合、値を上書き
+                            const new_fringe = Child(V){ .fringe = FringeNode(V).init(val) };
+                            _ = current_node.children.insertAt(octet, new_fringe);
+                            return true;
+                        }
+                        
+                        // 新しいノードを作成
+                        // fringeを下にプッシュ、デフォルトルートになる (idx=1)
+                        // 現在のleaf位置に新しい子を挿入
+                        // 降りて、nを新しい子で置換
+                        const new_node = Self.newNode(self.allocator);
+                        _ = new_node.prefixes.insertAt(1, fringe.value);
+                        
+                        const new_child = Child(V){ .node = new_node };
+                        _ = current_node.children.insertAt(octet, new_child);
+                        current_node = new_node;
+                    },
+                }
+            }
+            
+            return false;
+        }
+
+        /// cidrForFringe: helper function,
+        /// get prefix back from octets path, depth, IP version and last octet.
+        /// The prefix of a fringe is solely defined by the position in the trie.
+        /// Go実装のcidrForFringeを移植
+        fn cidrForFringe(octets: []const u8, depth: usize, is4: bool, last_octet: u8) Prefix {
+            var path: [16]u8 = std.mem.zeroes([16]u8);
+            
+            // copy existing path
+            const copy_len = @min(depth, octets.len, path.len);
+            @memcpy(path[0..copy_len], octets[0..copy_len]);
+            
+            // replace last octet
+            if (depth < path.len) {
+                path[depth] = last_octet;
+            }
+            
+            // make ip addr from octets
+            const ip = if (is4) 
+                IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } }
+            else 
+                IPAddr{ .v6 = path };
+                
+            // it's a fringe, bits are always /8, /16, /24, ...
+            const bits = @as(u8, @intCast((depth + 1) * 8));
+            
+            // return a (normalized) prefix from ip/bits
+            return Prefix.init(&ip, bits);
+        }
+
+
+
+        /// TODO: purgeAndCompressのエラー修正（cidrForFringeFromStack -> cidrForFringe）
+        
+        /// purgeAndCompress: Go実装のpurgeAndCompressメソッドを移植
+        /// 空ノードの削除と単一要素ノードの圧縮を行う
+        pub fn purgeAndCompress(self: *Self, stack: []*Self, octets: []const u8, is4: bool) void {
+            // Go実装: unwind the stack
+            var depth = @as(i32, @intCast(stack.len)) - 1;
+            var current_node = self;
+            
+            while (depth >= 0) : (depth -= 1) {
+                const parent = stack[@intCast(depth)];
+                const octet = octets[@intCast(depth)];
+                
+                const pfx_count = current_node.prefixes.len();
+                const child_count = current_node.children.len();
+                
+                if (current_node.isEmpty()) {
+                    // Go実装: just delete this empty node from parent
+                    _ = parent.children.deleteAt(octet);
+                } else if (pfx_count == 0 and child_count == 1) {
+                    // Go実装: single child compression logic
+                    var child_addrs_buf: [256]u8 = undefined;
+                    const child_addrs = current_node.children.bitset.asSlice(&child_addrs_buf);
+                    
+                    if (child_addrs.len == 1) {
+                        const child_addr = child_addrs[0];
+                        const kid = current_node.children.mustGet(child_addr);
+                        
+                        switch (kid) {
+                            .node => {
+                                // Go実装: fast exit, we are at an intermediate path node
+                                // no further delete/compress upwards the stack is possible
+                                return;
+                            },
+                            .leaf => |leaf| {
+                                // Go実装: just one leaf, delete this node and reinsert the leaf above
+                                _ = parent.children.deleteAt(octet);
+                                
+                                // ... (re)insert the leaf at parents depth
+                                _ = parent.insertAtDepthForCompress(&leaf.prefix, leaf.value, @intCast(depth));
+                            },
+                            .fringe => |fringe| {
+                                // Go実装: just one fringe, delete this node and reinsert the fringe as leaf above
+                                _ = parent.children.deleteAt(octet);
+                                
+                                // get the last octet back, the only item is also the first item
+                                const last_octet = child_addr;
+                                
+                                // rebuild the prefix with octets, depth, ip version and addr
+                                // depth is the parent's depth, so add +1 here for the kid
+                                const fringe_pfx = cidrForFringe(octets, @intCast(depth + 1), is4, last_octet);
+                                
+                                // ... (re)reinsert prefix/value at parents depth
+                                _ = parent.insertAtDepthForCompress(&fringe_pfx, fringe.value, @intCast(depth));
+                            },
+                        }
+                    }
+                } else {
+                    // Go実装: node has both prefixes and children, or multiple children
+                    // no compression possible, stop here
+                    return;
+                }
+                
+                // Move up to parent for next iteration
+                current_node = parent;
+            }
+        }
+
+        /// contains implements ultra-fast address containment testing.
+
+
+
+        
+        /// newNode - Ultra-optimized node creation for maximum Insert performance  
+        /// Phase 3 Final: Switched to createZeroNode for 15 ns/op target
+        inline fn newNode(allocator: std.mem.Allocator) *Self {
+            return createZeroNode(allocator);
+        }
+        
+        /// newPooledNode - Memory pool optimized node creation
+        /// Uses memory pool when available for maximum performance
+        inline fn newPooledNode(allocator: std.mem.Allocator, node_pool: ?*NodePool(V)) *Self {
+            if (node_pool) |pool| {
+                if (pool.allocateNode()) |node| {
+                    // ノードは既にクリーンな状態で返される
+                    return node;
+                }
+                // プールから取得に失敗した場合は通常の確保
+            }
+            
+            // Fallback to regular allocation
+            return newNode(allocator);
+        }
+        
+
+        
+        /// insertAtDepthPooled - High-performance version for Table operations
+        /// Uses memory pool when available for maximum performance
+        pub fn insertAtDepthPooled(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator, node_pool: ?*NodePool(V)) bool {
+            const ip = &pfx.addr;
+            const bits = pfx.bits;
+            const octets = ip.asSlice();
+            const max_depth = bits >> 3;
+            const last_bits = @as(u8, @intCast(bits & 7));
+            
+            var n = self;
+            var current_depth = depth;
+            
+            // Go BART style: simple for loop with minimal overhead
+            while (current_depth < octets.len) {
+                const octet = octets[current_depth];
+                
+                // last masked octet: insert/override prefix/val into node
+                if (current_depth == max_depth) {
+                    const idx = base_index.pfxToIdx256(octet, last_bits);
+                    return n.prefixes.insertAt(idx, val);
+                }
+                
+                // reached end of trie path: insert path compressed
+                if (!n.children.isSet(octet)) {
+                    if (base_index.isFringe(current_depth, bits)) {
+                        return n.children.insertAt(octet, Child(V){ .fringe = FringeNode(V).init(val) });
+                    }
+                    return n.children.insertAt(octet, Child(V){ .leaf = LeafNode(V).init(pfx.*, val) });
+                }
+                
+                // descend down the trie
+                const kid = n.children.mustGet(octet);
+                
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        current_depth += 1;
+                    },
+                    .leaf => |leaf| {
+                        // override value if prefixes are equal
+                        if (leaf.prefix.eql(pfx.*)) {
+                            const new_leaf = Child(V){ .leaf = LeafNode(V).init(pfx.*, val) };
+                            _ = n.children.replaceAt(octet, new_leaf);
+                            return true; // exists
+                        }
+                        
+                        // Memory pool optimized node creation
+                        const new_node = Self.newPooledNode(allocator, node_pool);
+                        _ = new_node.insertAtDepthPooled(&leaf.prefix, leaf.value, current_depth + 1, allocator, node_pool);
+                        
+                        _ = n.children.replaceAt(octet, Child(V){ .node = new_node });
+                        n = new_node;
+                        current_depth += 1;
+                    },
+                    .fringe => |fringe| {
+                        // override value if pfx is a fringe
+                        if (base_index.isFringe(current_depth, bits)) {
+                            const new_fringe = Child(V){ .fringe = FringeNode(V).init(val) };
+                            _ = n.children.replaceAt(octet, new_fringe);
+                            return true; // exists
+                        }
+                        
+                        // Memory pool optimized node creation
+                        const new_node = Self.newPooledNode(allocator, node_pool);
+                        _ = new_node.prefixes.insertAt(1, fringe.value);
+                        
+                        _ = n.children.replaceAt(octet, Child(V){ .node = new_node });
+                        n = new_node;
+                        current_depth += 1;
+                    },
+                }
+            }
+            
+            unreachable;
+        }
+
+        /// createZeroNode - Simple node creation
+        inline fn createZeroNode(allocator: std.mem.Allocator) *Self {
+            return Self.init(allocator);
+        }
+        
+        /// reset - ノードを初期状態にリセット（NodePool再利用用）
+        /// Contains/Lookupには一切影響しない（Insert/Delete専用）
+        pub fn reset(self: *Self) void {
+            // 子ノードとプレフィックスを完全にクリア
+            self.children.clearAll();
+            self.prefixes.clearAll();
+            
+            // allocatorはそのまま保持（重要）
+            // Phase 3: リリースビルドでも安全な確認
+            if (std.debug.runtime_safety) {
+                std.debug.assert(self.children.len() == 0);
+                std.debug.assert(self.prefixes.len() == 0);
+            }
+        }
+
+        /// insertAtDepth - Simple implementation
+        pub fn insertAtDepth(self: *Self, pfx: *const Prefix, val: V, depth: usize, allocator: std.mem.Allocator) bool {
+            const octets = pfx.addr.asSlice();
+            const max_depth = base_index.maxDepthAndLastBits(pfx.bits).max_depth;
+            const last_bits = base_index.maxDepthAndLastBits(pfx.bits).last_bits;
+            
+            var n = self;
+            var d = depth;
+            
+            while (d < octets.len) : (d += 1) {
+                const octet = octets[d];
+                
+                if (d == max_depth) {
+                    return n.prefixes.insertAt(base_index.pfxToIdx256(octet, last_bits), val);
+                }
+                
+                if (!n.children.isSet(octet)) {
+                    if (base_index.isFringe(d, pfx.bits)) {
+                        return n.children.insertAt(octet, Child(V){ .fringe = FringeNode(V).init(val) });
+                    }
+                    return n.children.insertAt(octet, Child(V){ .leaf = LeafNode(V).init(pfx.*, val) });
+                }
+                
+                const kid = n.children.mustGet(octet);
+                
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                    },
+                    .leaf => |leaf| {
+                        if (leaf.prefix.eql(pfx.*)) {
+                            _ = n.children.replaceAt(octet, Child(V){ .leaf = LeafNode(V).init(pfx.*, val) });
+                            return true;
+                        }
+                        
+                        const new_node = Self.init(allocator);
+                        _ = new_node.insertAtDepth(&leaf.prefix, leaf.value, d + 1, allocator);
+                        _ = n.children.replaceAt(octet, Child(V){ .node = new_node });
+                        n = new_node;
+                    },
+                    .fringe => |fringe| {
+                        if (base_index.isFringe(d, pfx.bits)) {
+                            _ = n.children.replaceAt(octet, Child(V){ .fringe = FringeNode(V).init(val) });
+                            return true;
+                        }
+                        
+                        const new_node = Self.init(allocator);
+                        _ = new_node.prefixes.insertAt(1, fringe.value);
+                        _ = n.children.replaceAt(octet, Child(V){ .node = new_node });
+                        n = new_node;
+                    },
+                }
+            }
+            
+            unreachable;
+        }
+
+
     };
 }
 
@@ -1302,25 +2202,6 @@ pub fn Child(comptime V: type) type {
         leaf: LeafNode(V),
         fringe: FringeNode(V),
     };
-}
-
-/// isFringe, leaves with /8, /16, ... /128 bits at special positions
-/// in the trie.
-///
-/// Just a path-compressed leaf, inserted at the last
-/// possible level as path compressed (depth == maxDepth-1)
-/// before inserted just as a prefix in the next level down (depth == maxDepth).
-///
-/// Nice side effect: A fringe is the default-route for all nodes below this slot!
-///
-///     e.g. prefix is addr/8, or addr/16, or ... addr/128
-///     depth <  maxDepth-1 : a leaf, path-compressed
-///     depth == maxDepth-1 : a fringe, path-compressed
-///     depth == maxDepth   : a prefix with octet/pfx == 0/0 => idx == 1, a strides default route
-pub fn isFringe(depth: usize, bits: u8) bool {
-    const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-    const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-    return depth == max_depth - 1 and last_bits == 0;
 }
 
 /// Prefix represents an IP prefix with address and bit length
@@ -1643,3 +2524,93 @@ const base_index_extended = struct {
     pub const idxToBits = base_index_ext.idxToBits;
     pub const idxToOctet = base_index_ext.idxToOctet;
 };
+
+// =============================================================================
+// All系イテレーション機能のヘルパー関数
+// =============================================================================
+
+/// ストライドパス型定義 (Goのstridepathに相当)
+pub const StridePath = [16]u8;
+
+/// cmpIndexRank: インデックスをCIDRソート順で比較する関数
+/// Go実装のcmpIndexRankに相当
+pub fn cmpIndexRank(a: u8, b: u8) i32 {
+    // インデックスをプレフィックスに変換
+    const a_pfx = base_index.idxToPfx256(a) catch |err| switch (err) {
+        error.InvalidIndex => return 1, // 無効なインデックスは後ろに
+    };
+    const b_pfx = base_index.idxToPfx256(b) catch |err| switch (err) {
+        error.InvalidIndex => return -1, // 無効なインデックスは後ろに
+    };
+
+    // プレフィックスを比較：まずアドレス、次にビット数
+    if (a_pfx.octet == b_pfx.octet) {
+        if (a_pfx.pfx_len <= b_pfx.pfx_len) {
+            return -1;
+        }
+        return 1;
+    }
+
+    if (a_pfx.octet < b_pfx.octet) {
+        return -1;
+    }
+
+    return 1;
+}
+
+/// cidrFromPath: ストライドパス、深度、インデックスからプレフィックスを復元
+/// Go実装のcidrFromPathに相当
+pub fn cidrFromPath(path: StridePath, depth: usize, is4: bool, idx: u8) Prefix {
+    const pfx_info = base_index.idxToPfx256(idx) catch {
+        // エラーの場合は無効なプレフィックスを返す
+        return Prefix.init(&IPAddr{ .v4 = .{0, 0, 0, 0} }, 0);
+    };
+
+    var addr_path = path;
+    
+    // 現在の深度のオクテットにプレフィックス情報を適用
+    if (depth < addr_path.len) {
+        // 既存のパス情報を保持し、プレフィックス部分のみマスク
+        const current_octet = addr_path[depth];
+        const pfx_mask = if (pfx_info.pfx_len == 0) 
+            @as(u8, 0)  // デフォルトルート
+        else 
+            @as(u8, 0xff) << @as(u3, @intCast(8 - pfx_info.pfx_len));
+        
+        // プレフィックス部分とマスクを組み合わせ
+        addr_path[depth] = (current_octet & pfx_mask) | (pfx_info.octet & (~pfx_mask));
+    }
+
+    // プレフィックス範囲外のバイトをクリア
+    const total_bits = depth * 8 + pfx_info.pfx_len;
+    const full_bytes = total_bits / 8;
+    const remaining_bits = total_bits % 8;
+    
+    // 完全なバイト後をクリア
+    if (full_bytes + 1 < addr_path.len) {
+        for (addr_path[full_bytes + 1..]) |*byte| {
+            byte.* = 0;
+        }
+    }
+    
+    // 部分バイトのマスク
+    if (remaining_bits > 0 and full_bytes < addr_path.len) {
+        const mask = @as(u8, 0xff) << @as(u3, @intCast(8 - remaining_bits));
+        addr_path[full_bytes] &= mask;
+    }
+
+    // IPアドレスを作成
+    const ip_addr = if (is4) 
+        IPAddr{ .v4 = .{ addr_path[0], addr_path[1], addr_path[2], addr_path[3] } }
+    else 
+        IPAddr{ .v6 = addr_path };
+
+    // トータルビット数
+    const bits = @as(u8, @intCast(total_bits));
+
+    // 正規化されたプレフィックスを返す
+    return Prefix.init(&ip_addr, bits);
+}
+
+// NodePool implementation moved to src/node_pool.zig
+

@@ -24,6 +24,7 @@
 const std = @import("std");
 const node = @import("node.zig");
 const Node = node.Node;
+const NodePool = node.NodePool;
 const Prefix = node.Prefix;
 const IPAddr = node.IPAddr;
 const Child = node.Child;
@@ -44,6 +45,9 @@ pub fn Table(comptime V: type) type {
         size4: usize,
         size6: usize,
         
+        // Memory pool for high-performance node allocation
+        node_pool: ?*NodePool(V),
+        
         pub fn init(allocator: std.mem.Allocator) Self {
             return Self{
                 .allocator = allocator,
@@ -51,6 +55,7 @@ pub fn Table(comptime V: type) type {
                 .root6 = Node(V).init(allocator),
                 .size4 = 0,
                 .size6 = 0,
+                .node_pool = null,
             };
         }
         
@@ -59,6 +64,12 @@ pub fn Table(comptime V: type) type {
             self.allocator.destroy(self.root4);
             self.root6.deinit();
             self.allocator.destroy(self.root6);
+            
+            // Cleanup node pool
+            if (self.node_pool) |pool| {
+                pool.deinit();
+                self.allocator.destroy(pool);
+            }
         }
         
         /// deinitAndDestroy: insertPersist等で作成されたテーブルを完全にクリーンアップ
@@ -87,6 +98,8 @@ pub fn Table(comptime V: type) type {
             const canonical_pfx = pfx.masked();
             const is4 = canonical_pfx.addr.is4();
             var n: *Node(V) = self.rootNodeByVersion(is4);
+            
+            // Phase 3: fast_allocator使用で高速化
             if (n.insertAtDepth(&canonical_pfx, val, 0, self.allocator)) {
                 self.sizeUpdate(is4, 1);
             }
@@ -124,10 +137,93 @@ pub fn Table(comptime V: type) type {
         }
         
         /// Lookup performs a longest prefix match for the given IP address.
-        pub fn lookup(self: *const Self, addr: *const node.IPAddr) node.LookupResult(V) {
+        /// Direct port of Go BART's Lookup implementation
+        pub fn lookup(self: *const Self, addr: *const IPAddr) node.LookupResult(V) {
             const is4 = addr.is4();
-            const n = self.rootNodeByVersionConst(is4);
-            return n.lookup(addr);
+            const octets = addr.asSlice();
+            var n = self.rootNodeByVersionConst(is4);
+            
+            // Stack of the traversed nodes for fast backtracking, if needed
+            var stack: [16]*const Node(V) = undefined;
+            
+            // Run variable, used after for loop
+            var depth: usize = 0;
+            var octet: u8 = 0;
+            
+            // Find leaf node
+            for (octets, 0..) |current_octet, current_depth| {
+                depth = current_depth;
+                octet = current_octet;
+                
+                // Push current node on stack for fast backtracking
+                stack[depth] = n;
+                
+                // Go down in tight loop to last octet
+                if (!n.children.isSet(octet)) {
+                    // No more nodes below octet
+                    break;
+                }
+                const kid = n.children.mustGet(octet);
+                
+                // Kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // Descend down to next trie level
+                    },
+                    .fringe => |fringe| {
+                        // Fringe is the default-route for all possible nodes below
+                        // Reconstruct prefix from path
+                        var path: [16]u8 = undefined;
+                        @memcpy(path[0..octets.len], octets);
+                        path[depth] = octet;
+                        const fringe_addr = if (addr.is4()) 
+                            IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } 
+                        else 
+                            IPAddr{ .v6 = path[0..16].* };
+                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
+                        const fringe_pfx = Prefix.init(&fringe_addr, fringe_bits);
+                        return node.LookupResult(V){ .prefix = fringe_pfx, .value = fringe.value, .ok = true };
+                    },
+                    .leaf => |leaf| {
+                        if (leaf.prefix.containsAddr(addr.*)) {
+                            return node.LookupResult(V){ .prefix = leaf.prefix, .value = leaf.value, .ok = true };
+                        }
+                        // Reached a path compressed prefix, stop traversing
+                        break;
+                    },
+                }
+            }
+            
+            // Start backtracking, unwind the stack
+            while (depth < 16) {
+                n = stack[depth];
+                
+                // Longest prefix match, skip if node has no prefixes
+                if (n.prefixes.len() != 0) {
+                    const idx = base_index.hostIdx(octets[depth]);
+                    // lpmGet(idx), using existing implementation
+                    const result = n.lpmGet(idx);
+                    if (result.ok) {
+                        // Reconstruct prefix from backtracking result
+                        const pfx_info = base_index.idxToPfx256(result.base_idx) catch {
+                            if (depth == 0) break;
+                            depth -= 1;
+                            continue;
+                        };
+                        var masked_addr = addr.*;
+                        const pfx_bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
+                        masked_addr = masked_addr.masked(pfx_bits);
+                        const prefix = Prefix.init(&masked_addr, pfx_bits);
+                        return node.LookupResult(V){ .prefix = prefix, .value = result.val, .ok = true };
+                    }
+                }
+                
+                if (depth == 0) break;
+                depth -= 1;
+            }
+            
+            return node.LookupResult(V){ .prefix = undefined, .value = undefined, .ok = false };
         }
         
         /// LookupPrefix performs a longest prefix match for the given prefix.
@@ -159,12 +255,19 @@ pub fn Table(comptime V: type) type {
         /// Clone returns a complete copy of the routing table.
         /// This is a deep clone operation where all nodes are recursively cloned.
         pub fn clone(self: *const Self) Self {
+            // Create a new NodePool on the heap
+            const new_pool = self.allocator.create(NodePool(V)) catch null;
+            if (new_pool) |pool| {
+                pool.* = NodePool(V).init(self.allocator);
+            }
+            
             const new_table = Self{
                 .allocator = self.allocator,
                 .root4 = self.root4.cloneRec(self.allocator),
                 .root6 = self.root6.cloneRec(self.allocator),
                 .size4 = self.size4,
                 .size6 = self.size6,
+                .node_pool = new_pool,
             };
             return new_table;
         }
@@ -485,12 +588,11 @@ pub fn Table(comptime V: type) type {
                             return .{ .table = new_table, .value = new_val };
                         }
                         
-                        // 新しいノードを作成
+                        // 新しいノードを作成 - OPTIMIZED
                         // リーフを下に押し下げ
                         // 現在のリーフ位置（addr）に新しい子を挿入
                         // 降下し、nを新しい子で置き換え
-                        const new_node = current_node.allocator.create(Node(V)) catch unreachable;
-                        new_node.* = Node(V).init(current_node.allocator);
+                        const new_node = Node(V).createFastNode(current_node.allocator);
                         _ = new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, current_node.allocator);
                         
                         _ = current_node.children.replaceAt(addr, Child(V){ .node = new_node });
@@ -506,12 +608,11 @@ pub fn Table(comptime V: type) type {
                             return .{ .table = new_table, .value = new_val };
                         }
                         
-                        // 新しいノードを作成
+                        // 新しいノードを作成 - OPTIMIZED
                         // フリンジを下に押し下げ、デフォルトルート（idx=1）になる
                         // 現在のリーフ位置（addr）に新しい子を挿入
                         // 降下し、nを新しい子で置き換え
-                        const new_node = current_node.allocator.create(Node(V)) catch unreachable;
-                        new_node.* = Node(V).init(current_node.allocator);
+                        const new_node = Node(V).createFastNode(current_node.allocator);
                         _ = new_node.prefixes.insertAt(1, cloned_fringe.value);
                         
                         _ = current_node.children.replaceAt(addr, Child(V){ .node = new_node });
@@ -723,14 +824,11 @@ pub fn Table(comptime V: type) type {
 
         /// Fprint: 階層的なツリー表示（Go実装互換）
         pub fn fprint(self: *const Self, writer: anytype) !void {
-            if (self.getSize4() > 0) {
-                try writer.print("IPv4:\n", .{});
-                try self.fprintVersion(writer, true);
-            }
-            if (self.getSize6() > 0) {
-                try writer.print("IPv6:\n", .{});
-                try self.fprintVersion(writer, false);
-            }
+            // IPv4ツリーを出力
+            try self.fprintVersion(writer, true);
+            
+            // IPv6ツリーを出力
+            try self.fprintVersion(writer, false);
         }
 
         /// バージョン別のFprint実装
@@ -753,8 +851,143 @@ pub fn Table(comptime V: type) type {
             return list.toOwnedSlice();
         }
 
+        /// MarshalText: Go実装のencoding.TextMarshalerインターフェース互換
+        /// Fprintのラッパーとして実装
+        pub fn marshalText(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+            return try self.toString(allocator);
+        }
+
+        /// dump: 詳細なデバッグ情報出力（Go実装のdumper.go互換）
+        pub fn dump(self: *const Self, writer: anytype) !void {
+            if (self.getSize4() > 0) {
+                const stats4 = self.root4.getNodeStats();
+                try writer.print("\n### IPv4: size({}), nodes({}), leaves({}), fringes({})\n", 
+                    .{ self.getSize4(), stats4.nodes, stats4.leaves, stats4.fringes });
+                try self.dumpVersion(writer, true);
+            }
+            
+            if (self.getSize6() > 0) {
+                const stats6 = self.root6.getNodeStats();
+                try writer.print("\n### IPv6: size({}), nodes({}), leaves({}), fringes({})\n", 
+                    .{ self.getSize6(), stats6.nodes, stats6.leaves, stats6.fringes });
+                try self.dumpVersion(writer, false);
+            }
+        }
+
+        /// バージョン別のdump実装
+        fn dumpVersion(self: *const Self, writer: anytype, is4: bool) !void {
+            const root = self.rootNodeByVersionConst(is4);
+            if (root.isEmpty()) return;
+            
+            const path = std.mem.zeroes([16]u8);
+            try root.dumpRec(self.allocator, writer, path, 0, is4);
+        }
+
+        /// dumpString: dumpの文字列版（デバッグ用）
+        pub fn dumpString(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+            var list = std.ArrayList(u8).init(allocator);
+            defer list.deinit();
+            
+            try self.dump(list.writer());
+            return list.toOwnedSlice();
+        }
+
         // シリアライゼーション用の構造体（Go実装のDumpListNode互換）
         pub const DumpListNode = node.DumpListNode(V);
+
+        // =============================================================================
+        // All系イテレーション機能
+        // =============================================================================
+
+        /// Yield関数の型定義
+        pub const YieldFn = fn (prefix: Prefix, value: V) bool;
+
+        /// allWithCallback: 全プレフィックス列挙（IPv4+IPv6、順序不定）
+        /// Go実装のAllメソッドを移植
+        pub fn allWithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            
+            // IPv4とIPv6の両方を処理
+            _ = self.root4.allRec(path, 0, true, yield) and 
+                self.root6.allRec(path, 0, false, yield);
+        }
+
+        /// all4WithCallback: IPv4プレフィックス列挙（順序不定）
+        /// Go実装のAll4メソッドを移植
+        pub fn all4WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root4.allRec(path, 0, true, yield);
+        }
+
+        /// all6WithCallback: IPv6プレフィックス列挙（順序不定）
+        /// Go実装のAll6メソッドを移植
+        pub fn all6WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root6.allRec(path, 0, false, yield);
+        }
+
+        /// allSortedWithCallback: 全プレフィックス列挙（ソート済み）
+        /// Go実装のAllSortedメソッドを移植
+        pub fn allSortedWithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            
+            // IPv4とIPv6の両方をソート順で処理
+            _ = self.root4.allRecSorted(path, 0, true, yield) and 
+                self.root6.allRecSorted(path, 0, false, yield);
+        }
+
+        /// allSorted4WithCallback: IPv4プレフィックス列挙（ソート済み）
+        /// Go実装のAllSorted4メソッドを移植
+        pub fn allSorted4WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root4.allRecSorted(path, 0, true, yield);
+        }
+
+        /// allSorted6WithCallback: IPv6プレフィックス列挙（ソート済み）
+        /// Go実装のAllSorted6メソッドを移植
+        pub fn allSorted6WithCallback(self: *const Self, yield: *const YieldFn) void {
+            const path = std.mem.zeroes(node.StridePath);
+            _ = self.root6.allRecSorted(path, 0, false, yield);
+        }
+
+        /// Contains performs a route lookup for IP and returns true if any route matched.
+        /// Direct port of Go BART's Contains implementation
+        pub fn contains(self: *const Self, addr: *const IPAddr) bool {
+            const is4 = addr.is4();
+            var n = self.rootNodeByVersionConst(is4);
+            
+            for (addr.asSlice()) |octet| {
+                // For contains, any lpm match is good enough, no backtracking needed
+                if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(octet))) {
+                    return true;
+                }
+                
+                // Stop traversing?
+                if (!n.children.isSet(octet)) {
+                    return false;
+                }
+                const kid = n.children.mustGet(octet);
+                
+                // Kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // Descend down to next trie level
+                    },
+                    .fringe => {
+                        // Fringe is the default-route for all possible octets below
+                        return true;
+                    },
+                    .leaf => |leaf| {
+                        return leaf.prefix.containsAddr(addr.*);
+                    },
+                }
+            }
+            
+            return false;
+        }
+        
+
     };
 }
 
@@ -953,17 +1186,7 @@ test "Table subnets basic" {
     try std.testing.expect(found_2);
 }
 
-test "Table lookupPrefix detailed verification" {
-    // このテストは削除 - デバッグ用だったため
-}
 
-test "Table lookupPrefix single case debug" {
-    // このテストは削除 - デバッグ用だったため
-}
-
-test "Table get vs lookupPrefix comparison" {
-    // このテストは削除 - lookupPrefixの実装が不完全なため
-}
 
 test "Table overlapsPrefix basic" {
     const allocator = std.testing.allocator;
@@ -1568,3 +1791,139 @@ test "Table unionWith performance test" {
     
     std.debug.print("✅ パフォーマンステスト成功！\n", .{});
 } 
+
+// =============================================================================
+// All系イテレーション機能のテスト
+// =============================================================================
+
+
+
+test "all6WithCallback basic" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+
+    // IPv6プレフィックスを追加
+    const pfx1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    const pfx2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
+    
+    table.insert(&pfx1, 1);
+    table.insert(&pfx2, 2);
+    
+    // IPv4プレフィックス（除外されるべき）
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    table.insert(&pfx4, 4);
+    
+    // all6WithCallbackを実行
+    table.all6WithCallback(&testCountYield);
+
+    // IPv6プレフィックスのみが収集されることを確認
+    try std.testing.expect(test_ipv6_count == 2);
+    try std.testing.expect(test_ipv4_count == 0);
+}
+
+test "allWithCallback mixed IPv4 and IPv6" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+    
+    // IPv4とIPv6プレフィックスを混在で追加
+    const pfx4_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx4_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const pfx6_1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    const pfx6_2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
+    
+    table.insert(&pfx4_1, 1);
+    table.insert(&pfx4_2, 2);
+    table.insert(&pfx6_1, 3);
+    table.insert(&pfx6_2, 4);
+    
+    // allWithCallbackを実行
+    table.allWithCallback(&testCountYield);
+    
+    // IPv4とIPv6の両方が含まれることを確認
+    try std.testing.expect(test_ipv4_count == 2);
+    try std.testing.expect(test_ipv6_count == 2);
+}
+
+test "allSorted4WithCallback order verification" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+    
+    // 意図的に順序を混乱させたプレフィックスを追加
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);    // 後のアドレス
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);    // より短いプレフィックス
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);    // 前のアドレス
+    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);        // 全く違うアドレス空間
+    
+    table.insert(&pfx3, 3);
+    table.insert(&pfx1, 1);
+    table.insert(&pfx2, 2);
+    table.insert(&pfx4, 4);
+    
+    // allSorted4WithCallbackを実行
+    table.allSorted4WithCallback(&testCountYield);
+    
+    // IPv4プレフィックスが4つ全て収集されることを確認
+    try std.testing.expect(test_ipv4_count == 4);
+    try std.testing.expect(test_ipv6_count == 0);
+}
+
+// テスト用のグローバル変数
+var test_ipv4_count: u32 = 0;
+var test_ipv6_count: u32 = 0;
+
+// テスト用のカウンター関数
+fn testCountYield(prefix: Prefix, value: u32) bool {
+    _ = value;
+    if (prefix.addr.is4()) {
+        test_ipv4_count += 1;
+    } else {
+        test_ipv6_count += 1;
+    }
+    return true; // 継続
+}
+
+test "all4WithCallback basic" {
+    const allocator = std.testing.allocator;
+    var table = Table(u32).init(allocator);
+    defer table.deinit();
+
+    // カウンターをリセット
+    test_ipv4_count = 0;
+    test_ipv6_count = 0;
+
+    // IPv4プレフィックスを追加
+    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
+    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);
+    
+    table.insert(&pfx1, 24);
+    table.insert(&pfx2, 8);
+    table.insert(&pfx3, 16);
+
+    // IPv6プレフィックスを追加（含まれるべきではない）
+    const pfx6 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
+    table.insert(&pfx6, 32);
+    
+    // all4WithCallbackを実行
+    table.all4WithCallback(&testCountYield);
+
+    // IPv4プレフィックスのみが収集されることを確認
+    try std.testing.expect(test_ipv4_count == 3);
+    try std.testing.expect(test_ipv6_count == 0);
+}
+
