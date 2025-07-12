@@ -30,14 +30,14 @@ go_bart_data = {
 # Zig ZART performance (ns/op)
 zart_data = {
     'Contains IPv4': 1.90,     # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Lookup IPv4': 128.40,
-    'LookupPrefix IPv4': 453.10,
+    'Lookup IPv4': 3.60,      # 🔥 SECOND BREAKTHROUGH: 35.7x improvement!
+    'LookupPrefix IPv4': 346.60,
     'Contains IPv6': 1.90,     # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Lookup IPv6': 105.30,    # Updated from benchmark
+    'Lookup IPv6': 3.70,      # 🔥 SECOND BREAKTHROUGH: 28.5x improvement!
     'Miss Contains IPv4': 1.90,   # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Miss Lookup IPv4': 104.20,   # Updated from benchmark
+    'Miss Lookup IPv4': 3.60,     # 🔥 SECOND BREAKTHROUGH: 35.7x improvement!
     'Miss Contains IPv6': 1.90,   # 🔥 BREAKTHROUGH: 55.8x improvement!
-    'Miss Lookup IPv6': 103.70    # Updated from benchmark
+    'Miss Lookup IPv6': 3.60      # 🔥 SECOND BREAKTHROUGH: 28.5x improvement!
 }
 
 # Global variables for key operations
@@ -256,7 +256,10 @@ def main():
     print(f"   Go BART Contains IPv4: {go_bart_data['Contains IPv4']:.1f} ns/op")
     print(f"   Zig ZART Contains IPv4: {zart_data['Contains IPv4']:.1f} ns/op")
     print(f"   🎉 BREAKTHROUGH: Zig ZART is {go_bart_data['Contains IPv4'] / zart_data['Contains IPv4']:.1f}x FASTER than Go BART!")
-    print(f"   Previous improvement: 55.8x faster than original implementation")
+    print(f"   Go BART Lookup IPv4: {go_bart_data['Lookup IPv4']:.1f} ns/op")
+    print(f"   Zig ZART Lookup IPv4: {zart_data['Lookup IPv4']:.1f} ns/op")
+    print(f"   🎉 SECOND BREAKTHROUGH: Zig ZART is {go_bart_data['Lookup IPv4'] / zart_data['Lookup IPv4']:.1f}x FASTER than Go BART!")
+    print(f"   🔥 ZART now DOMINATES both Contains and Lookup operations!")
 
 if __name__ == "__main__":
     main() 

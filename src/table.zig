@@ -127,7 +127,7 @@ pub fn Table(comptime V: type) type {
         pub fn lookup(self: *const Self, addr: *const IPAddr) node.LookupResult(V) {
             const is4 = addr.is4();
             const root = self.rootNodeByVersionConst(is4);
-            return root.fastLookup(addr);
+            return root.ultraFastLookup(addr);
         }
         
         /// LookupPrefix performs a longest prefix match for the given prefix.
