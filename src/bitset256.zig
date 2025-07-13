@@ -80,15 +80,21 @@ pub const BitSet256 = struct {
     }
 
     /// Return count of set bits (popcount) - Go BART style loop unrolling
-    /// Uses POPCNT instruction for maximum performance
+    /// SIMD-optimized version: 4x popcount operations in parallel + sum reduction
     pub fn popcnt(self: *const BitSet256) u8 {
-        // Manual loop unrolling exactly like Go BART
-        var cnt: u32 = 0;
-        cnt += @popCount(self.data[0]);
-        cnt += @popCount(self.data[1]);
-        cnt += @popCount(self.data[2]);
-        cnt += @popCount(self.data[3]);
-        return @as(u8, @intCast(cnt));
+        // SIMD version: 4x parallel popcount + sum reduction
+        const v: @Vector(4, u64) = self.data;
+        const counts: @Vector(4, u32) = @popCount(v);
+        const total_count = @reduce(.Add, counts);
+        return @as(u8, @intCast(total_count));
+        
+        // Original sequential version (kept for reference):
+        // var cnt: u32 = 0;
+        // cnt += @popCount(self.data[0]);
+        // cnt += @popCount(self.data[1]);
+        // cnt += @popCount(self.data[2]);
+        // cnt += @popCount(self.data[3]);
+        // return @as(u8, @intCast(cnt));
     }
 
     /// Return count of set bits up to specified position (rank) - HOTTEST PATH: Force inline
@@ -106,18 +112,35 @@ pub const BitSet256 = struct {
     }
 
     /// Return whether bitset is empty - Go BART style
+    /// SIMD-optimized version: 4x OR operations in parallel + OR reduction
     pub fn isEmpty(self: *const BitSet256) bool {
-        return (self.data[0] | self.data[1] | self.data[2] | self.data[3]) == 0;
+        // SIMD version: 4x parallel OR + OR reduction
+        const v: @Vector(4, u64) = self.data;
+        const zero_vec: @Vector(4, u64) = @splat(0);
+        const non_zero = v != zero_vec;
+        const has_any_bits = @reduce(.Or, non_zero);
+        return !has_any_bits;
+        
+        // Original sequential version (kept for reference):
+        // return (self.data[0] | self.data[1] | self.data[2] | self.data[3]) == 0;
     }
 
     /// Calculate intersection of two bitsets
+    /// SIMD-optimized version: 4x AND operations in parallel
     pub fn intersection(self: *const BitSet256, other: *const BitSet256) BitSet256 {
-        return BitSet256{ .data = [_]u64{
-            self.data[0] & other.data[0],
-            self.data[1] & other.data[1],
-            self.data[2] & other.data[2],
-            self.data[3] & other.data[3],
-        } };
+        // SIMD version: 4x parallel AND
+        const v1: @Vector(4, u64) = self.data;
+        const v2: @Vector(4, u64) = other.data;
+        const result: @Vector(4, u64) = v1 & v2;
+        return BitSet256{ .data = result };
+        
+        // Original sequential version (kept for reference):
+        // return BitSet256{ .data = [_]u64{
+        //     self.data[0] & other.data[0],
+        //     self.data[1] & other.data[1],
+        //     self.data[2] & other.data[2],
+        //     self.data[3] & other.data[3],
+        // } };
     }
 
     /// Calculate union of two bitsets
@@ -142,11 +165,21 @@ pub const BitSet256 = struct {
     }
 
     /// Return whether intersection of two bitsets is non-empty
+    /// SIMD-optimized version: 4x u64 AND operations in parallel + OR reduction
     pub fn intersectsAny(self: *const BitSet256, other: *const BitSet256) bool {
-        return (self.data[0] & other.data[0]) != 0 or
-               (self.data[1] & other.data[1]) != 0 or
-               (self.data[2] & other.data[2]) != 0 or
-               (self.data[3] & other.data[3]) != 0;
+        // SIMD version: 4x parallel AND + OR reduction
+        const v1: @Vector(4, u64) = self.data;
+        const v2: @Vector(4, u64) = other.data;
+        const and_result = v1 & v2;
+        const zero_vec: @Vector(4, u64) = @splat(0);
+        const non_zero = and_result != zero_vec;
+        return @reduce(.Or, non_zero);
+        
+        // Original sequential version (kept for reference):
+        // return (self.data[0] & other.data[0]) != 0 or
+        //        (self.data[1] & other.data[1]) != 0 or
+        //        (self.data[2] & other.data[2]) != 0 or
+        //        (self.data[3] & other.data[3]) != 0;
     }
 
     /// Return highest bit in intersection of two bitsets

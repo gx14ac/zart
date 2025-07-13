@@ -957,12 +957,79 @@ pub fn Table(comptime V: type) type {
         }
 
         /// Contains performs a route lookup for IP and returns true if any route matched.
-        /// Direct port of Go BART's Contains implementation
+        /// SIMD-optimized with IPv4/IPv6 specialized paths
         pub fn contains(self: *const Self, addr: *const IPAddr) bool {
-            const is4 = addr.is4();
-            var n = self.rootNodeByVersionConst(is4);
+            switch (addr.*) {
+                .v4 => |ipv4| return self.containsIPv4(&ipv4),
+                .v6 => |ipv6| return self.containsIPv6(&ipv6),
+            }
+        }
+
+        /// IPv4-specialized contains with unrolled loop optimization
+        fn containsIPv4(self: *const Self, addr: *const [4]u8) bool {
+            var n = self.root4;
             
-            for (addr.asSlice()) |octet| {
+            // Unrolled loop for exactly 4 octets - no dynamic loop overhead
+            // Octet 0
+            if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(addr[0]))) {
+                return true;
+            }
+            if (!n.children.isSet(addr[0])) return false;
+            const kid0 = n.children.mustGet(addr[0]);
+            switch (kid0) {
+                .node => |node_ptr| n = node_ptr,
+                .fringe => return true,
+                .leaf => |leaf| return leaf.prefix.containsAddr(IPAddr{ .v4 = addr.* }),
+            }
+            
+            // Octet 1
+            if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(addr[1]))) {
+                return true;
+            }
+            if (!n.children.isSet(addr[1])) return false;
+            const kid1 = n.children.mustGet(addr[1]);
+            switch (kid1) {
+                .node => |node_ptr| n = node_ptr,
+                .fringe => return true,
+                .leaf => |leaf| return leaf.prefix.containsAddr(IPAddr{ .v4 = addr.* }),
+            }
+            
+            // Octet 2
+            if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(addr[2]))) {
+                return true;
+            }
+            if (!n.children.isSet(addr[2])) return false;
+            const kid2 = n.children.mustGet(addr[2]);
+            switch (kid2) {
+                .node => |node_ptr| n = node_ptr,
+                .fringe => return true,
+                .leaf => |leaf| return leaf.prefix.containsAddr(IPAddr{ .v4 = addr.* }),
+            }
+            
+            // Octet 3
+            if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(addr[3]))) {
+                return true;
+            }
+            if (!n.children.isSet(addr[3])) return false;
+            const kid3 = n.children.mustGet(addr[3]);
+            switch (kid3) {
+                .node => |node_ptr| {
+                    n = node_ptr;
+                    // Final check for any remaining prefixes
+                    return n.prefixes.len() != 0;
+                },
+                .fringe => return true,
+                .leaf => |leaf| return leaf.prefix.containsAddr(IPAddr{ .v4 = addr.* }),
+            }
+            
+            return false;
+        }
+
+        /// IPv6-specialized contains (keeps original logic for now)
+        fn containsIPv6(self: *const Self, addr: *const [16]u8) bool {
+            var n = self.root6;
+            
+            for (addr) |octet| {
                 // For contains, any lpm match is good enough, no backtracking needed
                 if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(octet))) {
                     return true;
@@ -985,15 +1052,13 @@ pub fn Table(comptime V: type) type {
                         return true;
                     },
                     .leaf => |leaf| {
-                        return leaf.prefix.containsAddr(addr.*);
+                        return leaf.prefix.containsAddr(IPAddr{ .v6 = addr.* });
                     },
                 }
             }
             
             return false;
         }
-        
-
     };
 }
 

@@ -165,7 +165,7 @@ pub fn Array256(comptime T: type) type {
         }
         
         /// Efficient item insertion mirroring Go BART's insertItem
-        /// Inserts item at index i, shifting the rest one position right
+        /// SIMD-optimized for bulk memory operations
         fn insertItemEfficient(self: *Self, index: usize, item: T) void {
             // Fast resize if we have capacity
             if (self.items.items.len < self.items.capacity) {
@@ -176,15 +176,80 @@ pub fn Array256(comptime T: type) type {
             }
             
             const items_slice = self.items.items;
+            const move_count = items_slice.len - 1 - index;
             
-            // Efficient slice operation: shift one slot right, starting at [index]
-            if (index < items_slice.len - 1) {
-                // equivalent to Go's copy(a.Items[i+1:], a.Items[i:])
-                @memcpy(items_slice[index + 1..], items_slice[index..items_slice.len - 1]);
+            // SIMD optimization for bulk memory operations
+            if (move_count > 0) {
+                if (move_count >= 8 and @sizeOf(T) == 8) {
+                    // SIMD batch copy for large u64 arrays (like Node pointers)
+                    self.simdMemCopy8(items_slice, index, move_count);
+                } else if (move_count >= 4 and @sizeOf(T) == 4) {
+                    // SIMD batch copy for u32 arrays
+                    self.simdMemCopy4(items_slice, index, move_count);
+                } else {
+                    // Standard @memcpy for smaller moves or non-standard sizes
+                    @memcpy(items_slice[index + 1..], items_slice[index..items_slice.len - 1]);
+                }
             }
             
             // Insert new item at [index]
             items_slice[index] = item;
+        }
+        
+        /// SIMD-optimized memory copy for 8-byte elements (like pointers)
+        fn simdMemCopy8(self: *Self, items: []T, index: usize, count: usize) void {
+            _ = self;
+            if (@sizeOf(T) != 8) {
+                @memcpy(items[index + 1..], items[index..index + count]);
+                return;
+            }
+            
+            const src_ptr = @as([*]const u64, @ptrCast(items.ptr + index));
+            const dst_ptr = @as([*]u64, @ptrCast(items.ptr + index + 1));
+            
+            // Process 4x u64 at a time using SIMD
+            var remaining = count;
+            var offset: usize = 0;
+            
+            while (remaining >= 4) {
+                const src_vec: @Vector(4, u64) = src_ptr[offset..offset+4][0..4].*;
+                @as(*@Vector(4, u64), @alignCast(@ptrCast(dst_ptr + offset))).* = src_vec;
+                offset += 4;
+                remaining -= 4;
+            }
+            
+            // Handle remaining elements with standard copy
+            if (remaining > 0) {
+                @memcpy(items[index + 1 + offset..], items[index + offset..index + offset + remaining]);
+            }
+        }
+        
+        /// SIMD-optimized memory copy for 4-byte elements
+        fn simdMemCopy4(self: *Self, items: []T, index: usize, count: usize) void {
+            _ = self;
+            if (@sizeOf(T) != 4) {
+                @memcpy(items[index + 1..], items[index..index + count]);
+                return;
+            }
+            
+            const src_ptr = @as([*]const u32, @ptrCast(items.ptr + index));
+            const dst_ptr = @as([*]u32, @ptrCast(items.ptr + index + 1));
+            
+            // Process 8x u32 at a time using SIMD  
+            var remaining = count;
+            var offset: usize = 0;
+            
+            while (remaining >= 8) {
+                const src_vec: @Vector(8, u32) = src_ptr[offset..offset+8][0..8].*;
+                @as(*@Vector(8, u32), @alignCast(@ptrCast(dst_ptr + offset))).* = src_vec;
+                offset += 8;
+                remaining -= 8;
+            }
+            
+            // Handle remaining elements with standard copy
+            if (remaining > 0) {
+                @memcpy(items[index + 1 + offset..], items[index + offset..index + offset + remaining]);
+            }
         }
         
         /// ReplaceAt replaces the value at i and returns the old value if it existed.
