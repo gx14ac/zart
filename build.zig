@@ -113,16 +113,7 @@ pub fn build(b: *std.Build) void {
 
     // NodePool tests removed - DirectNode implementation doesn't use NodePool
 
-    // 🚀 Zero Alloc Insert Implementation Tests
-    const zero_alloc_test = b.addExecutable(.{
-        .name = "zero_alloc_test",
-        .root_source_file = b.path("src/zero_alloc_insert.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const zero_alloc_test_step = b.step("test-zero-alloc", "Test Zero Alloc Insert implementation");
-    const run_zero_alloc = b.addRunArtifact(zero_alloc_test);
-    zero_alloc_test_step.dependOn(&run_zero_alloc.step);
+    // Zero Alloc Insert Implementation Tests removed - integrated into DirectNode
 
     // Debug LMP Issue
     const debug_lmp = b.addExecutable(.{
