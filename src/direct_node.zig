@@ -735,31 +735,44 @@ pub fn DirectNode(comptime V: type) type {
                 if (n.prefixes_len != 0) {
                     const host_idx = base_index.hostIdx(octets[depth]);
                     
-                    // 修正: lmpGetOptimizedを統一的に使用（host_idxに関係なく）
-                    // backTrackingBitsetを使用した統一的な処理
+                    // Go BART compatible backtracking with Contains() check
+                    // CRITICAL FIX: Check all matching prefixes, not just the highest index
                     var bs: BitSet256 = lookup_tbl.backTrackingBitset(host_idx);
-                    if (n.prefixes_bitset.intersectionTop(&bs)) |top| {
-                        const rank_idx = n.prefixes_bitset.rank(top) - 1;
-                        
-                        // Reconstruct prefix for backtracking result
-                        const pfx_info = base_index.idxToPfx256(top) catch {
-                            return node.LookupResult(V){
-                                .prefix = undefined,
-                                .value = undefined,
-                                .ok = false,
-                            };
-                        };
-                        
-                        var result_addr = addr.*;
-                        const result_bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
-                        result_addr = result_addr.masked(result_bits);
-                        const result_prefix = Prefix.init(&result_addr, result_bits);
-                        
-                        return node.LookupResult(V){
-                            .prefix = result_prefix,
-                            .value = n.prefixes_items[rank_idx],
-                            .ok = true,
-                        };
+                    var intersection_bs = n.prefixes_bitset.intersection(&bs);
+                    
+                    // Check all matched indices in descending order (longest prefix first)
+                    var idx: u8 = 255;
+                    while (true) : (idx = if (idx == 0) break else idx - 1) {
+                        if (intersection_bs.isSet(idx)) {
+                            const rank_idx = n.prefixes_bitset.rank(idx) - 1;
+                            
+                                                         // Reconstruct prefix for backtracking result
+                             const pfx_info = base_index.idxToPfx256(idx) catch continue;
+                             
+                             // Create correct prefix address using stored octet
+                             var result_addr = addr.*;
+                             switch (result_addr) {
+                                 .v4 => |*v4| {
+                                     v4[depth] = pfx_info.octet;
+                                 },
+                                 .v6 => |*v6| {
+                                     v6[depth] = pfx_info.octet;
+                                 },
+                             }
+                             const result_bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
+                             result_addr = result_addr.masked(result_bits);
+                             const result_prefix = Prefix.init(&result_addr, result_bits);
+                            
+                            // CRITICAL FIX: Go BART compatible Contains() check
+                            // Verify that the reconstructed prefix actually contains the lookup address
+                                                         if (result_prefix.containsAddr(addr.*)) {
+                                 return node.LookupResult(V){
+                                     .prefix = result_prefix,
+                                     .value = n.prefixes_items[rank_idx],
+                                     .ok = true,
+                                 };
+                             }
+                        }
                     }
                 }
                 

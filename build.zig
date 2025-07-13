@@ -147,5 +147,35 @@ pub fn build(b: *std.Build) void {
     const debug_detailed_lmp_step = b.step("debug-detailed-lmp", "Detailed analysis of LMP issue");
     debug_detailed_lmp_step.dependOn(&debug_detailed_lmp_cmd.step);
 
+    // Debug LMP Fix Analysis
+    const debug_lmp_fix = b.addExecutable(.{
+        .name = "debug_lmp_fix",
+        .root_source_file = b.path("src/debug_lmp_fix.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
+    b.installArtifact(debug_lmp_fix);
+
+    const debug_lmp_fix_cmd = b.addRunArtifact(debug_lmp_fix);
+    debug_lmp_fix_cmd.step.dependOn(b.getInstallStep());
+    
+    const debug_lmp_fix_step = b.step("debug-lmp-fix", "Run comprehensive LMP bug fix analysis");
+    debug_lmp_fix_step.dependOn(&debug_lmp_fix_cmd.step);
+    
+    // Test LMP Fix Verification
+    const test_lmp_fix = b.addExecutable(.{
+        .name = "test_lmp_fix",
+        .root_source_file = b.path("src/test_lmp_fix.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    b.installArtifact(test_lmp_fix);
+
+    const test_lmp_fix_cmd = b.addRunArtifact(test_lmp_fix);
+    test_lmp_fix_cmd.step.dependOn(b.getInstallStep());
+    
+    const test_lmp_fix_step = b.step("test-lmp-fix", "Run LMP fix verification test");
+    test_lmp_fix_step.dependOn(&test_lmp_fix_cmd.step);
 }

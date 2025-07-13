@@ -9,29 +9,35 @@ const base_index = @import("base_index.zig");
 /// BackTrackingBitset returns the backtracking bitset for the given index
 /// This allows a one shot bitset intersection algorithm instead of
 /// a sequence of single bitset tests.
+/// Go BART compatible implementation - uses precomputed lookup table
 pub fn backTrackingBitset(idx: usize) BitSet256 {
-    var bs = BitSet256.init();
-    var i: usize = idx & 511; // &511 is BCE
-    
-    // Generate backtracking sequence: for idx := 1; idx > 0; idx >>= 1 { b.Set(idx) }
-    while (i > 0) : (i >>= 1) {
-        // 256-511の範囲を0-255にマッピング
-        const bit: u8 = if (i > 255) @as(u8, @intCast(i - 256)) else @as(u8, @intCast(i));
-        bs.set(bit);
-    }
-    
-    return bs;
+    return lookupTbl[idx & 511]; // &511 is BCE
 }
 
-/// Lookup table for backtracking bitsets
+/// Lookup table for backtracking bitsets - Go BART compatible
 /// Each entry contains the backtracking sequence for that index
+/// Direct port of Go BART's algorithm:
+/// for idx := 1; idx > 0; idx >>= 1 { b.Set(idx) }
 pub const lookupTbl = blk: {
     @setEvalBranchQuota(100000);
     var arr: [512]BitSet256 = undefined;
-    var i: usize = 0;
-    while (i < 512) : (i += 1) {
-        arr[i] = backTrackingBitset(i);
+    
+    for (0..512) |i| {
+        var bs = BitSet256.init();
+        var idx: usize = i;
+        
+        // Go BART algorithm: for idx := 1; idx > 0; idx >>= 1 { b.Set(idx) }
+        while (idx > 0) : (idx >>= 1) {
+            // Only set bits in the 0-255 range (BitSet256 limitation)
+            // Higher bits (256-511) are handled by host index mapping
+            if (idx <= 255) {
+                bs.set(@as(u8, @intCast(idx)));
+            }
+        }
+        
+        arr[i] = bs;
     }
+    
     break :blk arr;
 };
 

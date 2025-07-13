@@ -137,7 +137,9 @@ pub const idxToPfxLookupTable = blk: {
     }
     
     // Precompute valid entries by reverse mapping
-    for (0..9) |pfx_len| {
+    // Process in reverse order to prefer higher pfx_len (longer prefixes)
+    var pfx_len: i32 = 8;
+    while (pfx_len >= 0) : (pfx_len -= 1) {
         for (0..256) |octet| {
             const shift: u6 = @intCast(pfx_len);
             const right_shift: u6 = @intCast(8 - pfx_len);
@@ -147,7 +149,7 @@ pub const idxToPfxLookupTable = blk: {
             }
             const idx_u8 = @as(u8, @intCast(idx));
             
-            // Only set if not already set (prefer lower pfx_len for conflicts)
+            // Only set if not already set (prefer higher pfx_len for conflicts)
             if (!table[idx_u8].valid) {
                 table[idx_u8] = .{ 
                     .octet = @as(u8, @intCast(octet)), 
