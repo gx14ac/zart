@@ -1,7 +1,7 @@
 const std = @import("std");
 const lookup_tbl = @import("lookup_tbl.zig");
 
-/// Go BART compatible BitSet256 implementation
+/// ZART optimized BitSet256 implementation
 /// Uses 4 x u64 = 256 bits for cache line optimization
 /// Optimized with CPU bit manipulation instructions (POPCNT, LZCNT, TZCNT)
 pub const BitSet256 = struct {
@@ -100,7 +100,7 @@ pub const BitSet256 = struct {
     /// Return count of set bits up to specified position (rank) - HOTTEST PATH: Force inline
     /// Go BART compatible implementation using precomputed rankMask table
     pub inline fn rank(self: *const BitSet256, idx: u8) u16 {
-        // Use precomputed rankMask table for ultra-fast rank calculation
+        // Use precomputed rankMask table for zero-alloc optimized rank calculation
         // Same as Go BART: rnk += bits.OnesCount64(b[i] & rankMask[idx][i])
         const mask = &rankMask[idx];
         var cnt: u32 = 0;
@@ -222,9 +222,28 @@ pub const BitSet256 = struct {
         var buf: [256]u8 = undefined;
         return self.asSlice(&buf);
     }
+    
+    /// nthSet - n番目にセットされているビットを返す (0-indexed)
+    pub fn nthSet(self: *const BitSet256, n: usize) ?u8 {
+        var count: usize = 0;
+        var bit: u8 = 0;
+        
+        while (bit <= 255) {
+            if (self.isSet(bit)) {
+                if (count == n) {
+                    return bit;
+                }
+                count += 1;
+            }
+            if (bit == 255) break;
+            bit += 1;
+        }
+        
+        return null;
+    }
 };
 
-/// Precomputed rank masks for ultra-fast rank calculation
+/// Precomputed rank masks for zero-alloc optimized rank calculation
 /// rankMask[i] has bits 0-i set to 1, rest to 0
 pub const rankMask = blk: {
     @setEvalBranchQuota(100000);

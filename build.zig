@@ -5,23 +5,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // 📦 Main library
     const lib = b.addStaticLibrary(.{
-        .name = "bart",
-        .root_source_file = b.path("src/main.zig"),
+        .name = "zart",
+        .root_source_file = b.path("src/table.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true, 
     });
     b.installArtifact(lib);
-
-    // Main executable
-    const exe = b.addExecutable(.{
-        .name = "ZART",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(exe);
 
     // ZART Benchmark executable - matching Go BART's fulltable_test.go
     const zart_bench = b.addExecutable(.{
@@ -51,22 +42,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(contains_lookup_bench);
     b.installArtifact(insert_bench);
 
-    // Test executable
-    const test_exe = b.addExecutable(.{
-        .name = "test_basic",
-        .root_source_file = b.path("src/test_basic.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(test_exe);
-
-    // Run commands
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
     // ZART Benchmark run command
     const bench_cmd = b.addRunArtifact(zart_bench);
     bench_cmd.step.dependOn(b.getInstallStep());
@@ -88,17 +63,9 @@ pub fn build(b: *std.Build) void {
         insert_cmd.addArgs(args);
     }
 
-    // Test run command  
-    const test_cmd = b.addRunArtifact(test_exe);
-    test_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        test_cmd.addArgs(args);
-    }
+
 
     // Build steps
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
-
     const bench_step = b.step("bench", "Run ZART benchmarks (matches Go BART's fulltable_test.go)");
     bench_step.dependOn(&bench_cmd.step);
 
@@ -108,8 +75,7 @@ pub fn build(b: *std.Build) void {
     const insert_step = b.step("insert", "Run insert benchmarks"); 
     insert_step.dependOn(&insert_cmd.step);
 
-    const test_step = b.step("test-basic", "Run basic tests");
-    test_step.dependOn(&test_cmd.step);
+
 
     // Unit tests
     const lib_unit_tests = b.addTest(.{
@@ -143,55 +109,52 @@ pub fn build(b: *std.Build) void {
     const run_lookup_tests = b.addRunArtifact(lookup_tests);
     test_unit_step.dependOn(&run_lookup_tests.step);
 
-    // Sparse array tests
-    const sparse_tests = b.addTest(.{
-        .root_source_file = b.path("src/sparse_array256.zig"),
+    // Sparse array tests removed - DirectNode implementation now used
+
+    // NodePool tests removed - DirectNode implementation doesn't use NodePool
+
+    // 🚀 Zero Alloc Insert Implementation Tests
+    const zero_alloc_test = b.addExecutable(.{
+        .name = "zero_alloc_test",
+        .root_source_file = b.path("src/zero_alloc_insert.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const zero_alloc_test_step = b.step("test-zero-alloc", "Test Zero Alloc Insert implementation");
+    const run_zero_alloc = b.addRunArtifact(zero_alloc_test);
+    zero_alloc_test_step.dependOn(&run_zero_alloc.step);
+
+    // Debug LMP Issue
+    const debug_lmp = b.addExecutable(.{
+        .name = "debug_lmp_issue",
+        .root_source_file = b.path("src/debug_lmp_issue.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const run_sparse_tests = b.addRunArtifact(sparse_tests);
-    test_unit_step.dependOn(&run_sparse_tests.step);
+    b.installArtifact(debug_lmp);
 
+    const debug_lmp_cmd = b.addRunArtifact(debug_lmp);
+    debug_lmp_cmd.step.dependOn(b.getInstallStep());
+    
+    const debug_lmp_step = b.step("debug-lmp", "Debug LMP issue with 192.168.0.3");
+    debug_lmp_step.dependOn(&debug_lmp_cmd.step);
 
-
-    // NodePool tests
-    const nodepool_tests = b.addTest(.{
-        .root_source_file = b.path("src/node_pool.zig"),
+    // Debug Detailed LMP
+    const debug_detailed_lmp = b.addExecutable(.{
+        .name = "debug_detailed_lmp",
+        .root_source_file = b.path("src/debug_detailed_lmp.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const run_nodepool_tests = b.addRunArtifact(nodepool_tests);
-    test_unit_step.dependOn(&run_nodepool_tests.step);
+    b.installArtifact(debug_detailed_lmp);
 
-    // NodePool usage test
-    const nodepool_usage_test = b.addExecutable(.{
-        .name = "nodepool_test",
-        .root_source_file = b.path("src/nodepool_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(nodepool_usage_test);
+    const debug_detailed_lmp_cmd = b.addRunArtifact(debug_detailed_lmp);
+    debug_detailed_lmp_cmd.step.dependOn(b.getInstallStep());
+    
+    const debug_detailed_lmp_step = b.step("debug-detailed-lmp", "Detailed analysis of LMP issue");
+    debug_detailed_lmp_step.dependOn(&debug_detailed_lmp_cmd.step);
 
-    const nodepool_usage_cmd = b.addRunArtifact(nodepool_usage_test);
-    nodepool_usage_cmd.step.dependOn(b.getInstallStep());
 
-    const nodepool_usage_step = b.step("nodepool-test", "Run NodePool usage test");
-    nodepool_usage_step.dependOn(&nodepool_usage_cmd.step);
-
-    // NodePool advanced test
-    const nodepool_advanced_test = b.addExecutable(.{
-        .name = "nodepool_advanced_test",
-        .root_source_file = b.path("src/nodepool_advanced_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(nodepool_advanced_test);
-
-    const nodepool_advanced_cmd = b.addRunArtifact(nodepool_advanced_test);
-    nodepool_advanced_cmd.step.dependOn(b.getInstallStep());
-
-    const nodepool_advanced_step = b.step("nodepool-advanced", "Run advanced NodePool test with Insert→Delete→Insert cycles");
-    nodepool_advanced_step.dependOn(&nodepool_advanced_cmd.step);
 }

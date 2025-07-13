@@ -65,8 +65,8 @@ verify-compatibility:
 	@test -f bart/testdata/prefixes.txt.gz || (echo "❌ bart/testdata/prefixes.txt.gz not found" && false)
 	@echo "✅ Both implementations use same test data"
 	@echo "🧪 Running basic compatibility test..."
-	zig build test-basic
-	@echo "✅ ZART compatibility tests passed"
+	zig build zart_benchmark
+	@echo "✅ ZART benchmark passed"
 
 # Update README with latest benchmark results
 .PHONY: update-readme

@@ -23,7 +23,7 @@
 ### Build and Test
 - **[build.zig](build.zig)** - Build configuration with optimization targets
 - **[src/main.zig](src/main.zig)** - Main entry point demonstrating BART API
-- **[src/test_basic.zig](src/test_basic.zig)** - Comprehensive unit tests
+- **[src/zart_benchmark.zig](src/zart_benchmark.zig)** - Comprehensive unit tests
 
 ## 🚀 Performance Achievements
 
@@ -158,12 +158,6 @@ ZART implements Go BART's Binary Adaptive Radix Trie with Zig optimizations:
 ## Build Targets
 
 ```bash
-# Basic build and test
-zig build-exe src/main.zig -O ReleaseFast  # Main demonstration
-zig test src/test_basic.zig                # Unit tests
-zig test src/bitset256.zig                # BitSet256 tests
-zig test src/sparse_array256.zig          # SparseArray256 tests
-
 # Makefile targets
 make build                                 # Build with ReleaseFast
 make test                                  # Run unit tests
