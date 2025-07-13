@@ -143,7 +143,7 @@ pub fn Array256(comptime T: type) type {
             return result;
         }
         
-        /// InsertAt - Simple implementation for good performance
+        /// InsertAt - High-performance implementation mirroring Go BART
         /// If the value already exists, overwrite it with val and return false.
         /// If the value is new, insert it and return true.
         pub inline fn insertAt(self: *Self, i: u8, value: T) bool {
@@ -153,12 +153,38 @@ pub fn Array256(comptime T: type) type {
                 self.items.items[rank_idx] = value;
                 return false;
             } else {
-                // New slot - insert new value
+                // New slot - insert new value efficiently
                 const rank_idx = self.bitset.rank(i);
                 self.bitset.set(i);
-                self.items.insert(rank_idx, value) catch unreachable;
+                
+                // Go BART style efficient insertion
+                self.insertItemEfficient(rank_idx, value);
+                
                 return true;
             }
+        }
+        
+        /// Efficient item insertion mirroring Go BART's insertItem
+        /// Inserts item at index i, shifting the rest one position right
+        fn insertItemEfficient(self: *Self, index: usize, item: T) void {
+            // Fast resize if we have capacity
+            if (self.items.items.len < self.items.capacity) {
+                self.items.items.len += 1; // no alloc
+            } else {
+                // Append one item to grow capacity
+                self.items.append(undefined) catch unreachable;
+            }
+            
+            const items_slice = self.items.items;
+            
+            // Efficient slice operation: shift one slot right, starting at [index]
+            if (index < items_slice.len - 1) {
+                // equivalent to Go's copy(a.Items[i+1:], a.Items[i:])
+                @memcpy(items_slice[index + 1..], items_slice[index..items_slice.len - 1]);
+            }
+            
+            // Insert new item at [index]
+            items_slice[index] = item;
         }
         
         /// ReplaceAt replaces the value at i and returns the old value if it existed.

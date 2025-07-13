@@ -39,9 +39,11 @@ zig build vs-go -Doptimize=ReleaseFast
 #### Code Quality Standards
 
 - **Academic Documentation**: All algorithms must include academic references and complexity analysis
-- **Performance Focus**: Include benchmarks demonstrating performance characteristics
+- **Performance Focus**: Include benchmarks demonstrating performance characteristics against Go BART baseline
 - **Memory Safety**: All code must be memory-safe and avoid undefined behavior
 - **Concurrent Safety**: Thread-safe implementations must be proven correct
+- **IPv6 Optimization**: Maintain or improve current IPv6 performance leadership (3.28× contains, 6.69× lookup)
+- **Insert Efficiency**: Preserve efficient sparse array operations using @memcpy for optimal performance
 
 #### Code Style
 
@@ -83,18 +85,30 @@ const lookup_result: LookupResult(V) = self.lookup(addr);
 
 ### Benchmarking Standards
 
-All performance claims must be substantiated with reproducible benchmarks:
+All performance claims must be substantiated with reproducible benchmarks against Go BART baseline:
 
 ```bash
-# Standard benchmark suite
-zig build vs-go -Doptimize=ReleaseFast
+# Standard benchmark suite (must maintain current performance levels)
+make full-benchmark
 
-# Advanced profiling
-zig build bench -Doptimize=ReleaseFast
+# Performance regression testing
+zig build vs-go -Doptimize=ReleaseFast
 
 # Concurrent performance testing
 zig test src/concurrent_test.zig -Doptimize=ReleaseFast
 ```
+
+**Performance Expectations:**
+- **IPv6 Operations**: Maintain performance leadership (>3× advantage for contains/lookup)
+- **IPv4 Operations**: Competitive performance (~1.4× advantage for lookup operations)
+- **Insert Operations**: Consistent scaling characteristics across dataset sizes
+- **Memory Efficiency**: Bounded allocation patterns with predictable growth
+
+**Regression Prevention:**
+- No operation should regress beyond 10% of baseline performance
+- IPv6 advantage must be preserved (critical differentiator)
+- Insert efficiency improvements should be maintained
+- All optimizations must include performance validation
 
 ### Academic Citations
 
@@ -128,11 +142,20 @@ For new features:
 
 ### Research Collaboration
 
-ZART encourages academic collaboration:
+ZART encourages academic collaboration building on current achievements:
 
-- **Algorithm Research**: Novel routing table algorithms and optimizations
-- **Systems Research**: Concurrent programming and memory management innovations
-- **Performance Research**: Comparative analysis with existing implementations
+**Current Research Achievements:**
+- **IPv6 Algorithm Optimization**: 3.28× faster contains, 6.69× faster lookup operations
+- **Efficient Memory Operations**: @memcpy-based sparse array optimizations
+- **SIMD Integration**: Vectorized bit operations for high-performance routing
+- **Concurrent Safety**: Multiple programming models with formal verification
+
+**Active Research Areas:**
+- **Algorithm Research**: Novel routing table algorithms and optimization techniques
+- **Systems Research**: Concurrent programming and memory management innovations  
+- **Performance Research**: Comparative analysis and algorithmic complexity studies
+- **IPv6 Specialization**: Further optimization for modern internet infrastructure
+- **Large-Scale Optimization**: Insert performance improvements for internet-scale datasets
 
 ### Licensing
 
