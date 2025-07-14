@@ -65,7 +65,7 @@ verify-compatibility:
 	@test -f bart/testdata/prefixes.txt.gz || (echo "❌ bart/testdata/prefixes.txt.gz not found" && false)
 	@echo "✅ Both implementations use same test data"
 	@echo "🧪 Running basic compatibility test..."
-	zig build zart_benchmark
+	zig build bench -Doptimize=ReleaseFast
 	@echo "✅ ZART benchmark passed"
 
 # Update README with latest benchmark results

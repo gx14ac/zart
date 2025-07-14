@@ -115,67 +115,50 @@ pub fn build(b: *std.Build) void {
 
     // Zero Alloc Insert Implementation Tests removed - integrated into DirectNode
 
-    // Debug LMP Issue
-    const debug_lmp = b.addExecutable(.{
-        .name = "debug_lmp_issue",
-        .root_source_file = b.path("src/debug_lmp_issue.zig"),
+    // test_lookupprefixlpm_fixed test
+    const test_lookupprefixlpm_fixed_exe = b.addTest(.{
+        .name = "test_lookupprefixlpm_fixed",
+        .root_source_file = b.path("src/test_lookupprefixlpm_fixed.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const test_lookupprefixlpm_fixed_step = b.step("test_lookupprefixlpm_fixed", "Test LookupPrefixLPM fixed implementation");
+    test_lookupprefixlpm_fixed_step.dependOn(&test_lookupprefixlpm_fixed_exe.step);
 
-    b.installArtifact(debug_lmp);
-
-    const debug_lmp_cmd = b.addRunArtifact(debug_lmp);
-    debug_lmp_cmd.step.dependOn(b.getInstallStep());
-    
-    const debug_lmp_step = b.step("debug-lmp", "Debug LMP issue with 192.168.0.3");
-    debug_lmp_step.dependOn(&debug_lmp_cmd.step);
-
-    // Debug Detailed LMP
-    const debug_detailed_lmp = b.addExecutable(.{
-        .name = "debug_detailed_lmp",
-        .root_source_file = b.path("src/debug_detailed_lmp.zig"),
+    // test_node_structure test
+    const test_node_structure_exe = b.addTest(.{
+        .name = "test_node_structure",
+        .root_source_file = b.path("src/test_node_structure.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const test_node_structure_step = b.step("test_node_structure", "Test ZART node structure analysis");
+    test_node_structure_step.dependOn(&test_node_structure_exe.step);
 
-    b.installArtifact(debug_detailed_lmp);
-
-    const debug_detailed_lmp_cmd = b.addRunArtifact(debug_detailed_lmp);
-    debug_detailed_lmp_cmd.step.dependOn(b.getInstallStep());
-    
-    const debug_detailed_lmp_step = b.step("debug-detailed-lmp", "Detailed analysis of LMP issue");
-    debug_detailed_lmp_step.dependOn(&debug_detailed_lmp_cmd.step);
-
-    // Debug LMP Fix Analysis
-    const debug_lmp_fix = b.addExecutable(.{
-        .name = "debug_lmp_fix",
-        .root_source_file = b.path("src/debug_lmp_fix.zig"),
+    // test_index_mapping test
+    const test_index_mapping_exe = b.addTest(.{
+        .name = "test_index_mapping",
+        .root_source_file = b.path("src/test_index_mapping.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const test_index_mapping_step = b.step("test_index_mapping", "Test index mapping analysis");
+    test_index_mapping_step.dependOn(&test_index_mapping_exe.step);
 
-    b.installArtifact(debug_lmp_fix);
-
-    const debug_lmp_fix_cmd = b.addRunArtifact(debug_lmp_fix);
-    debug_lmp_fix_cmd.step.dependOn(b.getInstallStep());
-    
-    const debug_lmp_fix_step = b.step("debug-lmp-fix", "Run comprehensive LMP bug fix analysis");
-    debug_lmp_fix_step.dependOn(&debug_lmp_fix_cmd.step);
-    
-    // Test LMP Fix Verification
-    const test_lmp_fix = b.addExecutable(.{
-        .name = "test_lmp_fix",
-        .root_source_file = b.path("src/test_lmp_fix.zig"),
+    // debug_lpm_detailed_analysis test
+    const debug_lpm_detailed_analysis_exe = b.addExecutable(.{
+        .name = "debug_lpm_detailed_analysis",
+        .root_source_file = b.path("src/debug_lpm_detailed_analysis.zig"),
         .target = target,
         .optimize = optimize,
     });
-
-    b.installArtifact(test_lmp_fix);
-
-    const test_lmp_fix_cmd = b.addRunArtifact(test_lmp_fix);
-    test_lmp_fix_cmd.step.dependOn(b.getInstallStep());
+    b.installArtifact(debug_lpm_detailed_analysis_exe);
     
-    const test_lmp_fix_step = b.step("test-lmp-fix", "Run LMP fix verification test");
-    test_lmp_fix_step.dependOn(&test_lmp_fix_cmd.step);
+    const debug_lpm_detailed_analysis_cmd = b.addRunArtifact(debug_lpm_detailed_analysis_exe);
+    debug_lpm_detailed_analysis_cmd.step.dependOn(b.getInstallStep());
+    
+    const debug_lpm_detailed_analysis_step = b.step("debug_lpm_detailed_analysis", "Debug LPM detailed analysis");
+    debug_lpm_detailed_analysis_step.dependOn(&debug_lpm_detailed_analysis_cmd.step);
+
+
 }

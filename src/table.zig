@@ -110,13 +110,23 @@ pub fn Table(comptime V: type) type {
         
         /// lookupPrefix - プレフィックスでの検索
         pub fn lookupPrefix(self: *const Self, prefix: *const Prefix) node.LookupResult(V) {
-            // TODO: DirectNodeベースのlookupPrefix実装
-            // 暫定的に単純な実装 - exact matchを使用
-            const value = self.get(prefix);
-            if (value) |val| {
+            if (!prefix.isValid()) {
                 return node.LookupResult(V){
-                    .prefix = prefix.*,
-                    .value = val,
+                    .prefix = undefined,
+                    .value = undefined,
+                    .ok = false,
+                };
+            }
+            
+            const canonical_prefix = prefix.masked();
+            const is_ipv4 = canonical_prefix.addr.is4();
+            const root = if (is_ipv4) self.root4 else self.root6;
+            
+            const result = root.lookupPrefix(&canonical_prefix);
+            if (result.ok) {
+                return node.LookupResult(V){
+                    .prefix = canonical_prefix,
+                    .value = result.val,
                     .ok = true,
                 };
             }
@@ -129,9 +139,17 @@ pub fn Table(comptime V: type) type {
         
         /// lookupPrefixLPM - プレフィックスでのLPM検索
         pub fn lookupPrefixLPM(self: *const Self, prefix: *const Prefix) ?V {
-            // TODO: DirectNodeベースのlookupPrefixLPM実装
-            // 暫定的に単純な実装 - exact matchを使用
-            return self.get(prefix);
+            if (!prefix.isValid()) return null;
+            
+            const canonical_prefix = prefix.masked();
+            const is_ipv4 = canonical_prefix.addr.is4();
+            const root = if (is_ipv4) self.root4 else self.root6;
+            
+            const result = root.lookupPrefixLPM(&canonical_prefix);
+            if (result.ok) {
+                return result.val;
+            }
+            return null;
         }
         
         /// contains - Go BART互換の包含チェック

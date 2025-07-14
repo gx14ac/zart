@@ -183,18 +183,19 @@ pub const BitSet256 = struct {
     }
 
     /// Return highest bit in intersection of two bitsets
-    /// Uses LZCNT instruction for maximum performance
+    /// Go BART exact implementation
     pub fn intersectionTop(self: *const BitSet256, other: *const BitSet256) ?u8 {
-        // Manual loop unrolling starting from highest word
-        var wIdx: usize = 3;
-        while (true) : (wIdx -= 1) {
-            const word = self.data[wIdx] & other.data[wIdx];
+        // Go BART exact implementation: for wIdx := 4 - 1; wIdx >= 0; wIdx--
+        var wIdx: i32 = 3;
+        while (wIdx >= 0) : (wIdx -= 1) {
+            const word = self.data[@intCast(wIdx)] & other.data[@intCast(wIdx)];
             if (word != 0) {
-                // Get highest bit using bit length - 1
-                const highest = @as(u8, @intCast(@as(usize, wIdx) << 6)) + @as(u8, @intCast(63 - @clz(word)));
-                return highest;
+                // Go BART exact: return uint8(wIdx<<6+bits.Len64(word)) - 1, true
+                const bit_len = @as(u8, @intCast(@clz(word)));
+                const len64 = 64 - bit_len;
+                const top = @as(u8, @intCast(@as(usize, @intCast(wIdx)) << 6)) + len64 - 1;
+                return top;
             }
-            if (wIdx == 0) break;
         }
         return null;
     }

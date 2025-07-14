@@ -182,20 +182,28 @@ pub const isFringeLookupTable = blk: {
     break :blk table;
 };
 
-/// Return octet and prefix length from base index
-/// Inverse function of pfxToIdx256.
-/// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table
-/// 
-/// Returns error for invalid input.
+/// Returns octet and prefix length from index (Go art.IdxToPfx256 equivalent)
+/// Go BART: pfxLen = bits.Len8(idx) - 1, octet = (idx & mask) << shiftBits
 pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
-    const entry = idxToPfxLookupTable[idx];
-    if (!entry.valid) {
+    if (idx == 0) {
         return error.InvalidIndex;
     }
     
+    // Go BART algorithm exactly
+    const pfx_len = @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1 - 1; // bits.Len8(idx) - 1
+    const shift_bits = 8 - pfx_len;
+    
+    // Ensure shift_bits is within valid range for u3 (0-7)
+    if (shift_bits > 7) {
+        return error.InvalidShiftBits;
+    }
+    
+    const mask = @as(u8, 0xff) >> @as(u3, @intCast(shift_bits));
+    const octet = (idx & mask) << @as(u3, @intCast(shift_bits));
+    
     return .{
-        .octet = entry.octet,
-        .pfx_len = entry.pfx_len,
+        .octet = octet,
+        .pfx_len = pfx_len,
     };
 }
 
