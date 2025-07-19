@@ -1,7 +1,7 @@
 const std = @import("std");
 const lookup_tbl = @import("lookup_tbl.zig");
 
-/// Go BART compatible BitSet256 implementation
+/// ZART optimized BitSet256 implementation
 /// Uses 4 x u64 = 256 bits for cache line optimization
 /// Optimized with CPU bit manipulation instructions (POPCNT, LZCNT, TZCNT)
 pub const BitSet256 = struct {
@@ -80,21 +80,27 @@ pub const BitSet256 = struct {
     }
 
     /// Return count of set bits (popcount) - Go BART style loop unrolling
-    /// Uses POPCNT instruction for maximum performance
-    pub fn popcnt(self: *const BitSet256) u8 {
-        // Manual loop unrolling exactly like Go BART
-        var cnt: u32 = 0;
-        cnt += @popCount(self.data[0]);
-        cnt += @popCount(self.data[1]);
-        cnt += @popCount(self.data[2]);
-        cnt += @popCount(self.data[3]);
-        return @as(u8, @intCast(cnt));
+    /// SIMD-optimized version: 4x popcount operations in parallel + sum reduction
+    pub fn popcnt(self: *const BitSet256) u9 {
+        // SIMD version: 4x parallel popcount + sum reduction
+        const v: @Vector(4, u64) = self.data;
+        const counts: @Vector(4, u32) = @popCount(v);
+        const total_count = @reduce(.Add, counts);
+        return @as(u9, @intCast(total_count));
+        
+        // Original sequential version (kept for reference):
+        // var cnt: u32 = 0;
+        // cnt += @popCount(self.data[0]);
+        // cnt += @popCount(self.data[1]);
+        // cnt += @popCount(self.data[2]);
+        // cnt += @popCount(self.data[3]);
+        // return @as(u8, @intCast(cnt));
     }
 
     /// Return count of set bits up to specified position (rank) - HOTTEST PATH: Force inline
     /// Go BART compatible implementation using precomputed rankMask table
     pub inline fn rank(self: *const BitSet256, idx: u8) u16 {
-        // Use precomputed rankMask table for ultra-fast rank calculation
+        // Use precomputed rankMask table for zero-alloc optimized rank calculation
         // Same as Go BART: rnk += bits.OnesCount64(b[i] & rankMask[idx][i])
         const mask = &rankMask[idx];
         var cnt: u32 = 0;
@@ -106,18 +112,35 @@ pub const BitSet256 = struct {
     }
 
     /// Return whether bitset is empty - Go BART style
+    /// SIMD-optimized version: 4x OR operations in parallel + OR reduction
     pub fn isEmpty(self: *const BitSet256) bool {
-        return (self.data[0] | self.data[1] | self.data[2] | self.data[3]) == 0;
+        // SIMD version: 4x parallel OR + OR reduction
+        const v: @Vector(4, u64) = self.data;
+        const zero_vec: @Vector(4, u64) = @splat(0);
+        const non_zero = v != zero_vec;
+        const has_any_bits = @reduce(.Or, non_zero);
+        return !has_any_bits;
+        
+        // Original sequential version (kept for reference):
+        // return (self.data[0] | self.data[1] | self.data[2] | self.data[3]) == 0;
     }
 
     /// Calculate intersection of two bitsets
+    /// SIMD-optimized version: 4x AND operations in parallel
     pub fn intersection(self: *const BitSet256, other: *const BitSet256) BitSet256 {
-        return BitSet256{ .data = [_]u64{
-            self.data[0] & other.data[0],
-            self.data[1] & other.data[1],
-            self.data[2] & other.data[2],
-            self.data[3] & other.data[3],
-        } };
+        // SIMD version: 4x parallel AND
+        const v1: @Vector(4, u64) = self.data;
+        const v2: @Vector(4, u64) = other.data;
+        const result: @Vector(4, u64) = v1 & v2;
+        return BitSet256{ .data = result };
+        
+        // Original sequential version (kept for reference):
+        // return BitSet256{ .data = [_]u64{
+        //     self.data[0] & other.data[0],
+        //     self.data[1] & other.data[1],
+        //     self.data[2] & other.data[2],
+        //     self.data[3] & other.data[3],
+        // } };
     }
 
     /// Calculate union of two bitsets
@@ -142,26 +165,39 @@ pub const BitSet256 = struct {
     }
 
     /// Return whether intersection of two bitsets is non-empty
+    /// SIMD-optimized version: 4x u64 AND operations in parallel + OR reduction
     pub fn intersectsAny(self: *const BitSet256, other: *const BitSet256) bool {
-        return (self.data[0] & other.data[0]) != 0 or
-               (self.data[1] & other.data[1]) != 0 or
-               (self.data[2] & other.data[2]) != 0 or
-               (self.data[3] & other.data[3]) != 0;
+        // SIMD version: 4x parallel AND + OR reduction
+        const v1: @Vector(4, u64) = self.data;
+        const v2: @Vector(4, u64) = other.data;
+        const and_result = v1 & v2;
+        const zero_vec: @Vector(4, u64) = @splat(0);
+        const non_zero = and_result != zero_vec;
+        return @reduce(.Or, non_zero);
+        
+        // Original sequential version (kept for reference):
+        // return (self.data[0] & other.data[0]) != 0 or
+        //        (self.data[1] & other.data[1]) != 0 or
+        //        (self.data[2] & other.data[2]) != 0 or
+        //        (self.data[3] & other.data[3]) != 0;
     }
 
     /// Return highest bit in intersection of two bitsets
-    /// Uses LZCNT instruction for maximum performance
+    /// Go BART exact implementation
     pub fn intersectionTop(self: *const BitSet256, other: *const BitSet256) ?u8 {
-        // Manual loop unrolling starting from highest word
-        var wIdx: usize = 3;
-        while (true) : (wIdx -= 1) {
-            const word = self.data[wIdx] & other.data[wIdx];
+        // Go BART exact implementation: for wIdx := 4 - 1; wIdx >= 0; wIdx--
+        var wIdx: i32 = 3;
+        while (wIdx >= 0) : (wIdx -= 1) {
+            const word = self.data[@intCast(wIdx)] & other.data[@intCast(wIdx)];
             if (word != 0) {
-                // Get highest bit using bit length - 1
-                const highest = @as(u8, @intCast(@as(usize, wIdx) << 6)) + @as(u8, @intCast(63 - @clz(word)));
-                return highest;
+                // Go BART exact: return uint8(wIdx<<6+bits.Len64(word)) - 1, true
+                const bit_len = @as(u8, @intCast(@clz(word)));
+                const len64 = 64 - bit_len;
+                // wIdx << 6 can be up to 192 (3 << 6), which fits in u8
+                const base = @as(u9, @intCast(wIdx)) << 6;
+                const top = @as(u8, @intCast(base + len64 - 1));
+                return top;
             }
-            if (wIdx == 0) break;
         }
         return null;
     }
@@ -189,9 +225,28 @@ pub const BitSet256 = struct {
         var buf: [256]u8 = undefined;
         return self.asSlice(&buf);
     }
+    
+    /// nthSet - n番目にセットされているビットを返す (0-indexed)
+    pub fn nthSet(self: *const BitSet256, n: usize) ?u8 {
+        var count: usize = 0;
+        var bit: u8 = 0;
+        
+        while (bit <= 255) {
+            if (self.isSet(bit)) {
+                if (count == n) {
+                    return bit;
+                }
+                count += 1;
+            }
+            if (bit == 255) break;
+            bit += 1;
+        }
+        
+        return null;
+    }
 };
 
-/// Precomputed rank masks for ultra-fast rank calculation
+/// Precomputed rank masks for zero-alloc optimized rank calculation
 /// rankMask[i] has bits 0-i set to 1, rest to 0
 pub const rankMask = blk: {
     @setEvalBranchQuota(100000);

@@ -38,7 +38,7 @@ fn pfxToIdx(octet: u8, pfx_len: u8) usize {
 }
 
 /// Convert prefix to index in sparse array256 - HOTTEST PATH: Force inline + Lookup Table
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table for maximum performance
+/// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table for maximum performance
 pub inline fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
     // OPTIMIZATION: Use precomputed lookup table for maximum speed
     if (pfx_len <= 8) {
@@ -98,8 +98,11 @@ pub const maxDepthLastBitsLookupTable = blk: {
     var table: [256]struct { max_depth: u8, last_bits: u8 } = undefined;
     
     for (0..256) |bits| {
-        const max_depth = @as(u8, @intCast(bits / 8));
-        const last_bits = @as(u8, @intCast(bits % 8));
+        // Go BART algorithm:
+        // maxDepth = bits >> 3
+        // lastBits = uint8(bits & 7)
+        const max_depth = @as(u8, @intCast(bits >> 3));
+        const last_bits = @as(u8, @intCast(bits & 7));
         table[bits] = .{ .max_depth = max_depth, .last_bits = last_bits };
     }
     
@@ -133,7 +136,9 @@ pub const idxToPfxLookupTable = blk: {
     }
     
     // Precompute valid entries by reverse mapping
-    for (0..9) |pfx_len| {
+    // Process in reverse order to prefer higher pfx_len (longer prefixes)
+    var pfx_len: i32 = 8;
+    while (pfx_len >= 0) : (pfx_len -= 1) {
         for (0..256) |octet| {
             const shift: u6 = @intCast(pfx_len);
             const right_shift: u6 = @intCast(8 - pfx_len);
@@ -143,7 +148,7 @@ pub const idxToPfxLookupTable = blk: {
             }
             const idx_u8 = @as(u8, @intCast(idx));
             
-            // Only set if not already set (prefer lower pfx_len for conflicts)
+            // Only set if not already set (prefer higher pfx_len for conflicts)
             if (!table[idx_u8].valid) {
                 table[idx_u8] = .{ 
                     .octet = @as(u8, @intCast(octet)), 
@@ -176,20 +181,28 @@ pub const isFringeLookupTable = blk: {
     break :blk table;
 };
 
-/// Return octet and prefix length from base index
-/// Inverse function of pfxToIdx256.
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table
-/// 
-/// Returns error for invalid input.
+/// Returns octet and prefix length from index (Go art.IdxToPfx256 equivalent)
+/// Go BART: pfxLen = bits.Len8(idx) - 1, octet = (idx & mask) << shiftBits
 pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
-    const entry = idxToPfxLookupTable[idx];
-    if (!entry.valid) {
+    if (idx == 0) {
         return error.InvalidIndex;
     }
     
+    // Go BART algorithm exactly
+    const pfx_len = @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1 - 1; // bits.Len8(idx) - 1
+    const shift_bits = 8 - pfx_len;
+    
+    // Ensure shift_bits is within valid range for u3 (0-7)
+    if (shift_bits > 7) {
+        return error.InvalidShiftBits;
+    }
+    
+    const mask = @as(u8, 0xff) >> @as(u3, @intCast(shift_bits));
+    const octet = (idx & mask) << @as(u3, @intCast(shift_bits));
+    
     return .{
-        .octet = entry.octet,
-        .pfx_len = entry.pfx_len,
+        .octet = octet,
+        .pfx_len = pfx_len,
     };
 }
 
@@ -214,7 +227,7 @@ pub fn idxToRange256(idx: u8) !struct { first: u8, last: u8 } {
 }
 
 /// Generate network mask based on bit count
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table
+/// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table
 /// 
 /// 0b0000_0000, // bits == 0
 /// 0b1000_0000, // bits == 1
@@ -231,14 +244,14 @@ pub fn netMask(bits: u8) u8 {
 }
 
 /// Return max_depth (stride数) と last_bits (最後のstride未満のビット数)
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table
+/// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table
 pub fn maxDepthAndLastBits(bits: u8) struct { max_depth: usize, last_bits: u8 } {
     const entry = maxDepthLastBitsLookupTable[bits];
     return .{ .max_depth = @as(usize, entry.max_depth), .last_bits = entry.last_bits };
 }
 
 /// Check if prefix is a fringe - HOT PATH: Force inline + Lookup Table
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table for maximum performance
+/// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table for maximum performance
 pub inline fn isFringe(depth: usize, bits: u8) bool {
     if (depth >= 32) return false; // Bounds check
     return isFringeLookupTable[depth][bits];
