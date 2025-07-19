@@ -609,7 +609,7 @@ pub fn DirectNode(comptime V: type) type {
             self.children_len += 1;
             
             // 4. 整合性チェック（デバッグ用）
-            if (self.children_len != self.children_bitset.popcnt()) {
+            if (self.children_len != @as(u16, self.children_bitset.popcnt())) {
                 // 整合性エラーが発生した場合の緊急処理
                 self.children_bitset.clear(octet);
                 self.children_len -= 1;
@@ -1070,9 +1070,10 @@ pub fn DirectNode(comptime V: type) type {
             self.children_len -= 1;
             
             // 整合性チェック（デバッグ用）
-            if (self.children_len != self.children_bitset.popcnt()) {
-                // 緊急修復
-                self.children_len = self.children_bitset.popcnt();
+            if (self.children_len != @as(u16, self.children_bitset.popcnt())) {
+                // 整合性エラーが発生した場合の緊急処理
+                self.children_bitset.clear(octet);
+                self.children_len -= 1;
             }
         }
         

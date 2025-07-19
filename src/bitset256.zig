@@ -81,12 +81,12 @@ pub const BitSet256 = struct {
 
     /// Return count of set bits (popcount) - Go BART style loop unrolling
     /// SIMD-optimized version: 4x popcount operations in parallel + sum reduction
-    pub fn popcnt(self: *const BitSet256) u8 {
+    pub fn popcnt(self: *const BitSet256) u9 {
         // SIMD version: 4x parallel popcount + sum reduction
         const v: @Vector(4, u64) = self.data;
         const counts: @Vector(4, u32) = @popCount(v);
         const total_count = @reduce(.Add, counts);
-        return @as(u8, @intCast(total_count));
+        return @as(u9, @intCast(total_count));
         
         // Original sequential version (kept for reference):
         // var cnt: u32 = 0;
@@ -193,7 +193,9 @@ pub const BitSet256 = struct {
                 // Go BART exact: return uint8(wIdx<<6+bits.Len64(word)) - 1, true
                 const bit_len = @as(u8, @intCast(@clz(word)));
                 const len64 = 64 - bit_len;
-                const top = @as(u8, @intCast(@as(usize, @intCast(wIdx)) << 6)) + len64 - 1;
+                // wIdx << 6 can be up to 192 (3 << 6), which fits in u8
+                const base = @as(u9, @intCast(wIdx)) << 6;
+                const top = @as(u8, @intCast(base + len64 - 1));
                 return top;
             }
         }

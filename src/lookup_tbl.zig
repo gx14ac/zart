@@ -28,11 +28,10 @@ pub const lookupTbl = blk: {
         
         // Go BART algorithm: for idx := 1; idx > 0; idx >>= 1 { b.Set(idx) }
         while (idx > 0) : (idx >>= 1) {
-            // Only set bits in the 0-255 range (BitSet256 limitation)
-            // Higher bits (256-511) are handled by host index mapping
-            if (idx <= 255) {
-                bs.set(@as(u8, @intCast(idx)));
-            }
+            // Map high indices (256-511) to their corresponding low indices (0-255)
+            // This is because BitSet256 only supports 0-255
+            const mapped_idx = idx & 0xFF;
+            bs.set(@as(u8, @intCast(mapped_idx)));
         }
         
         arr[i] = bs;
