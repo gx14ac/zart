@@ -98,13 +98,12 @@ pub const maxDepthLastBitsLookupTable = blk: {
     var table: [256]struct { max_depth: u8, last_bits: u8 } = undefined;
     
     for (0..256) |bits| {
-        if (bits == 0) {
-            table[bits] = .{ .max_depth = 0, .last_bits = 0 };
-        } else {
-            const max_depth = @as(u8, @intCast((bits - 1) / 8));
-            const last_bits = @as(u8, @intCast(((bits - 1) % 8) + 1));
-            table[bits] = .{ .max_depth = max_depth, .last_bits = last_bits };
-        }
+        // Go BART algorithm:
+        // maxDepth = bits >> 3
+        // lastBits = uint8(bits & 7)
+        const max_depth = @as(u8, @intCast(bits >> 3));
+        const last_bits = @as(u8, @intCast(bits & 7));
+        table[bits] = .{ .max_depth = max_depth, .last_bits = last_bits };
     }
     
     break :blk table;

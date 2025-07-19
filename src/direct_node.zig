@@ -85,14 +85,17 @@ pub fn DirectNode(comptime V: type) type {
         
         /// deinit - 再帰的cleanup (修正版)
         pub fn deinit(self: *Self) void {
-            // 子ノードを再帰的にクリーンアップ  
-            // 単純に children_len を使用してクリーンアップ
-            // children_lenが0の場合は何もしない
-            if (self.children_len > 0) {
-                for (0..self.children_len) |i| {
-                    // 安全性チェック：有効なポインタかどうかを確認
-                    if (@intFromPtr(self.children_items[i]) != 0) {
-                        self.children_items[i].deinit();
+            // 子ノードを再帰的にクリーンアップ
+            // children_bitsetの各ビットをチェック
+            var processed_children: [256]bool = [_]bool{false} ** 256;
+            
+            for (0..256) |i| {
+                const octet = @as(u8, @intCast(i));
+                if (self.children_bitset.isSet(octet)) {
+                    const rank_idx = self.children_bitset.rank(octet) - 1;
+                    if (rank_idx < self.children_len and !processed_children[rank_idx]) {
+                        self.children_items[rank_idx].deinit();
+                        processed_children[rank_idx] = true;
                     }
                 }
             }
@@ -149,6 +152,10 @@ pub fn DirectNode(comptime V: type) type {
             const max_depth = max_depth_info.max_depth;
             const last_bits = max_depth_info.last_bits;
             
+            // Go BART: /32 and /128 are special, they never form a new node,
+            // they are always inserted as path-compressed leaf.
+            const is_host_route = (ip.is4() and bits == 32) or (ip.is6() and bits == 128);
+            
             // Go BART: find the proper trie node to insert prefix
             // start with prefix octet at depth
             var current_depth = depth;
@@ -160,7 +167,8 @@ pub fn DirectNode(comptime V: type) type {
                 
                 // Go BART: last masked octet: insert/override prefix/val into node
                 // HOT PATH 1: Terminal case (most frequent for prefix insertion)
-                if (current_depth == max_depth) {
+                // But NOT for /32 and /128 - they are always leafNodes
+                if (current_depth == max_depth and !is_host_route) {
                     // Phase 5: 分岐予測最適化 - prefix insertion is hot path
                     return n.insertPrefixDirect(base_index.pfxToIdx256(octet, last_bits), value);
                 }
@@ -186,7 +194,27 @@ pub fn DirectNode(comptime V: type) type {
                     return n.handleChildExpansion(octet, prefix, value, current_depth);
                 } else {
                     // COLD PATH: New path creation (least frequent)
-                    // Go BART: insert prefix path compressed as leaf or fringe
+                    // Go BART: Check if we need to create intermediate nodes
+                    
+                    // For /32 and /128, always insert as leafNode
+                    if (is_host_route) {
+                        return n.insertLeafDirectOptimized(octet, prefix, value);
+                    }
+                    
+                    // If we're not at the last depth before max_depth, we need to create a child node
+                    if (current_depth + 1 < max_depth or (current_depth + 1 == max_depth and current_depth + 1 < octets.len)) {
+                        // Create new child node and continue insertion
+                        const new_node = Self.init(n.allocator);
+                        
+                        // Insert the new node as a child
+                        _ = n.insertChildDirect(octet, new_node);
+                        
+                        // Continue insertion in the new node
+                        n = new_node;
+                        continue;
+                    }
+                    
+                    // We're at the last depth, insert as leaf or fringe
                     if (base_index.isFringe(current_depth, bits)) {
                         return n.insertFringeDirectOptimized(octet, prefix, value);
                     }
@@ -740,7 +768,7 @@ pub fn DirectNode(comptime V: type) type {
                     const bs = lookup_tbl.backTrackingBitset(host_idx);
                     
                     if (n.prefixes_bitset.intersectionTop(&bs)) |top_idx| {
-                        // Go BART: Simple logic - trust IntersectionTop result
+                        // Go BART: Simple IntersectionTop result - return directly
                         const rank_idx = n.prefixes_bitset.rank(top_idx) - 1;
                         return node.LookupResult(V){
                             .prefix = undefined, // Go BART doesn't reconstruct prefix in Lookup
@@ -829,7 +857,6 @@ pub fn DirectNode(comptime V: type) type {
             
             // Go BART互換アルゴリズム: find the trie node
             for (octets, 0..) |octet, depth| {
-                
                 // Go BART: 最初にterminal caseをチェック
                 if (depth == max_depth) {
                     // Terminal case: 直接prefixesから取得
@@ -843,6 +870,20 @@ pub fn DirectNode(comptime V: type) type {
                 
                 // Go BART: 子ノード確認 (terminal case後)
                 if (!n.children_bitset.isSet(octet)) {
+                    // Check if it's a leaf or fringe node instead
+                    if (n.leaf_bitset.isSet(octet)) {
+                        const leaf_rank = n.leaf_bitset.rank(octet) - 1;
+                        const leaf = n.leaf_items[leaf_rank];
+                        
+                        if (leaf.prefix.eql(masked_pfx)) {
+                            return leaf.value;
+                        }
+                    } else if (n.fringe_bitset.isSet(octet)) {
+                        if (base_index.isFringe(depth, bits)) {
+                            const fringe_rank = n.fringe_bitset.rank(octet) - 1;
+                            return n.fringe_items[fringe_rank].value;
+                        }
+                    }
                     return null;
                 }
                 
@@ -1078,7 +1119,7 @@ pub fn DirectNode(comptime V: type) type {
         }
         
         /// Internal implementation of lookupPrefixLPM following Go BART algorithm exactly
-        fn lookupPrefixLPMInternal(self: *const Self, pfx: *const Prefix, with_lmp: bool) struct { lmp_pfx: Prefix, val: V, ok: bool } {
+        fn lookupPrefixLPMInternal(self: *const Self, pfx: *const Prefix, with_lpm: bool) struct { lmp_pfx: Prefix, val: V, ok: bool } {
             if (!pfx.isValid()) {
                 return .{ .lmp_pfx = undefined, .val = undefined, .ok = false };
             }
@@ -1132,41 +1173,31 @@ pub fn DirectNode(comptime V: type) type {
                     return .{ .lmp_pfx = leaf.prefix, .val = leaf.value, .ok = true };
                 }
                 
-                // Go BART: fringeNode case  
+                // Go BART: fringeNode case
                 if (n.fringe_bitset.isSet(octet)) {
-                    const fringe_rank = n.fastFringeRank(octet) - 1;
-                    const fringe_value = n.fringe_items[fringe_rank].value;
-                    
-                    // Go BART: the bits of the fringe are defined by the depth
-                    const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
-                    if (fringe_bits > bits) {
-                        break;
+                    if (base_index.isFringe(depth, bits)) {
+                        const fringe_rank = n.fastFringeRank(octet) - 1;
+                        const fringe = n.fringe_items[fringe_rank];
+                        return .{ .lmp_pfx = undefined, .val = fringe.value, .ok = true };
                     }
-                    
-                    // Go BART: the LPM isn't needed, saves some cycles
-                    if (!with_lmp) {
-                        return .{ .lmp_pfx = undefined, .val = fringe_value, .ok = true };
-                    }
-                    
-                    // Go BART: get the LPM prefix back, it costs some cycles!
-                    var fringe_addr = ip;
-                    fringe_addr = fringe_addr.masked(fringe_bits);
-                    const fringe_prefix = Prefix.init(&fringe_addr, fringe_bits);
-                    return .{ .lmp_pfx = fringe_prefix, .val = fringe_value, .ok = true };
+                    break;
                 }
                 
                 // Go BART: *node case - descend down to next trie level
+                // HOT PATH: 通常は通常のノード（分岐予測最適化）
+                // 修正: children_bitsetがセットされている場合のみ下降とrank計算
                 if (n.children_bitset.isSet(octet)) {
                     const rank_idx = n.fastChildrenRank(octet) - 1;
                     n = n.children_items[rank_idx];
-                    continue;
+                } else {
+                    // leaf nodeやfringe nodeの場合はtraversalを終了
+                    break;
                 }
-                
-                break;
             }
             
             // Go BART: start backtracking, unwind the stack
-            var backtrack_depth: i32 = @intCast(depth);
+            var backtrack_depth: i32 = @as(i32, @intCast(depth));
+            
             while (backtrack_depth >= 0) : (backtrack_depth -= 1) {
                 const current_depth = @as(usize, @intCast(backtrack_depth)) & 0xf; // Go BART: BCE
                 
@@ -1191,21 +1222,24 @@ pub fn DirectNode(comptime V: type) type {
                 // Go BART: manually inlined: lpmGet(idx)
                 const bs = lookup_tbl.backTrackingBitset(idx);
                 
-                // Go BART: if topIdx, ok := n.prefixes.IntersectionTop(lpm.BackTrackingBitset(idx)); ok
+                // Go BART: if topIdx, ok := n.prefixes.IntersectionTop(lmp.BackTrackingBitset(idx)); ok
                 if (n.prefixes_bitset.intersectionTop(&bs)) |top_idx| {
-                    // Go BART: Simple logic - trust IntersectionTop result
+                    // Go BART: Simple IntersectionTop result - process directly
                     const rank_idx = n.prefixes_bitset.rank(top_idx) - 1;
                     const val = n.prefixes_items[rank_idx];
                     
                     // Go BART: called from LookupPrefix
-                    if (!with_lmp) {
+                    if (!with_lpm) {
                         return .{ .lmp_pfx = undefined, .val = val, .ok = true };
                     }
                     
                     // Go BART: called from LookupPrefixLPM
                     
                     // Go BART: get the pfxLen from depth and top idx
-                    const pfx_len = base_index.pfxLen256(@intCast(current_depth), top_idx) catch continue;
+                    const pfx_len = base_index.pfxLen256(@intCast(current_depth), top_idx) catch {
+                        // PfxLen256 error - fall through to continue backtracking
+                        break;
+                    };
                     
                     // Go BART: calculate the lmpPfx from incoming ip and new mask
                     var lmp_addr = ip;
@@ -1372,7 +1406,7 @@ pub fn DirectNode(comptime V: type) type {
                 const idx = self.prefixes_bitset.nthSet(i) orelse continue;
                 // TODO: Need to implement idxToFringeRoutes equivalent
                 // For now, use simplified approach
-                host_routes.setBit(idx);
+                host_routes.set(idx);
             }
             
             return host_routes.intersectsAny(&other.children_bitset);
@@ -1423,7 +1457,7 @@ pub fn DirectNode(comptime V: type) type {
                             return other_node.overlapsPrefixAtDepth(self_leaf.prefix, depth);
                         },
                         .leaf => |other_leaf| {
-                            return self_leaf.prefix.overlaps(other_leaf.prefix);
+                            return self_leaf.prefix.overlaps(&other_leaf.prefix);
                         },
                         .fringe => {
                             return true;
@@ -1474,12 +1508,12 @@ pub fn DirectNode(comptime V: type) type {
                 const child = n.getChildSafe(octet);
                 switch (child) {
                     .node => |child_node| {
-                        n = child_node;
+                        n = @ptrCast(@alignCast(child_node));
                         current_depth += 1;
                         continue;
                     },
                     .leaf => |child_leaf| {
-                        return child_leaf.prefix.overlaps(pfx);
+                        return child_leaf.prefix.overlaps(&pfx);
                     },
                     .fringe => {
                         return true;
@@ -1500,7 +1534,7 @@ pub fn DirectNode(comptime V: type) type {
             // 2. Test if prefix overlaps any route in this node
             // Use bitset intersections
             var allotted_prefix_routes = BitSet256.init();
-            allotted_prefix_routes.setBit(idx);
+            allotted_prefix_routes.set(idx);
             
             if (allotted_prefix_routes.intersectsAny(&self.prefixes_bitset)) {
                 return true;
@@ -1508,7 +1542,7 @@ pub fn DirectNode(comptime V: type) type {
             
             // 3. Test if prefix overlaps any child in this node
             var allotted_host_routes = BitSet256.init();
-            allotted_host_routes.setBit(idx);
+            allotted_host_routes.set(idx);
             
             return allotted_host_routes.intersectsAny(&self.children_bitset);
         }

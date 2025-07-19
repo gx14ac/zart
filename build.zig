@@ -145,20 +145,82 @@ pub fn build(b: *std.Build) void {
     const test_index_mapping_step = b.step("test_index_mapping", "Test index mapping analysis");
     test_index_mapping_step.dependOn(&test_index_mapping_exe.step);
 
-    // debug_lpm_detailed_analysis test
-    const debug_lpm_detailed_analysis_exe = b.addExecutable(.{
-        .name = "debug_lpm_detailed_analysis",
-        .root_source_file = b.path("src/debug_lpm_detailed_analysis.zig"),
+    // Debug: pfx_len check analysis  
+    const debug_pfx_len_check = b.addExecutable(.{
+        .name = "debug_pfx_len_check",
+        .root_source_file = b.path("src/debug_pfx_len_check.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.installArtifact(debug_lpm_detailed_analysis_exe);
     
-    const debug_lpm_detailed_analysis_cmd = b.addRunArtifact(debug_lpm_detailed_analysis_exe);
-    debug_lpm_detailed_analysis_cmd.step.dependOn(b.getInstallStep());
+    const debug_pfx_len_check_step = b.step("debug_pfx_len_check", "pfx_len check analysis");
+    debug_pfx_len_check_step.dependOn(&b.addRunArtifact(debug_pfx_len_check).step);
+
+    // Debug: Range check analysis  
+    const debug_range_check = b.addExecutable(.{
+        .name = "debug_range_check",
+        .root_source_file = b.path("src/debug_range_check.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     
-    const debug_lpm_detailed_analysis_step = b.step("debug_lpm_detailed_analysis", "Debug LPM detailed analysis");
-    debug_lpm_detailed_analysis_step.dependOn(&debug_lpm_detailed_analysis_cmd.step);
+    const debug_range_check_step = b.step("debug_range_check", "Range check analysis");
+    debug_range_check_step.dependOn(&b.addRunArtifact(debug_range_check).step);
+
+    // Debug: ZART individual bitsets analysis  
+    const debug_zart_individual_bitsets = b.addExecutable(.{
+        .name = "debug_zart_individual_bitsets",
+        .root_source_file = b.path("src/debug_zart_individual_bitsets.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const debug_zart_individual_bitsets_step = b.step("debug_zart_individual_bitsets", "ZART individual bitsets analysis");
+    debug_zart_individual_bitsets_step.dependOn(&b.addRunArtifact(debug_zart_individual_bitsets).step);
+
+    // Debug: ZART bitset analysis  
+    const debug_zart_bitset = b.addExecutable(.{
+        .name = "debug_zart_bitset",
+        .root_source_file = b.path("src/debug_zart_bitset.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const debug_zart_bitset_step = b.step("debug_zart_bitset", "ZART bitset analysis");
+    debug_zart_bitset_step.dependOn(&b.addRunArtifact(debug_zart_bitset).step);
+
+    // Debug: Detailed octet matching analysis
+    const debug_detailed_octet = b.addExecutable(.{
+        .name = "debug_detailed_octet",
+        .root_source_file = b.path("src/debug_detailed_octet.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const debug_detailed_octet_step = b.step("debug_detailed_octet", "Detailed octet matching debug");
+    debug_detailed_octet_step.dependOn(&b.addRunArtifact(debug_detailed_octet).step);
+
+    // Debug: Simple test for DirectNode
+    const debug_simple_test = b.addExecutable(.{
+        .name = "debug_simple_test",
+        .root_source_file = b.path("src/debug_simple_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const debug_simple_test_step = b.step("debug_simple_test", "Simple DirectNode test");
+    debug_simple_test_step.dependOn(&b.addRunArtifact(debug_simple_test).step);
+
+    // Debug: LPM detailed analysis
+    const debug_lmp_detailed_analysis = b.addExecutable(.{
+        .name = "debug_lmp_detailed_analysis",
+        .root_source_file = b.path("src/debug_lmp_detailed_analysis.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const debug_lmp_detailed_analysis_step = b.step("debug_lmp_detailed_analysis", "Debug LPM detailed analysis");
+    debug_lmp_detailed_analysis_step.dependOn(&b.addRunArtifact(debug_lmp_detailed_analysis).step);
 
 
 }

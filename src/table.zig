@@ -57,6 +57,18 @@ pub fn Table(comptime V: type) type {
         pub fn deinit(self: *Self) void {
             self.root4.deinit();
             self.root6.deinit();
+            
+            // persistent操作で作成されたテーブルの場合、自分自身も解放
+            // 判定方法：allocatorが設定されていて、かつこれがヒープ上のテーブルの場合
+            // ただし、スタック上のテーブルと区別するのは困難なので、
+            // より安全な方法を使用する
+        }
+        
+        /// deinitPersistent - persistent操作で作成されたテーブル用のクリーンアップ
+        pub fn deinitPersistent(self: *Self) void {
+            self.root4.deinit();
+            self.root6.deinit();
+            self.allocator.destroy(self);
         }
         
         /// insert - Go BART互換のinsert
@@ -80,23 +92,19 @@ pub fn Table(comptime V: type) type {
         /// insertPersist - Go BART互換のimmutable insert
         pub fn insertPersist(self: *const Self, prefix: *const Prefix, value: V) *Self {
             const new_table = self.allocator.create(Self) catch unreachable;
+            
+            // まず元のテーブルをクローン
             new_table.* = Self{
                 .allocator = self.allocator,
-                .root4 = self.root4.insertAtDepthPersist(prefix.*, value, 0, self.allocator) catch self.root4.clone(self.allocator),
-                .root6 = self.root6.insertAtDepthPersist(prefix.*, value, 0, self.allocator) catch self.root6.clone(self.allocator),
+                .root4 = self.root4.clone(self.allocator),
+                .root6 = self.root6.clone(self.allocator),
                 .size4 = self.size4,
                 .size6 = self.size6,
                 .node_pool = self.node_pool,
             };
             
-            // サイズを更新
-            if (prefix.isValid()) {
-                if (prefix.addr.is4()) {
-                    new_table.size4 += 1;
-                } else {
-                    new_table.size6 += 1;
-                }
-            }
+            // 新しいテーブルに挿入
+            new_table.insert(prefix, value);
             
             return new_table;
         }
@@ -123,7 +131,7 @@ pub fn Table(comptime V: type) type {
             const root = if (is_ipv4) self.root4 else self.root6;
             
             const result = root.lookupPrefix(&canonical_prefix);
-            if (result.ok) {
+                    if (result.ok) {
                 return node.LookupResult(V){
                     .prefix = canonical_prefix,
                     .value = result.val,
@@ -149,7 +157,7 @@ pub fn Table(comptime V: type) type {
             if (result.ok) {
                 return result.val;
             }
-            return null;
+                return null;
         }
         
         /// contains - Go BART互換の包含チェック
@@ -188,23 +196,19 @@ pub fn Table(comptime V: type) type {
         /// deletePersist - Go BART互換のimmutable delete
         pub fn deletePersist(self: *const Self, prefix: *const Prefix) *Self {
             const new_table = self.allocator.create(Self) catch unreachable;
+            
+            // まず元のテーブルをクローン
             new_table.* = Self{
                 .allocator = self.allocator,
-                .root4 = self.root4.deleteAtDepthPersist(prefix.*, 0, self.allocator) catch self.root4.clone(self.allocator),
-                .root6 = self.root6.deleteAtDepthPersist(prefix.*, 0, self.allocator) catch self.root6.clone(self.allocator),
+                .root4 = self.root4.clone(self.allocator),
+                .root6 = self.root6.clone(self.allocator),
                 .size4 = self.size4,
                 .size6 = self.size6,
                 .node_pool = self.node_pool,
             };
             
-            // サイズを更新
-            if (prefix.isValid()) {
-                if (prefix.addr.is4()) {
-                    if (new_table.size4 > 0) new_table.size4 -= 1;
-                } else {
-                    if (new_table.size6 > 0) new_table.size6 -= 1;
-                }
-            }
+            // 新しいテーブルから削除
+            new_table.delete(prefix);
             
             return new_table;
         }
@@ -306,13 +310,15 @@ pub fn Table(comptime V: type) type {
         
         /// overlapsPrefix - プレフィックスとの重複チェック
         pub fn overlapsPrefix(self: *const Self, prefix: *const Prefix) bool {
-            // TODO: DirectNodeベースのoverlapsPrefix実装
-            // 暫定的に単純な実装
-            _ = self;
-            _ = prefix;
-            return false;
+            if (!prefix.isValid()) return false;
+            
+            const canonical_prefix = prefix.masked();
+            const is_ipv4 = canonical_prefix.addr.is4();
+            const root = if (is_ipv4) self.root4 else self.root6;
+            
+            return root.overlapsPrefixAtDepth(canonical_prefix, 0);
         }
-        
+
         /// overlaps - 他のテーブルとの重複チェック
         pub fn overlaps(self: *const Self, other: *const Self) bool {
             // TODO: DirectNodeベースのoverlaps実装
@@ -328,9 +334,9 @@ pub fn Table(comptime V: type) type {
             // 暫定的に単純な実装
             _ = self;
             _ = other;
-            return false;
+                return false;
         }
-        
+
         /// overlaps6 - IPv6での重複チェック
         pub fn overlaps6(self: *const Self, other: *const Self) bool {
             // TODO: DirectNodeベースのoverlaps6実装

@@ -1,10 +1,8 @@
 const std = @import("std");
 const print = std.debug.print;
-const table_mod = @import("table.zig");
-const Table = table_mod.Table;
-const node = @import("node.zig");
-const IPAddr = node.IPAddr;
-const Prefix = node.Prefix;
+const DirectNode = @import("direct_node.zig").DirectNode;
+const Prefix = @import("node.zig").Prefix;
+const IPAddr = @import("node.zig").IPAddr;
 const base_index = @import("base_index.zig");
 
 pub fn main() !void {
@@ -12,86 +10,62 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var table = Table(u32).init(allocator);
-    defer table.deinit();
-
-    print("=== Insert Process Debug ===\n", .{});
+    print("=== InsertAtDepth Process Debug ===\n\n", .{});
     
-    // Debug 192.168.0.1/32 insertion
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 1 } }, 32);
-    print("\n=== Inserting 192.168.0.1/32 ===\n", .{});
-    print("Prefix: {}\n", .{pfx1});
-    print("Canonical: {}\n", .{pfx1.masked()});
+    // Create a DirectNode
+    const node = DirectNode(i32).init(allocator);
+    defer node.deinit();
     
-    const max_depth_info1 = base_index.maxDepthAndLastBits(32);
-    print("max_depth: {}, last_bits: {}\n", .{max_depth_info1.max_depth, max_depth_info1.last_bits});
+    // Test case: 10.0.0.0/24
+    const addr = IPAddr{ .v4 = .{ 10, 0, 0, 0 } };
+    const prefix = Prefix.init(&addr, 24).masked();
     
-    const idx1 = base_index.pfxToIdx256(1, max_depth_info1.last_bits);
-    print("pfxToIdx256(1, {}): {}\n", .{max_depth_info1.last_bits, idx1});
+    print("Inserting 10.0.0.0/24 (value=100):\n", .{});
+    print("  octets: [10, 0, 0, 0]\n", .{});
+    print("  bits: 24\n", .{});
+    print("  max_depth: 3, last_bits: 0\n\n", .{});
     
-    print("Before insert - root4 prefixes_bitset: ", .{});
-    for (0..256) |i| {
-        if (table.root4.prefixes_bitset.isSet(@intCast(i))) {
-            print("{}, ", .{i});
-        }
+    print("Expected behavior (Go BART):\n", .{});
+    print("  depth=0: octet=10, no child exists -> create new node\n", .{});
+    print("  depth=1: octet=0, no child exists -> create new node\n", .{});
+    print("  depth=2: octet=0, no child exists -> create new node\n", .{});
+    print("  depth=3: octet=0, depth==max_depth -> insert in prefixes[idx]\n\n", .{});
+    
+    print("Current behavior (ZART):\n", .{});
+    print("  depth=0: octet=10, no child exists -> insert as leafNode\n", .{});
+    print("  This is wrong! We need to create intermediate nodes.\n\n", .{});
+    
+    // Actually insert it
+    const result = try node.insertAtDepth(prefix, 100, 0);
+    print("Insert result: {} (false=new)\n", .{result});
+    
+    print("\nNode structure after insert:\n", .{});
+    print("  children_len: {}\n", .{node.children_len});
+    print("  prefixes_len: {}\n", .{node.prefixes_len});
+    print("  leaf_len: {}\n", .{node.leaf_len});
+    print("  fringe_len: {}\n", .{node.fringe_len});
+    
+    // Now test get
+    print("\nTrying get(10.0.0.0/24):\n", .{});
+    const get_result = node.get(&prefix);
+    if (get_result) |val| {
+        print("  Result: {} (SUCCESS)\n", .{val});
+    } else {
+        print("  Result: null (FAILED)\n", .{});
     }
-    print("\n", .{});
     
-    table.insert(&pfx1, 1);
+    // Test with /32
+    print("\n--- Test with /32 ---\n", .{});
+    const addr32 = IPAddr{ .v4 = .{ 1, 2, 3, 4 } };
+    const prefix32 = Prefix.init(&addr32, 32).masked();
     
-    print("After insert - root4 prefixes_bitset: ", .{});
-    for (0..256) |i| {
-        if (table.root4.prefixes_bitset.isSet(@intCast(i))) {
-            print("{}, ", .{i});
-        }
-    }
-    print("\n", .{});
+    print("Inserting 1.2.3.4/32 (value=1234):\n", .{});
+    const result32 = try node.insertAtDepth(prefix32, 1234, 0);
+    print("Insert result: {} (false=new)\n", .{result32});
     
-    // Debug 192.168.0.2/32 insertion
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 2 } }, 32);
-    print("\n=== Inserting 192.168.0.2/32 ===\n", .{});
-    print("Prefix: {}\n", .{pfx2});
-    print("Canonical: {}\n", .{pfx2.masked()});
-    
-    const idx2 = base_index.pfxToIdx256(2, max_depth_info1.last_bits);
-    print("pfxToIdx256(2, {}): {}\n", .{max_depth_info1.last_bits, idx2});
-    
-    table.insert(&pfx2, 2);
-    
-    print("After insert - root4 prefixes_bitset: ", .{});
-    for (0..256) |i| {
-        if (table.root4.prefixes_bitset.isSet(@intCast(i))) {
-            print("{}, ", .{i});
-        }
-    }
-    print("\n", .{});
-    
-    // Debug 192.168.0.0/26 insertion
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 26);
-    print("\n=== Inserting 192.168.0.0/26 ===\n", .{});
-    print("Prefix: {}\n", .{pfx3});
-    print("Canonical: {}\n", .{pfx3.masked()});
-    
-    const max_depth_info3 = base_index.maxDepthAndLastBits(26);
-    print("max_depth: {}, last_bits: {}\n", .{max_depth_info3.max_depth, max_depth_info3.last_bits});
-    
-    const idx3 = base_index.pfxToIdx256(0, max_depth_info3.last_bits);
-    print("pfxToIdx256(0, {}): {}\n", .{max_depth_info3.last_bits, idx3});
-    
-    table.insert(&pfx3, 7);
-    
-    print("After insert - root4 prefixes_bitset: ", .{});
-    for (0..256) |i| {
-        if (table.root4.prefixes_bitset.isSet(@intCast(i))) {
-            print("{}, ", .{i});
-        }
-    }
-    print("\n", .{});
-    
-    print("\n=== Final State ===\n", .{});
-    print("Table size: {}\n", .{table.size()});
-    print("Root4 prefixes_len: {}\n", .{table.root4.prefixes_len});
-    print("Root4 children_len: {}\n", .{table.root4.children_len});
-    print("Root4 leaf_len: {}\n", .{table.root4.leaf_len});
-    print("Root4 fringe_len: {}\n", .{table.root4.fringe_len});
+    print("\nNode structure after insert:\n", .{});
+    print("  children_len: {}\n", .{node.children_len});
+    print("  prefixes_len: {}\n", .{node.prefixes_len});
+    print("  leaf_len: {}\n", .{node.leaf_len});
+    print("  fringe_len: {}\n", .{node.fringe_len});
 } 
