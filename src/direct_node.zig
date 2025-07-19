@@ -83,19 +83,17 @@ pub fn DirectNode(comptime V: type) type {
             return self;
         }
         
-        /// deinit - 再帰的cleanup (修正版)
+        /// deinit - 再帰的cleanup (簡素化版)
         pub fn deinit(self: *Self) void {
             // 子ノードを再帰的にクリーンアップ
-            // children_bitsetの各ビットをチェック
-            var processed_children: [256]bool = [_]bool{false} ** 256;
-            
-            for (0..256) |i| {
-                const octet = @as(u8, @intCast(i));
-                if (self.children_bitset.isSet(octet)) {
-                    const rank_idx = self.children_bitset.rank(octet) - 1;
-                    if (rank_idx < self.children_len and !processed_children[rank_idx]) {
-                        self.children_items[rank_idx].deinit();
-                        processed_children[rank_idx] = true;
+            // children_bitsetに基づいて安全にクリーンアップ
+            var array_idx: usize = 0;
+            for (0..256) |bit_idx_usize| {
+                const bit_idx = @as(u8, @intCast(bit_idx_usize));
+                if (self.children_bitset.isSet(bit_idx)) {
+                    if (array_idx < self.children_len) {
+                        self.children_items[array_idx].deinit();
+                        array_idx += 1;
                     }
                 }
             }
@@ -110,6 +108,29 @@ pub fn DirectNode(comptime V: type) type {
                    self.children_len == 0 and 
                    self.leaf_len == 0 and 
                    self.fringe_len == 0;
+        }
+        
+        /// hasAnyRoutes - このノードまたは子ノードに何らかのルートがあるかチェック
+        pub fn hasAnyRoutes(self: *const Self) bool {
+            // Check if this node has any routes
+            if (self.prefixes_len > 0 or self.leaf_len > 0 or self.fringe_len > 0) {
+                return true;
+            }
+            
+            // Recursively check children
+            for (0..256) |i| {
+                const octet = @as(u8, @intCast(i));
+                if (self.children_bitset.isSet(octet)) {
+                    const rank_idx = self.children_bitset.rank(octet) - 1;
+                    if (rank_idx < self.children_len) {
+                        if (self.children_items[rank_idx].hasAnyRoutes()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            
+            return false;
         }
         
         // =================================================================
@@ -570,6 +591,8 @@ pub fn DirectNode(comptime V: type) type {
             if (was_present) {
                 // Go BART: overwrite existing (no shifting needed)
                 const rank_idx = self.children_bitset.rank(octet) - 1;
+                // 古い子ノードを解放してから新しいものを設定
+                self.children_items[rank_idx].deinit();
                 self.children_items[rank_idx] = child;
                 return true;
             }
@@ -584,6 +607,14 @@ pub fn DirectNode(comptime V: type) type {
             // 3. Insert child item
             self.insertChildItem(rank_idx, child);
             self.children_len += 1;
+            
+            // 4. 整合性チェック（デバッグ用）
+            if (self.children_len != self.children_bitset.popcnt()) {
+                // 整合性エラーが発生した場合の緊急処理
+                self.children_bitset.clear(octet);
+                self.children_len -= 1;
+                return false;
+            }
             
             return false;
         }
@@ -920,9 +951,14 @@ pub fn DirectNode(comptime V: type) type {
             return null;
         }
         
-        /// delete - prefix削除
+        /// delete - prefix削除（再帰的ノードクリーンアップ付き）
         pub fn delete(self: *Self, pfx: *const Prefix) ?V {
-            // Go BART互換のdelete実装
+            const result = self.deleteRecursive(pfx, 0);
+            return result;
+        }
+        
+        /// deleteRecursive - 再帰的削除（パス上の空ノードクリーンアップ付き）
+        fn deleteRecursive(self: *Self, pfx: *const Prefix, depth: usize) ?V {
             const masked_pfx = pfx.masked();
             const ip = masked_pfx.addr;
             const bits = masked_pfx.bits;
@@ -932,76 +968,182 @@ pub fn DirectNode(comptime V: type) type {
             const max_depth = max_depth_info.max_depth;
             const last_bits = max_depth_info.last_bits;
             
-            var n = self;
+            if (depth >= octets.len) return null;
             
-            // Find the trie node where the prefix should be
-            for (octets, 0..) |octet, depth| {
-                if (depth == max_depth) {
-                    // Terminal case: try to delete from prefixes
-                    const idx = base_index.pfxToIdx256(octet, last_bits);
-                    if (n.prefixes_bitset.isSet(idx)) {
-                        const rank_idx = n.prefixes_bitset.rank(idx) - 1;
-                        const old_value = n.prefixes_items[rank_idx];
-                        
-                        // Remove from bitset
-                        n.prefixes_bitset.clear(idx);
-                        
-                        // Remove from array by shifting
-                        n.removePrefixItem(rank_idx);
-                        n.prefixes_len -= 1;
-                        
-                        return old_value;
-                    }
-                    return null;
+            const octet = octets[depth];
+            
+            // Terminal case: delete from this node
+            if (depth == max_depth) {
+                const idx = base_index.pfxToIdx256(octet, last_bits);
+                if (self.prefixes_bitset.isSet(idx)) {
+                    const rank_idx = self.prefixes_bitset.rank(idx) - 1;
+                    const old_value = self.prefixes_items[rank_idx];
+                    
+                    // Remove from bitset
+                    self.prefixes_bitset.clear(idx);
+                    
+                    // Remove from array by shifting
+                    self.removePrefixItem(rank_idx);
+                    self.prefixes_len -= 1;
+                    
+                    return old_value;
+                }
+                return null;
+            }
+            
+            // Handle leaf nodes
+            if (self.leaf_bitset.isSet(octet)) {
+                const leaf_rank = self.leaf_bitset.rank(octet) - 1;
+                const leaf = self.leaf_items[leaf_rank];
+                
+                if (leaf.prefix.eql(masked_pfx)) {
+                    const old_value = leaf.value;
+                    
+                    // Remove from bitset
+                    self.leaf_bitset.clear(octet);
+                    
+                    // Remove from array
+                    self.removeLeafItem(leaf_rank);
+                    self.leaf_len -= 1;
+                    
+                    return old_value;
+                }
+                return null;
+            }
+            
+            // Handle fringe nodes  
+            if (self.fringe_bitset.isSet(octet)) {
+                if (base_index.isFringe(depth, bits)) {
+                    const fringe_rank = self.fringe_bitset.rank(octet) - 1;
+                    const old_value = self.fringe_items[fringe_rank].value;
+                    
+                    // Remove from bitset
+                    self.fringe_bitset.clear(octet);
+                    
+                    // Remove from array
+                    self.removeFringeItem(fringe_rank);
+                    self.fringe_len -= 1;
+                    
+                    return old_value;
+                }
+                return null;
+            }
+            
+            // Handle child nodes: recursive case
+            if (self.children_bitset.isSet(octet)) {
+                const rank_idx = self.children_bitset.rank(octet) - 1;
+                if (rank_idx >= self.children_len) return null;
+                
+                const child = self.children_items[rank_idx];
+                
+                // Recursively delete from child
+                const result = child.deleteRecursive(pfx, depth + 1);
+                
+                // After deletion, check if child is now empty
+                if (result != null and child.isEmpty()) {
+                    // Child is empty, remove it
+                    self.removeChildNodeSafe(octet);
                 }
                 
-                // Continue traversal
-                if (!n.children_bitset.isSet(octet)) {
-                    // Check leaf nodes
-                    if (n.leaf_bitset.isSet(octet)) {
-                        const leaf_rank = n.leaf_bitset.rank(octet) - 1;
-                        const leaf = n.leaf_items[leaf_rank];
-                        
-                        if (leaf.prefix.eql(masked_pfx)) {
-                            const old_value = leaf.value;
-                            
-                            // Remove from bitset
-                            n.leaf_bitset.clear(octet);
-                            
-                            // Remove from array
-                            n.removeLeafItem(leaf_rank);
-                            n.leaf_len -= 1;
-                            
-                            return old_value;
-                        }
-                    }
-                    
-                    // Check fringe nodes
-                    if (n.fringe_bitset.isSet(octet)) {
-                        if (base_index.isFringe(depth, bits)) {
-                            const fringe_rank = n.fringe_bitset.rank(octet) - 1;
-                            const old_value = n.fringe_items[fringe_rank].value;
-                            
-                            // Remove from bitset
-                            n.fringe_bitset.clear(octet);
-                            
-                            // Remove from array
-                            n.removeFringeItem(fringe_rank);
-                            n.fringe_len -= 1;
-                            
-                            return old_value;
-                        }
-                    }
-                    
-                    return null;
-                }
-                
-                // Descend to child node
-                const rank_idx = n.children_bitset.rank(octet) - 1;
-                n = n.children_items[rank_idx];
+                return result;
             }
             
             return null;
+        }
+        
+        /// removeChildNodeSafe - 子ノードを安全に削除（deinit付き）
+        fn removeChildNodeSafe(self: *Self, octet: u8) void {
+            if (!self.children_bitset.isSet(octet)) return;
+            
+            const rank_idx = self.children_bitset.rank(octet) - 1;
+            if (rank_idx >= self.children_len) return;
+            
+            // 子ノードを解放
+            const child = self.children_items[rank_idx];
+            child.deinit();
+            
+            // ビットセットから削除
+            self.children_bitset.clear(octet);
+            
+            // 配列から削除（要素をシフト）
+            self.removeChildItem(rank_idx);
+            self.children_len -= 1;
+            
+            // 整合性チェック（デバッグ用）
+            if (self.children_len != self.children_bitset.popcnt()) {
+                // 緊急修復
+                self.children_len = self.children_bitset.popcnt();
+            }
+        }
+        
+        /// cleanupEmptyNodes - 空になったノードをクリーンアップ
+        fn cleanupEmptyNodes(self: *Self) void {
+            // 子ノードから削除可能なものを特定
+            var nodes_to_remove = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer nodes_to_remove.deinit();
+            
+            // 各子ノードをチェック
+            for (0..256) |i| {
+                const octet = @as(u8, @intCast(i));
+                if (self.children_bitset.isSet(octet)) {
+                    const rank_idx = self.children_bitset.rank(octet) - 1;
+                    if (rank_idx < self.children_len) {
+                        const child = self.children_items[rank_idx];
+                        
+                        // 子ノードが空になったかチェック
+                        if (child.isEmpty()) {
+                            nodes_to_remove.append(octet) catch {};
+                        }
+                    }
+                }
+            }
+            
+            // 空のノードを削除
+            for (nodes_to_remove.items) |octet| {
+                self.removeChildNode(octet);
+            }
+        }
+        
+        /// removeChildNode - 子ノードを安全に削除
+        fn removeChildNode(self: *Self, octet: u8) void {
+            if (!self.children_bitset.isSet(octet)) return;
+            
+            const rank_idx = self.children_bitset.rank(octet) - 1;
+            if (rank_idx >= self.children_len) return;
+            
+            // 子ノードを解放
+            const child = self.children_items[rank_idx];
+            child.deinit();
+            
+            // ビットセットから削除
+            self.children_bitset.clear(octet);
+            
+            // 配列から削除（要素をシフト）
+            self.removeChildItem(rank_idx);
+            self.children_len -= 1;
+        }
+        
+        /// removeChildItem - 子ノード配列から要素を削除
+        fn removeChildItem(self: *Self, index: usize) void {
+            if (index >= self.children_len) return;
+            
+            const move_count = self.children_len - index - 1;
+            if (move_count > 0) {
+                if (move_count <= 8) {
+                    // 小さなサイズは展開ループで前に移動
+                    for (0..move_count) |i| {
+                        self.children_items[index + i] = self.children_items[index + i + 1];
+                    }
+                } else {
+                    // 大きなサイズはstd.mem.copyForwards使用
+                    std.mem.copyForwards(*Self, self.children_items[index..index + move_count], self.children_items[index + 1..index + 1 + move_count]);
+                }
+            }
+            
+            // 最後の要素をクリア（デバッグ目的）
+            if (self.children_len > 0) {
+                self.children_items[self.children_len - 1] = undefined;
+            }
         }
         
         /// removePrefixItem - プレフィックス配列から要素を削除
@@ -1071,7 +1213,7 @@ pub fn DirectNode(comptime V: type) type {
                    @as(usize, self.fringe_len);
         }
         
-        /// clone - deep copy
+        /// clone - deep copy (修正版：children_bitset対応)
         pub fn clone(self: *const Self, allocator: std.mem.Allocator) *Self {
             const new_node = Self.init(allocator);
             
@@ -1088,11 +1230,20 @@ pub fn DirectNode(comptime V: type) type {
             @memcpy(new_node.fringe_items[0..self.fringe_len], self.fringe_items[0..self.fringe_len]);
             new_node.fringe_len = self.fringe_len;
             
-            // Clone children recursively
+            // Clone children recursively (修正版：bitset対応)
             new_node.children_bitset = self.children_bitset;
             new_node.children_len = self.children_len;
-            for (0..self.children_len) |i| {
-                new_node.children_items[i] = self.children_items[i].clone(allocator);
+            
+            // children_bitsetに基づいて正しくクローン
+            var array_idx: usize = 0;
+            for (0..256) |bit_idx_usize| {
+                const bit_idx = @as(u8, @intCast(bit_idx_usize));
+                if (self.children_bitset.isSet(bit_idx)) {
+                    if (array_idx < self.children_len) {
+                        new_node.children_items[array_idx] = self.children_items[array_idx].clone(allocator);
+                        array_idx += 1;
+                    }
+                }
             }
             
             return new_node;
@@ -1479,6 +1630,13 @@ pub fn DirectNode(comptime V: type) type {
             const max_depth_info = base_index.maxDepthAndLastBits(bits);
             const max_depth = max_depth_info.max_depth;
             const last_bits = max_depth_info.last_bits;
+            
+            // Special case: 0.0.0.0/0 (default route) overlaps with ANY route in the table
+            if (bits == 0) {
+                // If table has any routes at all, it overlaps with 0.0.0.0/0
+                // We need to check the entire table, not just this node
+                return self.hasAnyRoutes();
+            }
             
             var n = self;
             var current_depth = depth;
