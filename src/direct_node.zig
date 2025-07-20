@@ -11,31 +11,28 @@ const Child = node.Child;
 const LookupResult = node.LookupResult;
 const lookup_tbl = @import("lookup_tbl.zig");
 
-// 🔥 分岐予測最適化マクロ定義（Zig 0.14対応）
 inline fn likely(x: bool) bool {
-    // Zig 0.14ではbuiltin.expectの代わりにcomptime最適化を使用
     return x;
 }
 
 inline fn unlikely(x: bool) bool {
-    // Zig 0.14ではbuiltin.expectの代わりにcomptime最適化を使用
     return x;
 }
 
-/// DirectNode - Go BART完全互換のSparse Array実装
-/// 動的配列 + popcount圧縮でGo BARTと同等の効率性を実現
+/// DirectNode - Go BART compatible sparse array implementation
+/// Uses dynamic arrays with popcount compression for Go BART equivalent efficiency
 pub fn DirectNode(comptime V: type) type {
     return struct {
         const Self = @This();
         
-        // 🚀 Go BART完全互換: Sparse Array構造
+        // Go BART compatible sparse array structure
         allocator: std.mem.Allocator,
         
-        // prefixes: sparse array with popcount compression (Go BART互換)
+        // prefixes: sparse array with popcount compression
         prefixes_bitset: BitSet256,
         prefixes_items: std.ArrayList(V),
         
-        // children: sparse array with popcount compression (Go BART互換)
+        // children: sparse array with popcount compression
         children_bitset: BitSet256,
         children_items: std.ArrayList(*Self),
         
@@ -47,7 +44,7 @@ pub fn DirectNode(comptime V: type) type {
         fringe_bitset: BitSet256,
         fringe_items: std.ArrayList(FringeNode(V)),
         
-        /// Go BART互換初期化
+        /// Go BART compatible initialization
         pub fn init(allocator: std.mem.Allocator) *Self {
             const self = allocator.create(Self) catch @panic("OOM");
             self.* = Self{
@@ -64,7 +61,7 @@ pub fn DirectNode(comptime V: type) type {
             return self;
         }
         
-        /// Go BART互換deinit
+        /// Go BART compatible deinit
         pub fn deinit(self: *Self) void {
             // 子ノードを再帰的に解放
             for (self.children_items.items) |child| {
@@ -78,7 +75,7 @@ pub fn DirectNode(comptime V: type) type {
             self.allocator.destroy(self);
         }
         
-        /// 🚀 Go BART完全互換InsertAt実装 - prefixes
+        /// 🚀 Go BART compatible InsertAt implementation - prefixes
         fn insertPrefixAt(self: *Self, idx: u8, value: V) !bool {
             // Go BART: slot exists, overwrite value
             if (self.prefixes_bitset.isSet(idx)) {
@@ -97,7 +94,7 @@ pub fn DirectNode(comptime V: type) type {
             return false; // new
         }
         
-        /// 🚀 Go BART完全互換InsertAt実装 - children
+        /// 🚀 Go BART compatible InsertAt implementation - children
         fn insertChildAt(self: *Self, idx: u8, child: *Self) !bool {
             // Go BART: slot exists, overwrite value
             if (self.children_bitset.isSet(idx)) {
@@ -118,7 +115,7 @@ pub fn DirectNode(comptime V: type) type {
             return false; // new
         }
         
-        /// 🚀 Go BART完全互換InsertAt実装 - leaf
+        /// 🚀 Go BART compatible InsertAt implementation - leaf
         fn insertLeafAt(self: *Self, idx: u8, leaf: LeafNode(V)) !bool {
             // Go BART: slot exists, overwrite value
             if (self.leaf_bitset.isSet(idx)) {
@@ -137,7 +134,7 @@ pub fn DirectNode(comptime V: type) type {
             return false; // new
         }
         
-        /// 🚀 Go BART完全互換InsertAt実装 - fringe
+        /// 🚀 Go BART compatible InsertAt implementation - fringe
         fn insertFringeAt(self: *Self, idx: u8, fringe: FringeNode(V)) !bool {
             // Go BART: slot exists, overwrite value
             if (self.fringe_bitset.isSet(idx)) {
@@ -158,21 +155,21 @@ pub fn DirectNode(comptime V: type) type {
         
 
         
-        /// deinitPersistent - persistent操作用の安全な解放 (完全修正版)
+        /// deinitPersistent - persistent operation safe deallocation (fully corrected version)
         pub fn deinitPersistent(self: *Self) void {
-            // persistent操作で作成されたノードツリーを安全に解放
+            // safe release of the node tree created by persistent operations
             for (0..self.children_len) |i| {
                 self.children_items[i].deinitPersistent();
             }
             self.allocator.destroy(self);
         }
         
-        /// isEmpty - ノードが空かチェック
+        /// isEmpty - check if the node is empty
         pub fn isEmpty(self: *const Self) bool {
             return self.prefixes_items.items.len == 0 and self.children_items.items.len == 0;
         }
         
-        /// hasAnyRoutes - このノードまたは子ノードに何らかのルートがあるかチェック
+        /// hasAnyRoutes - check if this node or any of its children has any routes
         pub fn hasAnyRoutes(self: *const Self) bool {
             // Check if this node has any routes
             if (self.prefixes_items.items.len > 0 or self.leaf_items.items.len > 0 or self.fringe_items.items.len > 0) {
@@ -196,24 +193,24 @@ pub fn DirectNode(comptime V: type) type {
         }
         
         // =================================================================
-        // Phase 4: Persistent Operations (Go BART互換)
+        // Phase 4: Persistent Operations (Go BART compatible)
         // =================================================================
         
-        /// insertAtDepthPersist - Go BART互換のimmutable insert
+        /// insertAtDepthPersist - Go BART compatible immutable insert
         pub fn insertAtDepthPersist(self: *const Self, prefix: Prefix, value: V, depth: usize, allocator: std.mem.Allocator) !*Self {
             const new_node = self.clone(allocator);
             _ = try new_node.insertAtDepth(prefix, value, depth);
             return new_node;
         }
         
-        /// deleteAtDepthPersist - Go BART互換のimmutable delete
+        /// deleteAtDepthPersist - Go BART compatible immutable delete
         pub fn deleteAtDepthPersist(self: *const Self, prefix: Prefix, _: usize, allocator: std.mem.Allocator) !*Self {
             const new_node = self.clone(allocator);
             _ = new_node.delete(&prefix);
             return new_node;
         }
         
-        /// updateAtDepthPersist - Go BART互換のimmutable update
+        /// updateAtDepthPersist - Go BART compatible immutable update
         pub fn updateAtDepthPersist(self: *const Self, prefix: Prefix, value: V, depth: usize, allocator: std.mem.Allocator) !*Self {
             const new_node = self.clone(allocator);
             _ = try new_node.insertAtDepth(prefix, value, depth);
@@ -221,11 +218,11 @@ pub fn DirectNode(comptime V: type) type {
         }
         
         // =================================================================
-        // Phase 1: Go BART互換insert実装
+        // Phase 1: Go BART compatible insert implementation
         // =================================================================
         
-        /// Go BART完全互換insert実装 - ホットパス最適化版
-        /// 目標: 12-15 ns/op (Go BART: 15-20 ns/op)
+        /// Go BART compatible insert implementation - hot path optimized version
+        /// Target: 12-15 ns/op (Go BART: 15-20 ns/op)
         pub fn insertAtDepth(self: *Self, prefix: Prefix, value: V, depth: usize) !bool {
             const ip = prefix.addr;
             const bits = prefix.bits;
@@ -261,47 +258,47 @@ pub fn DirectNode(comptime V: type) type {
                 const rank_idx = n.children_bitset.rank(octet) - 1;
                 const kid = n.children_items.items[rank_idx];
                 
-                // Go BART: 通常のnodeの場合は下降継続
+                // Go BART: normal node case is descent continuation
                 n = kid;
             }
             
             return false; // unreachable in normal cases
         }
         
-        /// 🚀 ホストルート専用超高速実装 - メモリアクセス最適化版
+        /// 🚀 host route specific high-speed implementation - memory access optimized version
         fn insertHostRouteFast(self: *Self, prefix: Prefix, value: V, depth: usize) bool {
             const octets = prefix.addr.asSlice();
             var n = self;
             var current_depth = depth;
             
-            // ホストルート最適化: 最終オクテットまで直行
+            // host route optimization: go directly to last octet
             while (current_depth < octets.len) : (current_depth += 1) {
                 const octet = octets[current_depth];
                 
-                // 🔥 分岐予測最適化: 最終オクテット判定（最頻）
+                // 🔥 branch prediction optimization: check if last octet (most frequent)
                 if (likely(current_depth == octets.len - 1)) {
                     return n.insertLeafDirectOptimized(octet, prefix, value);
                 }
                 
-                // ⚡ メモリアクセス最適化: 複数bitsetを一括チェック
+                // ⚡ memory access optimization: check multiple bitsets at once
                 const children_exists = n.children_bitset.isSet(octet);
                 const is_pure_child = children_exists and !n.leaf_bitset.isSet(octet) and !n.fringe_bitset.isSet(octet);
                 
-                // 🔥 分岐予測最適化: 子ノード存在チェック（高頻度）
+                // 🔥 branch prediction optimization: check if child node exists (high frequency)
                 if (likely(children_exists)) {
                     if (likely(is_pure_child)) {
-                        // ⚡ メモリアクセス最適化: 事前計算されたrank使用
+                        // ⚡ memory access optimization: use precomputed rank
                         const rank_idx = n.fastChildrenRankCached(octet, true) - 1;
                         n = n.children_items[rank_idx];
-                        // ⚡ メモリアクセス最適化: 次回アクセス用プリフェッチ
+                        // ⚡ memory access optimization: prefetch for next access
                         @prefetch(&n.children_bitset, .{ .rw = .read, .locality = 3, .cache = .data });
                         continue;
                     }
-                    // leaf/fringe展開が必要（低頻度）
+                    // leaf/fringe expansion is necessary (low frequency)
                     return n.handleChildExpansion(octet, prefix, value, current_depth);
                 }
                 
-                // 🔥 分岐予測最適化: 新しい中間ノード作成（低頻度）
+                // 🔥 branch prediction optimization: create new intermediate node (low frequency)
                 const new_node = Self.init(n.allocator);
                 _ = n.insertChildDirect(octet, new_node);
                 n = new_node;
@@ -310,133 +307,133 @@ pub fn DirectNode(comptime V: type) type {
             return false;
         }
         
-        /// 🚀 プレフィックス挿入専用高速実装 - メモリアクセス最適化版
+        /// 🚀 prefix insertion specific high-speed implementation - memory access optimized version
         fn insertPrefixFast(self: *Self, prefix: Prefix, value: V, depth: usize, max_depth: usize, last_bits: u8) bool {
             const octets = prefix.addr.asSlice();
             var n = self;
             var current_depth = depth;
             
-            // プレフィックス最適化: ターミナルケース事前チェック
+            // prefix optimization: check terminal case before loop
             while (current_depth < octets.len) : (current_depth += 1) {
                 const octet = octets[current_depth];
                 
-                // 🔥 分岐予測最適化 1: ターミナルケース（最頻）
+                // 🔥 branch prediction optimization 1: terminal case (most frequent)
                 if (likely(current_depth == max_depth)) {
                     const idx = base_index.pfxToIdx256(octet, last_bits);
                     return n.insertPrefixDirect(idx, value);
                 }
                 
-                // ⚡ メモリアクセス最適化 1: 事前にbitset状態をキャッシュ
+                // ⚡ memory access optimization 1: cache state of bitset
                 const children_exists = n.children_bitset.isSet(octet);
                 const leaf_exists = n.leaf_bitset.isSet(octet);
                 const fringe_exists = n.fringe_bitset.isSet(octet);
                 
-                // 🔥 分岐予測最適化 2: 既存子ノード存在（2番目に頻繁）
+                // 🔥 branch prediction optimization 2: existing child node exists (2nd most frequent)
                 if (likely(children_exists)) {
                     if (likely(!leaf_exists and !fringe_exists)) {
-                        // ⚡ メモリアクセス最適化 2: rank計算を一度だけ実行
+                        // ⚡ memory access optimization 2: calculate rank once
                         const rank_idx = n.fastChildrenRankCached(octet, true) - 1;
-                        // ⚡ メモリアクセス最適化 3: 次のノードをプリフェッチ
+                        // ⚡ memory access optimization 3: prefetch next node
                         n = n.children_items[rank_idx];
                         @prefetch(&n.children_bitset, .{ .rw = .read, .locality = 3, .cache = .data });
                         continue;
                     }
-                    // 展開処理 - 低頻度
+                    // expansion processing - low frequency
                     return n.handleChildExpansion(octet, prefix, value, current_depth);
                 }
                 
-                // 🔥 分岐予測最適化 3: leaf/fringe存在チェック（低頻度）
+                // 🔥 branch prediction optimization 3: check if leaf/fringe exists (low frequency)
                 if (unlikely(leaf_exists or fringe_exists)) {
                     return n.handleChildExpansion(octet, prefix, value, current_depth);
                 }
                 
-                // 🔥 分岐予測最適化 4: 新しいパス作成（最低頻度）
+                // 🔥 branch prediction optimization 4: create new path (lowest frequency)
                 return n.createNewPath(octet, prefix, value, current_depth, max_depth);
             }
             
             return false;
         }
         
-        /// 🚀 超高速子ノード型判定
+        /// 🚀 high-speed child node type determination
         inline fn isChildNodeFast(self: *const Self, octet: u8) bool {
-            // 最頻ケース優先: 通常ノードの場合
+            // most frequent case: normal node case
             return !self.leaf_bitset.isSet(octet) and !self.fringe_bitset.isSet(octet);
         }
         
-        /// 🚀 新しいパス作成（コールドパス専用）
+        /// 🚀 create new path (cold path only)
         fn createNewPath(self: *Self, octet: u8, prefix: Prefix, value: V, current_depth: usize, max_depth: usize) bool {
-            // 中間ノード作成が必要かチェック
+            // check if intermediate node creation is necessary
             if (current_depth + 1 < max_depth or (current_depth + 1 == max_depth and current_depth + 1 < prefix.addr.asSlice().len)) {
                 const new_node = Self.init(self.allocator);
                 _ = self.insertChildDirect(octet, new_node);
-                // 再帰呼び出しを直接実行（inline修飾子を外す）
+                // call recursively without inlining
                 return new_node.insertPrefixFast(prefix, value, current_depth + 1, max_depth, base_index.maxDepthAndLastBits(prefix.bits).last_bits);
             }
             
-            // 最終深度でleaf/fringe挿入
+            // insert at leaf/fringe at final depth
             if (base_index.isFringe(current_depth, prefix.bits)) {
                 return self.insertFringeDirectOptimized(octet, prefix, value);
             }
             return self.insertLeafDirectOptimized(octet, prefix, value);
         }
         
-        /// Go BART最適化: 子ノード型判定 (旧版 - 後方互換)
+        /// Go BART optimized: child node type determination (old version - backward compatibility)
         inline fn isChildNode(self: *const Self, octet: u8) bool {
-            // 通常のnodeかチェック（最頻ケース）
+            // check if it's a normal node (most frequent case)
             return !self.leaf_bitset.isSet(octet) and !self.fringe_bitset.isSet(octet);
         }
         
-        // Phase 5: BitSet256 rank操作最適化 - 高速化
+        // Phase 5: BitSet256 rank operation optimization - high speed
         
-        /// 高速rank計算 - children_bitset専用最適化
+        /// fast rank calculation - children_bitset specific optimization
         inline fn fastChildrenRank(self: *const Self, idx: u8) u16 {
-            // 最頻度ケース: 単一set bitの場合の高速パス
+            // most frequent case: fast path for single set bit
             if (self.children_items.items.len == 1) {
-                // 単一要素の場合は直接計算
+                // if result is known for single element, skip calculation
                 return if (self.children_bitset.isSet(idx)) 1 else 0;
             }
             
-            // 一般的なケース: 標準rank計算
+            // general case: standard rank calculation
             return self.children_bitset.rank(idx);
         }
         
-        /// 高速rank計算 - prefixes_bitset専用最適化
+        /// fast rank calculation - prefixes_bitset specific optimization
         inline fn fastPrefixesRank(self: *const Self, idx: u8) u16 {
-            // 最頻度ケース: 単一set bitの場合の高速パス
+            // most frequent case: fast path for single set bit
             if (self.prefixes_items.items.len == 1) {
-                // 単一要素の場合は直接計算
+                // if result is known for single element, skip calculation
                 return if (self.prefixes_bitset.isSet(idx)) 1 else 0;
             }
             
-            // 一般的なケース: 標準rank計算
+            // general case: standard rank calculation
             return self.prefixes_bitset.rank(idx);
         }
         
-        /// 高速rank計算 - leaf_bitset専用最適化
+        /// fast rank calculation - leaf_bitset specific optimization
         inline fn fastLeafRank(self: *const Self, idx: u8) u16 {
-            // 最頻度ケース: 単一set bitの場合の高速パス
+            // most frequent case: fast path for single set bit
             if (self.leaf_items.items.len == 1) {
-                // 単一要素の場合は直接計算
+                // if result is known for single element, skip calculation
                 return if (self.leaf_bitset.isSet(idx)) 1 else 0;
             }
             
-            // 一般的なケース: 標準rank計算
+            // general case: standard rank calculation
             return self.leaf_bitset.rank(idx);
         }
         
-        /// 高速rank計算 - fringe_bitset専用最適化
+        /// fast rank calculation - fringe_bitset specific optimization
         inline fn fastFringeRank(self: *const Self, idx: u8) u16 {
-            // 最頻度ケース: 単一set bitの場合の高速パス
+            // most frequent case: fast path for single set bit
             if (self.fringe_items.items.len == 1) {
-                // 単一要素の場合は直接計算
+                // if result is known for single element, skip calculation
                 return if (self.fringe_bitset.isSet(idx)) 1 else 0;
             }
             
-            // 一般的なケース: 標準rank計算
+            // general case: standard rank calculation
             return self.fringe_bitset.rank(idx);
         }
         
-        /// Go BART最適化: 子ノード展開処理 (例外ケース)
+        /// Go BART optimized: child node expansion processing (exceptional case)
         fn handleChildExpansion(self: *Self, octet: u8, prefix: Prefix, value: V, depth: usize) bool {
             // Go BART: kid is node or leaf at addr
             
@@ -463,14 +460,14 @@ pub fn DirectNode(comptime V: type) type {
                 };
                 
                 // Convert the node structure first
-                // 1. leaf_bitsetから削除
+                // 1. remove from leaf_bitset
                 self.leaf_bitset.clear(octet);
                 
-                // 2. leaf_itemsから削除（配列をシフト）
+                // 2. remove from leaf_items (shift array)
                 self.removeLeafItem(leaf_rank);
                 self.leaf_items.items.len -= 1;
                 
-                // 3. children_itemsに新しいノードを挿入
+                // 3. insert new node into children_items
                 self.children_bitset.set(octet);
                 const children_rank_idx = self.children_bitset.rank(octet) - 1;
                 self.insertChildItem(children_rank_idx, new_node) catch unreachable;
@@ -500,14 +497,14 @@ pub fn DirectNode(comptime V: type) type {
                 _ = new_node.insertPrefixDirect(1, fringe.value);
                 
                 // Convert the node structure first
-                // 1. fringe_bitsetから削除
+                // 1. remove from fringe_bitset
                 self.fringe_bitset.clear(octet);
                 
-                // 2. fringe_itemsから削除（配列をシフト）
+                // 2. remove from fringe_items (shift array)
                 self.removeFringeItem(fringe_rank);
                 self.fringe_items.items.len -= 1;
                 
-                // 3. children_itemsに新しいノードを挿入
+                // 3. insert new node into children_items
                 self.children_bitset.set(octet);
                 const children_rank_idx = self.children_bitset.rank(octet) - 1;
                 self.insertChildItem(children_rank_idx, new_node) catch unreachable;
@@ -521,12 +518,12 @@ pub fn DirectNode(comptime V: type) type {
             return false; // should not reach here
         }
         
-        /// Phase 2最適化: Direct indexing prefix挿入 (Go BART sparse.Array256移植)
+        /// Phase 2 optimization: Direct indexing prefix insertion (Go BART sparse.Array256 transplantation)
         fn insertPrefixDirect(self: *Self, idx: u8, value: V) bool {
-            // ⚡ メモリアクセス最適化: bitset状態を一度だけチェック
+            // ⚡ memory access optimization: check state of bitset once
             const was_present = self.prefixes_bitset.isSet(idx);
             
-            // 🔥 分岐予測最適化: 新規挿入が最頻（overwriteよりも多い）
+            // 🔥 branch prediction optimization: new insertion is most frequent (more than overwrite)
             if (likely(!was_present)) {
                 // Go BART: calculate rank BEFORE bitset update
                 const rank_idx = self.prefixes_bitset.rank(idx);
@@ -534,43 +531,43 @@ pub fn DirectNode(comptime V: type) type {
                 // Go BART: new, insert into bitset
                 self.prefixes_bitset.set(idx);
                 
-                // ⚡ メモリアクセス最適化: プリフェッチで配列アクセスを高速化
+                // ⚡ memory access optimization: prefetch array access
                 @prefetch(&self.prefixes_items[rank_idx], .{ .rw = .write, .locality = 3, .cache = .data });
                 
                 // Go BART: efficient single insertItem operation
                 self.insertPrefixItem(rank_idx, value);
                 self.prefixes_items.items.len += 1;
                 
-                return false; // 新規挿入
+                return false; // new insertion
             } else {
                 // Go BART: slot exists, overwrite value (no shifting needed)
-                // ⚡ メモリアクセス最適化: キャッシュされたrank計算
+                // ⚡ memory access optimization: cached rank calculation
                 const rank_idx = self.fastPrefixesRankCached(idx, true) - 1;
                 self.prefixes_items.items[rank_idx] = value;
-                return true; // 既存上書き
+                return true; // existing overwrite
             }
         }
         
-        /// Go BART sparse.Array256 insertItem移植 - メモリアクセス最適化版
+        /// Go BART sparse.Array256 insertItem transplantation - memory access optimized version
         fn insertPrefixItem(self: *Self, index: usize, item: V) void {
-            // Phase 5: 配列シフト最適化 - 重複メモリ対応
+            // Phase 5: array shift optimization - duplicate memory handling
             if (self.prefixes_items.items.len > index) {
-                // 重複するメモリ領域の移動: 後ろから前に向かってコピー
+                // move memory area from back to front
                 const move_count = self.prefixes_items.items.len - index;
                 
-                // ⚡ メモリアクセス最適化: 移動先メモリをプリフェッチ
+                // ⚡ memory access optimization: prefetch destination memory
                 @prefetch(&self.prefixes_items[index + move_count], .{ .rw = .write, .locality = 3, .cache = .data });
                 
-                // 後ろから前に向かって要素を移動
+                // move elements from back to front
                 if (move_count <= 8) {
-                    // 小さなサイズは展開ループで後ろから前に
+                    // small size is expanded loop from back to front
                     var i: usize = move_count;
                     while (i > 0) {
                         i -= 1;
                         self.prefixes_items.items[index + 1 + i] = self.prefixes_items.items[index + i];
                     }
                 } else {
-                    // 大きなサイズは std.mem.copyBackwards使用
+                    // large size uses std.mem.copyBackwards
                     std.mem.copyBackwards(V, self.prefixes_items[index + 1..index + 1 + move_count], self.prefixes_items[index..index + move_count]);
                 }
             }
@@ -578,9 +575,9 @@ pub fn DirectNode(comptime V: type) type {
             self.prefixes_items.items[index] = item;
         }
         
-        /// Phase 3最適化: Go BART互換高速Fringe挿入
+        /// Phase 3 optimization: Go BART compatible high-speed Fringe insertion
         fn insertFringeDirectOptimized(self: *Self, octet: u8, prefix: Prefix, value: V) bool {
-            _ = prefix; // FringeNodeはprefixを使用しない
+            _ = prefix; // FringeNode does not use prefix
             const was_present = self.fringe_bitset.isSet(octet);
             
             if (was_present) {
@@ -594,7 +591,7 @@ pub fn DirectNode(comptime V: type) type {
             // 1. Calculate rank BEFORE bitset update
             const rank_idx = self.fringe_bitset.rank(octet);
             
-            // 2. Update fringe bitset (fringe nodeはchildren_bitsetにセットしない)
+            // 2. Update fringe bitset (fringe node does not set children_bitset)
             self.fringe_bitset.set(octet);
             const new_fringe = FringeNode(V).init(value);
             self.insertFringeItem(rank_idx, new_fringe);
@@ -603,17 +600,17 @@ pub fn DirectNode(comptime V: type) type {
             return false;
         }
         
-        /// Go BART fringe insertItem最適化 - 最適化版
+        /// Go BART fringe insertItem optimization - optimized version
         fn insertFringeItem(self: *Self, index: usize, item: FringeNode(V)) void {
-            // Phase 5: 配列シフト最適化 - memmove使用
+            // Phase 5: array shift optimization - memmove usage
             if (self.fringe_items.items.len > index) {
                 const src = &self.fringe_items.items[index];
                 const dst = &self.fringe_items.items[index + 1];
                 const move_count = self.fringe_items.items.len - index;
                 
-                // 小さなサイズならUnrolledループ、大きなサイズならmemmove
+                // small size uses Unrolled loop, large size uses memmove
                 if (move_count <= 8) {
-                    // Unrolled loop最適化
+                    // Unrolled loop optimization
                     comptime var i: usize = 0;
                     inline while (i < 8) : (i += 1) {
                         if (i < move_count) {
@@ -628,14 +625,14 @@ pub fn DirectNode(comptime V: type) type {
             self.fringe_items.items[index] = item;
         }
         
-        /// Phase 3最適化: Go BART互換高速Leaf挿入 - メモリアクセス最適化版
+        /// Phase 3 optimization: Go BART compatible high-speed Leaf insertion - memory access optimized version
         fn insertLeafDirectOptimized(self: *Self, octet: u8, prefix: Prefix, value: V) bool {
-            // ⚡ メモリアクセス最適化: bitset状態を一度だけチェック
+            // ⚡ memory access optimization: check state of bitset once
             const was_present = self.leaf_bitset.isSet(octet);
             
             if (was_present) {
                 // Go BART: overwrite existing (no shifting needed)
-                // ⚡ メモリアクセス最適化: キャッシュされたrank計算
+                // ⚡ memory access optimization: cached rank calculation
                 const rank_idx = self.fastLeafRankCached(octet, true) - 1;
                 self.leaf_items.items[rank_idx] = LeafNode(V).init(prefix, value);
                 return true;
@@ -645,10 +642,10 @@ pub fn DirectNode(comptime V: type) type {
             // 1. Calculate rank BEFORE bitset update
             const rank_idx = self.leaf_bitset.rank(octet);
             
-            // 2. Update leaf bitset (leaf nodeはchildren_bitsetにセットしない)
+            // 2. Update leaf bitset (leaf node does not set children_bitset)
             self.leaf_bitset.set(octet);
             
-            // ⚡ メモリアクセス最適化: プリフェッチで配列アクセスを高速化
+            // ⚡ memory access optimization: prefetch array access
             @prefetch(&self.leaf_items[rank_idx], .{ .rw = .write, .locality = 3, .cache = .data });
             
             // 3. Efficient single insertItem operation
@@ -659,17 +656,17 @@ pub fn DirectNode(comptime V: type) type {
             return false;
         }
         
-        /// Go BART sparse.Array256 leaf insertItem最適化 - 最適化版
+        /// Go BART sparse.Array256 leaf insertItem optimization - optimized version
         fn insertLeafItem(self: *Self, index: usize, item: LeafNode(V)) void {
-            // Phase 5: 配列シフト最適化 - memmove使用
+            // Phase 5: array shift optimization - memmove usage
             if (self.leaf_items.items.len > index) {
                 const src = &self.leaf_items.items[index];
                 const dst = &self.leaf_items.items[index + 1];
                 const move_count = self.leaf_items.items.len - index;
                 
-                // 小さなサイズならUnrolledループ、大きなサイズならmemmove
+                // small size uses Unrolled loop, large size uses memmove
                 if (move_count <= 8) {
-                    // Unrolled loop最適化
+                    // Unrolled loop optimization
                     comptime var i: usize = 0;
                     inline while (i < 8) : (i += 1) {
                         if (i < move_count) {
@@ -692,18 +689,18 @@ pub fn DirectNode(comptime V: type) type {
             
             if (move_count > 0) {
                 if (move_count <= 4) {
-                    // 小さなサイズは手動ループ
+                    // small size is manual loop
                     var i: usize = 0;
                     while (i < move_count) : (i += 1) {
                         self.leaf_items.items[index + i] = self.leaf_items.items[index + i + 1];
                     }
                 } else {
-                    // 大きなサイズはstd.mem.copyForwards使用
+                    // large size uses std.mem.copyForwards
                     std.mem.copyForwards(LeafNode(V), self.leaf_items.items[index..index + move_count], self.leaf_items.items[index + 1..index + 1 + move_count]);
                 }
             }
             
-            // 最後の要素をクリア（デバッグ目的）
+            // clear last element for debugging
             if (self.leaf_items.items.len > 0) {
                 self.leaf_items.items[self.leaf_items.items.len - 1] = undefined;
             }
@@ -717,24 +714,24 @@ pub fn DirectNode(comptime V: type) type {
             
             if (move_count > 0) {
                 if (move_count <= 4) {
-                    // 小さなサイズは手動ループ
+                    // small size is manual loop
                     var i: usize = 0;
                     while (i < move_count) : (i += 1) {
                         self.fringe_items.items[index + i] = self.fringe_items.items[index + i + 1];
                     }
                 } else {
-                    // 大きなサイズはstd.mem.copyForwards使用
+                    // large size uses std.mem.copyForwards
                     std.mem.copyForwards(FringeNode(V), self.fringe_items.items[index..index + move_count], self.fringe_items.items[index + 1..index + 1 + move_count]);
                 }
             }
             
-            // 最後の要素をクリア（デバッグ目的）
+            // clear last element for debugging
             if (self.fringe_items.items.len > 0) {
                 self.fringe_items.items[self.fringe_items.items.len - 1] = undefined;
             }
         }
         
-        /// Go BART互換高速子ノード挿入 (メモリ安全修正版)
+        /// Go BART compatible high-speed child node insertion (memory safe version)
         fn insertChildDirect(self: *Self, octet: u8, child: *Self) bool {
             const was_present = self.children_bitset.isSet(octet);
             
@@ -742,7 +739,7 @@ pub fn DirectNode(comptime V: type) type {
                 // Go BART: overwrite existing (no shifting needed)
                 const rank_idx = self.children_bitset.rank(octet) - 1;
                 
-                // 🚨 重要：既存の子ノードが新しい子ノードと異なる場合のみ解放
+                // 🚨 important: only release if new child is different from existing child
                 if (self.children_items.items[rank_idx] != child) {
                     self.children_items.items[rank_idx].deinit();
                 }
@@ -757,42 +754,42 @@ pub fn DirectNode(comptime V: type) type {
             // 2. Update children bitset
             self.children_bitset.set(octet);
             
-            // 3. Insert child item (エラー処理付き)
+            // 3. Insert child item (error handling included)
             self.insertChildItem(rank_idx, child) catch {
-                // 挿入失敗時の安全な復旧
+                // safe rollback on insertion failure
                 self.children_bitset.clear(octet);
                 return false;
             };
             self.children_items.items.len += 1;
             
-            // 4. 整合性チェック（デバッグ用）
+            // 4. Integrity check (for debugging)
             if (self.children_items.items.len != @as(u16, self.children_bitset.popcnt())) {
-                // 整合性エラーが発生した場合の緊急処理
+                // handle error case
                 self.children_bitset.clear(octet);
                 self.children_items.items.len -= 1;
-                // 挿入をロールバック（ただし子ノードは解放しない）
+                // rollback insertion (but do not release child nodes)
                 return false;
             }
             
             return false;
         }
         
-        /// Children insertItem最適化 - メモリ安全版
+        /// Children insertItem optimization - memory safe version
         fn insertChildItem(self: *Self, index: usize, item: *Self) !void {
-            // 境界チェック
+            // boundary check
             if (index > self.children_items.items.len or self.children_items.items.len >= 256) {
                 return error.IndexOutOfBounds;
             }
             
-            // Phase 5: 配列シフト最適化 - memmove使用
+            // Phase 5: array shift optimization - memmove usage
             if (self.children_items.items.len > index) {
                 const src = &self.children_items.items[index];
                 const dst = &self.children_items.items[index + 1];
                 const move_count = self.children_items.items.len - index;
                 
-                // 小さなサイズならUnrolledループ、大きなサイズならmemmove
+                // small size uses Unrolled loop, large size uses memmove
                 if (move_count <= 8) {
-                    // Unrolled loop最適化
+                    // Unrolled loop optimization
                     comptime var i: usize = 0;
                     inline while (i < 8) : (i += 1) {
                         if (i < move_count) {
@@ -808,39 +805,39 @@ pub fn DirectNode(comptime V: type) type {
         }
         
         // =================================================================
-        // Phase 2,3: 追加実装 - Fringe/Leaf Nodes matchesメソッド
+        // Phase 2,3: additional implementation - Fringe/Leaf Nodes matches method
         // =================================================================
         
-        /// FringeNode用のmatchesメソッド実装
+        /// FringeNode matches method implementation
         fn FringeMatches(comptime Value: type) type {
             return struct {
                 pub fn matches(self: *const FringeNode(Value), addr: *const IPAddr, depth: usize) bool {
-                    // FringeNodeはprefixを持たないため、位置ベースでマッチング
-                    // 実際のGo BARTアルゴリズムに基づく実装
-                    _ = self; // FringeNodeはvalueのみ持つ
+                    // FringeNode does not have a prefix, so match based on position
+                    // Implementation based on actual Go BART algorithm
+                    _ = self; // FringeNode only holds value
                     _ = addr;
                     _ = depth;
-                    // Fringeは常に現在の深度でマッチとして扱う
+                    // Fringe is always treated as a match at current depth
                     return true;
                 }
             };
         }
         
-        /// LeafNode用のmatchesメソッド実装
+        /// LeafNode matches method implementation
         fn LeafMatches(comptime Value: type) type {
             return struct {
                 pub fn matches(self: *const LeafNode(Value), addr: *const IPAddr) bool {
-                    // LeafNodeのprefixがaddrを含むかチェック
+                    // Check if LeafNode's prefix contains addr
                     return self.prefix.containsAddr(addr.*);
                 }
             };
         }
 
         // =================================================================
-        // Phase 2: LPM Backtracking実装
+        // Phase 2: LPM Backtracking implementation
         // =================================================================
         
-        /// Phase 2最適化: 高速LPM backtracking (修正版)
+        /// Phase 2 optimization: high-speed LPM backtracking (corrected version)
         pub fn lmpGetOptimized(self: *const Self, idx: u8) struct { base_idx: u8, val: V, ok: bool } {
             // Always use dynamic backTrackingBitset for debugging
             var bs: BitSet256 = lookup_tbl.backTrackingBitset(idx);
@@ -856,7 +853,7 @@ pub fn DirectNode(comptime V: type) type {
             return .{ .base_idx = 0, .val = undefined, .ok = false };
         }
         
-        /// lpmTest - LPM存在チェック
+        /// lpmTest - check if LPM exists
         pub fn lpmTest(self: *const Self, idx: usize) bool {
             if (idx < lookup_tbl.lookupTbl.len) {
                 const bs = lookup_tbl.lookupTbl[idx];
@@ -868,11 +865,11 @@ pub fn DirectNode(comptime V: type) type {
         }
         
         // =================================================================
-        // Phase 2 & 4: 高速lookup実装 (IPv6最適化含む)
+        // Phase 2 & 4: high-speed lookup implementation (including IPv6 optimization)
         // =================================================================
         
-        /// Phase 5最適化: Go BART完全互換lookup実装 - 分岐予測最適化版
-        /// 目標: 3-5 ns/op (Go BART: 17.50 ns/op) 
+        /// Phase 5 optimization: Go BART compatible high-speed lookup implementation - branch prediction optimization version
+        /// Target: 3-5 ns/op (Go BART: 17.50 ns/op) 
         pub fn lookupOptimized(self: *const Self, addr: *const IPAddr) node.LookupResult(V) {
             const octets = addr.asSlice();
             var n = self;
@@ -884,7 +881,7 @@ pub fn DirectNode(comptime V: type) type {
             var depth: usize = 0;
             var octet: u8 = 0;
             
-            // Go BART: find leaf node (forward traversal) - 分岐予測最適化
+            // Go BART: find leaf node (forward traversal) - branch prediction optimization
             for (octets, 0..) |current_octet, d| {
                 depth = d & 0xf; // Go BART: BCE, Lookup must be fast
                 octet = current_octet;
@@ -893,14 +890,14 @@ pub fn DirectNode(comptime V: type) type {
                 stack[depth] = n;
                 
                 // Go BART: go down in tight loop to last octet
-                // HOT PATH: 通常は子ノードが存在する（分岐予測最適化）
-                // 修正: leaf nodeやfringe nodeもチェック
+                // HOT PATH: usually child node exists (branch prediction optimization)
+                // Correction: also check leaf node and fringe node
                 if (!n.children_bitset.isSet(octet) and !n.leaf_bitset.isSet(octet) and !n.fringe_bitset.isSet(octet)) {
                     // no more nodes below octet
                     break;
                 }
                 
-                // Go BART: fringeNode case - 低頻度（分岐予測最適化）
+                // Go BART: fringeNode case - low frequency (branch prediction optimization)
                 if (n.fringe_bitset.isSet(octet)) {
                     // fringe is the default-route for all possible nodes below
                     const fringe_rank = n.fastFringeRank(octet) - 1;
@@ -919,7 +916,7 @@ pub fn DirectNode(comptime V: type) type {
                     };
                 }
                 
-                // Go BART: leafNode case - 中頻度（分岐予測最適化）
+                // Go BART: leafNode case - medium frequency (branch prediction optimization)
                 if (n.leaf_bitset.isSet(octet)) {
                     const leaf_rank = n.fastLeafRank(octet) - 1;
                     const leaf = n.leaf_items.items[leaf_rank];
@@ -935,13 +932,13 @@ pub fn DirectNode(comptime V: type) type {
                 }
                 
                 // Go BART: *node case - descend down to next trie level
-                // HOT PATH: 通常は通常のノード（分岐予測最適化）
-                // 修正: children_bitsetがセットされている場合のみ下降とrank計算
+                // HOT PATH: usually normal node (branch prediction optimization)
+                // Correction: only descend and calculate rank if children_bitset is set
                 if (n.children_bitset.isSet(octet)) {
                     const rank_idx = n.fastChildrenRank(octet) - 1;
                     n = n.children_items.items[rank_idx];
                 } else {
-                    // leaf nodeやfringe nodeの場合はtraversalを終了
+                    // leaf node or fringe node case, end traversal
                     break;
                 }
             }
@@ -953,7 +950,7 @@ pub fn DirectNode(comptime V: type) type {
                 n = stack[depth];
                 
                 // Go BART: longest prefix match, skip if node has no prefixes
-                // HOT PATH: 通常はprefixesが存在する（分岐予測最適化）
+                // HOT PATH: usually prefixes exist (branch prediction optimization)
                 if (n.prefixes_items.items.len != 0) {
                     const host_idx = base_index.hostIdx(octets[depth]);
                     
@@ -965,7 +962,7 @@ pub fn DirectNode(comptime V: type) type {
                         // Go BART: Simple IntersectionTop result - return directly
                         const rank_idx = n.prefixes_bitset.rank(top_idx) - 1;
                         return node.LookupResult(V){
-                            .prefix = undefined, // Go BART doesn't reconstruct prefix in Lookup
+                            .prefix = undefined, // Go BART does not reconstruct prefix in Lookup
                             .value = n.prefixes_items.items[rank_idx],
                             .ok = true,
                         };
@@ -983,7 +980,7 @@ pub fn DirectNode(comptime V: type) type {
             };
         }
         
-        /// IPv6最適化lookup
+        /// IPv6 optimization lookup
         fn lookupIPv6Optimized(self: *const Self, addr: *const IPAddr) ?V {
             const octets = addr.asSlice();
             var n = self;
@@ -994,7 +991,7 @@ pub fn DirectNode(comptime V: type) type {
                 if (depth >= octets.len) break;
                 const octet = octets[depth];
                 
-                // IPv6最適化LPM
+                // IPv6 optimization LPM
                 const lpm_result = n.lmpGetOptimized(octet);
                 if (lpm_result.ok) {
                     best_match = lpm_result.val;
@@ -1015,7 +1012,7 @@ pub fn DirectNode(comptime V: type) type {
             return best_match;
         }
         
-        /// 高速LPM (IPv6最適化)
+        /// high-speed LPM (IPv6 optimization)
         fn lpmGetFast(self: *const Self, octet: u8) struct { val: V, ok: bool } {
             const idx = base_index.hostIdx(octet);
             const result = self.lmpGetOptimized(idx);
@@ -1023,11 +1020,11 @@ pub fn DirectNode(comptime V: type) type {
         }
         
         // =================================================================
-        // Phase 2 & 3: 全API実装
+        // Phase 2 & 3: full API implementation
         // =================================================================
         
-        /// contains - IP包含チェック
-        /// 目標: 1-2 ns/op (Go BART: 5.60 ns/op)
+        /// contains - check if IP is contained
+        /// Target: 1-2 ns/op (Go BART: 5.60 ns/op)
         pub fn contains(self: *const Self, addr: *const IPAddr) bool {
             // Go BART: if ip is invalid, return false
             if (!addr.isValid()) {
@@ -1036,7 +1033,7 @@ pub fn DirectNode(comptime V: type) type {
             return self.lookupOptimized(addr).ok;
         }
         
-        /// get - exact prefix match (Go BART完全互換)
+        /// get - exact prefix match (Go BART compatible)
         pub fn get(self: *const Self, pfx: *const Prefix) ?V {
             const ip = pfx.addr;
             const bits = pfx.bits;
@@ -1049,9 +1046,9 @@ pub fn DirectNode(comptime V: type) type {
             var n = self;
             
             for (octets, 0..) |octet, depth| {
-                // Go BART: 最初にterminal caseをチェック
+                // Go BART: first check terminal case
                 if (depth == max_depth) {
-                    // Terminal case: 直接prefixesから取得
+                    // Terminal case: get directly from prefixes
                     const idx = base_index.pfxToIdx256(octet, last_bits);
                     if (n.prefixes_bitset.isSet(idx)) {
                         const rank_idx = n.prefixes_bitset.rank(idx) - 1;
@@ -1060,7 +1057,7 @@ pub fn DirectNode(comptime V: type) type {
                     return null;
                 }
                 
-                // Go BART: 子ノード確認
+                // Go BART: check child node
                 if (!n.children_bitset.isSet(octet)) {
                     // Check if it's a leaf node
                     if (n.leaf_bitset.isSet(octet)) {
@@ -1079,7 +1076,7 @@ pub fn DirectNode(comptime V: type) type {
                     return null;
                 }
                 
-                // Go BART: 子の種類を確認して下降
+                // Go BART: check type of child and descend
                 const rank_idx = n.children_bitset.rank(octet) - 1;
                 n = n.children_items.items[rank_idx];
             }
@@ -1087,13 +1084,13 @@ pub fn DirectNode(comptime V: type) type {
             return null;
         }
         
-        /// delete - prefix削除（再帰的ノードクリーンアップ付き）
+        /// delete - prefix deletion (with recursive node cleanup)
         pub fn delete(self: *Self, pfx: *const Prefix) ?V {
             const result = self.deleteRecursive(pfx, 0);
             return result;
         }
         
-        /// deleteRecursive - 再帰的削除（パス上の空ノードクリーンアップ付き）
+        /// deleteRecursive - recursive deletion (with empty node cleanup on path)
         fn deleteRecursive(self: *Self, pfx: *const Prefix, depth: usize) ?V {
             const masked_pfx = pfx.masked();
             const ip = masked_pfx.addr;
@@ -1187,7 +1184,7 @@ pub fn DirectNode(comptime V: type) type {
             return null;
         }
         
-        /// removeChildNodeSafe - 子ノードを安全に削除（deinit付き）
+        /// removeChildNodeSafe - remove child node safely (with deinit)
         fn removeChildNodeSafe(self: *Self, octet: u8) void {
             if (!self.children_bitset.isSet(octet)) return;
             
@@ -1213,7 +1210,7 @@ pub fn DirectNode(comptime V: type) type {
             }
         }
         
-        /// cleanupEmptyNodes - 空になったノードをクリーンアップ
+        /// cleanupEmptyNodes - clean up empty nodes
         fn cleanupEmptyNodes(self: *Self) void {
             // 子ノードから削除可能なものを特定
             var nodes_to_remove = std.ArrayList(u8).init(std.heap.page_allocator);
@@ -1241,7 +1238,7 @@ pub fn DirectNode(comptime V: type) type {
             }
         }
         
-        /// removeChildNode - 子ノードを安全に削除
+        /// removeChildNode - remove child node safely
         fn removeChildNode(self: *Self, octet: u8) void {
             if (!self.children_bitset.isSet(octet)) return;
             
@@ -1260,59 +1257,59 @@ pub fn DirectNode(comptime V: type) type {
             self.children_items.items.len -= 1;
         }
         
-        /// removeChildItem - 子ノード配列から要素を削除
+        /// removeChildItem - remove element from child node array
         fn removeChildItem(self: *Self, index: usize) void {
             if (index >= self.children_items.items.len) return;
             
             const move_count = self.children_items.items.len - index - 1;
             if (move_count > 0) {
                 if (move_count <= 8) {
-                    // 小さなサイズは展開ループで前に移動
+                    // small size is expanded loop moving forward
                     for (0..move_count) |i| {
                         self.children_items.items[index + i] = self.children_items.items[index + i + 1];
                     }
                 } else {
-                    // 大きなサイズはstd.mem.copyForwards使用
+                    // large size uses std.mem.copyForwards
                     std.mem.copyForwards(*Self, self.children_items.items[index..index + move_count], self.children_items.items[index + 1..index + 1 + move_count]);
                 }
             }
             
-            // 最後の要素をクリア（デバッグ目的）
+            // clear last element for debugging
             if (self.children_items.items.len > 0) {
                 self.children_items.items[self.children_items.items.len - 1] = undefined;
             }
         }
         
-        /// removePrefixItem - プレフィックス配列から要素を削除
+        /// removePrefixItem - remove element from prefixes array
         fn removePrefixItem(self: *Self, index: usize) void {
             if (index >= self.prefixes_items.items.len) return;
             
             const move_count = self.prefixes_items.items.len - index - 1;
             if (move_count > 0) {
                 if (move_count <= 8) {
-                    // 小さなサイズは展開ループで前に移動
+                    // small size is expanded loop moving forward
                     for (0..move_count) |i| {
                         self.prefixes_items.items[index + i] = self.prefixes_items.items[index + i + 1];
                     }
                 } else {
-                    // 大きなサイズはstd.mem.copyForwards使用
+                    // large size uses std.mem.copyForwards
                     std.mem.copyForwards(V, self.prefixes_items.items[index..index + move_count], self.prefixes_items.items[index + 1..index + 1 + move_count]);
                 }
             }
             
-            // 最後の要素をクリア（デバッグ目的）
+            // clear last element for debugging
             if (self.prefixes_items.items.len > 0) {
                 self.prefixes_items.items[self.prefixes_items.items.len - 1] = undefined;
             }
         }
         
         // =================================================================
-        // Phase 3: Child型システム統合 (完全互換性)
+        // Phase 3: Child type system integration (full compatibility)
         // =================================================================
         
-        /// getChild - 現在のChild(V)との完全互換性
+        /// getChild - full compatibility with current Child(V)
         pub fn getChild(self: *const Self, octet: u8) ?Child(V) {
-            // 優先順位: children > leaf > fringe
+            // priority: children > leaf > fringe
             if (self.children_bitset.isSet(octet)) {
                 const rank_idx = self.children_bitset.rank(octet) - 1;
                 return Child(V){ .node = self.children_items.items[rank_idx] };
@@ -1331,7 +1328,7 @@ pub fn DirectNode(comptime V: type) type {
             return null;
         }
         
-        /// hasChild - 子存在チェック
+        /// hasChild - check if child exists
         pub fn hasChild(self: *const Self, octet: u8) bool {
             return self.children_bitset.isSet(octet) or 
                    self.leaf_bitset.isSet(octet) or 
@@ -1342,7 +1339,7 @@ pub fn DirectNode(comptime V: type) type {
         // Helper & Utility Functions
         // =================================================================
         
-        /// size - 総要素数
+        /// size - total number of elements
         pub fn size(self: *const Self) usize {
             return @as(usize, self.prefixes_items.items.len) + 
                    @as(usize, self.children_items.items.len) + 
@@ -1350,26 +1347,26 @@ pub fn DirectNode(comptime V: type) type {
                    @as(usize, self.fringe_items.items.len);
         }
         
-        /// clone - deep copy (修正版：children_bitset対応)
+        /// clone - deep copy (corrected version: children_bitset compatibility)
         pub fn clone(self: *const Self, allocator: std.mem.Allocator) *Self {
             const new_node = Self.init(allocator);
             
-            // prefixes のコピー
+            // copy prefixes
             new_node.prefixes_bitset = self.prefixes_bitset;
             new_node.prefixes_items.appendSlice(self.prefixes_items.items) catch @panic("OOM");
             
-            // children の深いコピー（子ノードを再帰的にクローン）
+            // deep copy of children (recursively cloning child nodes)
             new_node.children_bitset = self.children_bitset;
             for (self.children_items.items) |child| {
                 const cloned_child = child.clone(allocator);
                 new_node.children_items.append(cloned_child) catch @panic("OOM");
             }
             
-            // leaf のコピー
+            // copy leaf
             new_node.leaf_bitset = self.leaf_bitset;
             new_node.leaf_items.appendSlice(self.leaf_items.items) catch @panic("OOM");
             
-            // fringe のコピー
+            // copy fringe
             new_node.fringe_bitset = self.fringe_bitset;
             new_node.fringe_items.appendSlice(self.fringe_items.items) catch @panic("OOM");
             
@@ -1377,7 +1374,7 @@ pub fn DirectNode(comptime V: type) type {
         }
 
         // =================================================================
-        // Phase 2: LookupPrefix APIs - Go BART完全互換
+        // Phase 2: LookupPrefix APIs - Go BART compatible
         // =================================================================
         
         /// LookupPrefix does a route lookup (longest prefix match) for pfx and
@@ -1462,13 +1459,13 @@ pub fn DirectNode(comptime V: type) type {
                 }
                 
                 // Go BART: *node case - descend down to next trie level
-                // HOT PATH: 通常は通常のノード（分岐予測最適化）
-                // 修正: children_bitsetがセットされている場合のみ下降とrank計算
+                // HOT PATH: usually normal node (branch prediction optimization)
+                // Correction: only descend and calculate rank if children_bitset is set
                 if (n.children_bitset.isSet(octet)) {
                     const rank_idx = n.fastChildrenRank(octet) - 1;
                     n = n.children_items.items[rank_idx];
                 } else {
-                    // leaf nodeやfringe nodeの場合はtraversalを終了
+                    // leaf node or fringe node case, end traversal
                     break;
                 }
             }
@@ -1534,25 +1531,25 @@ pub fn DirectNode(comptime V: type) type {
         }
         
         // =================================================================
-        // Phase 3: Overlaps APIs - Go BART完全互換
+        // Phase 3: Overlaps APIs - Go BART compatible
         // =================================================================
         
-        /// overlaps - 2つのノードがオーバーラップするかチェック
-        /// Go BART完全互換実装
+        /// overlaps - check if two nodes overlap
+        /// Go BART compatible implementation
         pub fn overlaps(self: *const Self, other: *const Self, depth: usize) bool {
             const self_pfx_count = self.prefixes_items.items.len;
             const other_pfx_count = other.prefixes_items.items.len;
             const self_child_count = self.children_items.items.len;
             const other_child_count = other.children_items.items.len;
             
-            // 1. Test if any routes overlaps
+            // 1. Test if any routes overlap
             if (self_pfx_count > 0 and other_pfx_count > 0) {
                 if (self.overlapsRoutes(other)) {
                     return true;
                 }
             }
             
-            // 2. Test if routes overlaps any child
+            // 2. Test if routes overlap any child
             // Swap nodes for optimization
             var n = self;
             var o = other;
@@ -1596,7 +1593,7 @@ pub fn DirectNode(comptime V: type) type {
             return n.overlapsSameChildren(o, depth);
         }
         
-        /// overlapsRoutes - 2つのノードのルート間のオーバーラップをチェック
+        /// overlapsRoutes - check if routes between two nodes overlap
         fn overlapsRoutes(self: *const Self, other: *const Self) bool {
             // Some prefixes are identical, trivial overlap
             if (self.prefixes_bitset.intersectsAny(&other.prefixes_bitset)) {
@@ -1656,7 +1653,7 @@ pub fn DirectNode(comptime V: type) type {
             return false;
         }
         
-        /// overlapsChildrenIn - prefixesがもう一方のchildrenとオーバーラップするかチェック
+        /// overlapsChildrenIn - check if prefixes overlap with children of the other node
         fn overlapsChildrenIn(self: *const Self, other: *const Self) bool {
             const pfx_count = self.prefixes_items.items.len;
             const child_count = other.children_items.items.len;
@@ -1690,7 +1687,7 @@ pub fn DirectNode(comptime V: type) type {
             return host_routes.intersectsAny(&other.children_bitset);
         }
         
-        /// overlapsSameChildren - 同じオクテットを持つ子ノードのオーバーラップをチェック
+        /// overlapsSameChildren - check if child nodes with the same octet overlap
         fn overlapsSameChildren(self: *const Self, other: *const Self, depth: usize) bool {
             // Intersect the child bitsets
             const common_children = self.children_bitset.intersection(&other.children_bitset);
@@ -1713,7 +1710,7 @@ pub fn DirectNode(comptime V: type) type {
             return false;
         }
         
-        /// overlapsTwoChildren - 2つの子ノードのオーバーラップをチェック
+        /// overlapsTwoChildren - check if two child nodes overlap
         fn overlapsTwoChildren(self_child: Child(V), other_child: Child(V), depth: usize) bool {
             switch (self_child) {
                 .node => |self_node| {
@@ -1748,7 +1745,7 @@ pub fn DirectNode(comptime V: type) type {
             }
         }
         
-        /// overlapsPrefixAtDepth - 特定の深さでのプレフィックスオーバーラップをチェック
+        /// overlapsPrefixAtDepth - check if prefixes overlap at a specific depth
         pub fn overlapsPrefixAtDepth(self: *const Self, pfx: Prefix, depth: usize) bool {
             const ip = pfx.addr;
             const bits = pfx.bits;
@@ -1809,7 +1806,7 @@ pub fn DirectNode(comptime V: type) type {
             return false;
         }
         
-        /// overlapsIdx - インデックスでのオーバーラップをチェック
+        /// overlapsIdx - check if overlap occurs at index
         fn overlapsIdx(self: *const Self, idx: u8) bool {
             // 1. Test if any route in this node overlaps prefix
             if (self.lpmTest(idx)) {
@@ -1840,53 +1837,53 @@ pub fn DirectNode(comptime V: type) type {
             unreachable;
         }
         
-        /// ⚡ メモリアクセス最適化: キャッシュされたrank計算
+        /// ⚡ memory access optimization: cached rank calculation
         inline fn fastChildrenRankCached(self: *const Self, idx: u8, is_set_known: bool) u16 {
-            // 最頻度ケース: 単一set bitの場合の高速パス
+            // most frequent case: fast path for single set bit
             if (self.children_items.items.len == 1) {
-                // isSet結果が既知の場合は計算スキップ
+                // if result is known for single element, skip calculation
                 return if (is_set_known) 1 else if (self.children_bitset.isSet(idx)) 1 else 0;
             }
             
-            // 一般的なケース: 標準rank計算
+            // general case: standard rank calculation
             return self.children_bitset.rank(idx);
         }
         
-        /// ⚡ メモリアクセス最適化: prefixes用キャッシュrank計算
+        /// ⚡ memory access optimization: cached rank calculation for prefixes
         inline fn fastPrefixesRankCached(self: *const Self, idx: u8, is_set_known: bool) u16 {
-            // 最頻度ケース: 単一set bitの場合の高速パス
+            // most frequent case: fast path for single set bit
             if (self.prefixes_items.items.len == 1) {
-                // isSet結果が既知の場合は計算スキップ
+                // if result is known for single element, skip calculation
                 return if (is_set_known) 1 else if (self.prefixes_bitset.isSet(idx)) 1 else 0;
             }
             
-            // 一般的なケース: 標準rank計算
+            // general case: standard rank calculation
             return self.prefixes_bitset.rank(idx);
         }
         
-        /// ⚡ メモリアクセス最適化: leaf用キャッシュrank計算
+        /// ⚡ memory access optimization: cached rank calculation for leaf
         inline fn fastLeafRankCached(self: *const Self, idx: u8, is_set_known: bool) u16 {
-            // 最頻度ケース: 単一set bitの場合の高速パス
+            // most frequent case: fast path for single set bit
             if (self.leaf_items.items.len == 1) {
-                // isSet結果が既知の場合は計算スキップ
+                // if result is known for single element, skip calculation
                 return if (is_set_known) 1 else if (self.leaf_bitset.isSet(idx)) 1 else 0;
             }
             
-            // 一般的なケース: 標準rank計算
+            // general case: standard rank calculation
             return self.leaf_bitset.rank(idx);
         }
     };
 }
 
-/// DirectTable - Go BART Table構造の完全移植
-/// メインのTable統合のための準備
+/// DirectTable - Go BART Table structure full transplantation
+/// Preparation for main Table integration
 pub fn DirectTable(comptime V: type) type {
     return struct {
         const Self = @This();
         
         allocator: std.mem.Allocator,
         
-        // DirectNode使用（sparse arrayの代わり）
+        // DirectNode used (instead of sparse array)
         root4: *DirectNode(V),
         root6: *DirectNode(V), 
         size4: usize,
@@ -1907,8 +1904,8 @@ pub fn DirectTable(comptime V: type) type {
             self.root6.deinit();
         }
         
-        /// insert - Go BART Insert完全移植
-        /// 目標: 2.2 ns/op (Go BART: 12 ns/op)
+        /// insert - Go BART Insert full transplantation
+        /// Target: 2.2 ns/op (Go BART: 12 ns/op)
         pub fn insert(self: *Self, pfx: Prefix, val: V) void {
             if (!pfx.isValid()) return;
             
@@ -1926,7 +1923,7 @@ pub fn DirectTable(comptime V: type) type {
             }
         }
         
-        /// lookup - 高速LPM
+        /// lookup - high-speed LPM
         pub fn lookup(self: *const Self, addr: *const IPAddr) ?V {
             // Go BART: if ip is invalid, return null
             if (!addr.isValid()) {
@@ -1937,7 +1934,7 @@ pub fn DirectTable(comptime V: type) type {
             return root.lookupOptimized(addr).value;
         }
         
-        /// contains - 高速包含チェック
+        /// contains - high-speed containment check
         pub fn contains(self: *const Self, addr: *const IPAddr) bool {
             // Go BART: if ip is invalid, return false
             if (!addr.isValid()) {
@@ -1957,7 +1954,7 @@ pub fn DirectTable(comptime V: type) type {
             return root.get(&canonical_pfx);
         }
         
-        /// lookupPrefix - Go BART互換LookupPrefix
+        /// lookupPrefix - Go BART compatible LookupPrefix
         pub fn lookupPrefix(self: *const Self, pfx: *const Prefix) struct { val: V, ok: bool } {
             if (!pfx.isValid()) return .{ .val = undefined, .ok = false };
             
@@ -1968,7 +1965,7 @@ pub fn DirectTable(comptime V: type) type {
             return root.lookupPrefix(&canonical_pfx);
         }
         
-        /// lookupPrefixLPM - Go BART互換LookupPrefixLPM
+        /// lookupPrefixLPM - Go BART compatible LookupPrefixLPM
         pub fn lookupPrefixLPM(self: *const Self, pfx: *const Prefix) struct { lmp_pfx: Prefix, val: V, ok: bool } {
             if (!pfx.isValid()) return .{ .lmp_pfx = undefined, .val = undefined, .ok = false };
             
@@ -1980,7 +1977,7 @@ pub fn DirectTable(comptime V: type) type {
             return .{ .lmp_pfx = result.lmp_pfx, .val = result.val, .ok = result.ok };
         }
         
-        /// size - 総サイズ
+        /// size - total size
         pub fn size(self: *const Self) usize {
             return self.size4 + self.size6;
         }
@@ -1994,10 +1991,10 @@ pub fn DirectTable(comptime V: type) type {
         }
         
         // =================================================================
-        // Overlaps APIs - Go BART完全互換
+        // Overlaps APIs - Go BART compatible
         // =================================================================
         
-        /// overlapsPrefix - 指定されたプレフィックスがテーブルとオーバーラップするかチェック
+        /// overlapsPrefix - check if specified prefixes overlap with table
         pub fn overlapsPrefix(self: *const Self, pfx: *const Prefix) bool {
             if (!pfx.isValid()) {
                 return false;
@@ -2010,12 +2007,12 @@ pub fn DirectTable(comptime V: type) type {
             return root.overlapsPrefixAtDepth(canonical_pfx, 0);
         }
         
-        /// overlaps - 2つのテーブルがオーバーラップするかチェック
+        /// overlaps - check if two tables overlap
         pub fn overlaps(self: *const Self, other: *const Self) bool {
             return self.overlaps4(other) or self.overlaps6(other);
         }
         
-        /// overlaps4 - IPv4でのオーバーラップをチェック
+        /// overlaps4 - check if overlap occurs in IPv4
         pub fn overlaps4(self: *const Self, other: *const Self) bool {
             if (self.size4 == 0 or other.size4 == 0) {
                 return false;
@@ -2023,7 +2020,7 @@ pub fn DirectTable(comptime V: type) type {
             return self.root4.overlaps(other.root4, 0);
         }
         
-        /// overlaps6 - IPv6でのオーバーラップをチェック
+        /// overlaps6 - check if overlap occurs in IPv6
         pub fn overlaps6(self: *const Self, other: *const Self) bool {
             if (self.size6 == 0 or other.size6 == 0) {
                 return false;
