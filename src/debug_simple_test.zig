@@ -4,16 +4,47 @@ const Table = @import("table.zig").Table;
 const Prefix = @import("node.zig").Prefix;
 const IPAddr = @import("node.zig").IPAddr;
 
-/// Helper function - equivalent to Go BART's netip.MustParseAddr
-fn mpa(_: []const u8) IPAddr {
-    return IPAddr{ .v4 = .{ 192, 168, 0, 1 } };
+fn mpp(prefix_str: []const u8) Prefix {
+    const slash_pos = std.mem.indexOf(u8, prefix_str, "/") orelse {
+        std.debug.panic("Invalid prefix (no /): {s}\n", .{prefix_str});
+    };
+    
+    const addr_str = prefix_str[0..slash_pos];
+    const len_str = prefix_str[slash_pos + 1..];
+    
+    const prefix_len = std.fmt.parseInt(u8, len_str, 10) catch {
+        std.debug.panic("Invalid prefix length: {s}\n", .{len_str});
+    };
+    
+    // 簡単なIPv4パース
+    var parts: [4]u8 = undefined;
+    var iter = std.mem.splitScalar(u8, addr_str, '.');
+    var i: usize = 0;
+    while (iter.next()) |part| {
+        if (i >= 4) std.debug.panic("Invalid IPv4\n", .{});
+        parts[i] = std.fmt.parseInt(u8, part, 10) catch std.debug.panic("Invalid IPv4 part\n", .{});
+        i += 1;
+    }
+    if (i != 4) std.debug.panic("Invalid IPv4\n", .{});
+    
+    const addr = IPAddr{ .v4 = parts };
+    const prefix = Prefix.init(&addr, prefix_len);
+    return prefix.masked();
 }
 
-/// Helper function - equivalent to Go BART's netip.MustParsePrefix
-fn mpp(_: []const u8) Prefix {
-    // For simplicity, just handle 192.168.0.1/32
-    const addr = IPAddr{ .v4 = .{ 192, 168, 0, 1 } };
-    return Prefix.init(&addr, 32).masked();
+fn mpa(addr_str: []const u8) IPAddr {
+    // 簡単なIPv4パース
+    var parts: [4]u8 = undefined;
+    var iter = std.mem.splitScalar(u8, addr_str, '.');
+    var i: usize = 0;
+    while (iter.next()) |part| {
+        if (i >= 4) std.debug.panic("Invalid IPv4\n", .{});
+        parts[i] = std.fmt.parseInt(u8, part, 10) catch std.debug.panic("Invalid IPv4 part\n", .{});
+        i += 1;
+    }
+    if (i != 4) std.debug.panic("Invalid IPv4\n", .{});
+    
+    return IPAddr{ .v4 = parts };
 }
 
 pub fn main() !void {
@@ -21,33 +52,33 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    print("=== Simple DirectNode Test ===\n", .{});
+    print("=== Simple Insert/Lookup Test ===\n", .{});
     
     var table = Table(i32).init(allocator);
     defer table.deinit();
     
     print("Step 1: Insert 192.168.0.1/32 -> 1\n", .{});
-    const prefix1 = mpp("192.168.0.1/32");
-    table.insert(&prefix1, 1);
+    const prefix = mpp("192.168.0.1/32");
+    print("Prefix: addr={}, bits={}\n", .{ prefix.addr, prefix.bits });
     
-    print("Step 2: Test lookup 192.168.0.1\n", .{});
-    const addr1 = mpa("192.168.0.1");
-    const result1 = table.lookup(&addr1);
-    print("Lookup result: ok={}, value={}\n", .{ result1.ok, if (result1.ok) result1.value else 0 });
+    table.insert(&prefix, 1);
+    print("Insert completed\n", .{});
     
-    print("Step 3: Insert 192.168.0.2/32 -> 2\n", .{});
-    const addr2 = IPAddr{ .v4 = .{ 192, 168, 0, 2 } };
-    const prefix2 = Prefix.init(&addr2, 32).masked();
-    table.insert(&prefix2, 2);
+    print("Step 2: Lookup 192.168.0.1\n", .{});
+    const addr = mpa("192.168.0.1");
+    print("Address: {}\n", .{addr});
     
-    print("Step 4: Test lookup 192.168.0.2\n", .{});
-    const result2 = table.lookup(&addr2);
-    print("Lookup result: ok={}, value={}\n", .{ result2.ok, if (result2.ok) result2.value else 0 });
+    const result = table.lookup(&addr);
+    print("Lookup result: value={}, ok={}\n", .{ result.value, result.ok });
     
-    print("Step 5: Test lookup 192.168.0.3 (should fail)\n", .{});
-    const addr3 = IPAddr{ .v4 = .{ 192, 168, 0, 3 } };
-    const result3 = table.lookup(&addr3);
-    print("Lookup result: ok={}, value={}\n", .{ result3.ok, if (result3.ok) result3.value else 0 });
-    
-    print("=== Test completed ===\n", .{});
+    if (result.ok and result.value == 1) {
+        print("✅ SUCCESS: Lookup works correctly!\n", .{});
+    } else {
+        print("❌ FAILED: Lookup failed\n", .{});
+        
+        // Debug table state
+        print("Table size: {}\n", .{table.size()});
+        print("Table IPv4 size: {}\n", .{table.getSize4()});
+        print("Table IPv6 size: {}\n", .{table.getSize6()});
+    }
 } 

@@ -66,8 +66,8 @@ pub fn Table(comptime V: type) type {
         
         /// deinitPersistent - persistent操作で作成されたテーブル用のクリーンアップ
         pub fn deinitPersistent(self: *Self) void {
-            self.root4.deinit();
-            self.root6.deinit();
+            self.root4.deinitPersistent();
+            self.root6.deinitPersistent();
             self.allocator.destroy(self);
         }
         
@@ -184,11 +184,12 @@ pub fn Table(comptime V: type) type {
             const is_ipv4 = canonical_prefix.addr.is4();
             const root = if (is_ipv4) self.root4 else self.root6;
             
+            // DirectNodeのdeleteは戻り値を返すので、その戻り値を使ってサイズを更新
             if (root.delete(&canonical_prefix)) |_| {
                 if (is_ipv4) {
-                    self.size4 -= 1;
+                    if (self.size4 > 0) self.size4 -= 1;
                 } else {
-                    self.size6 -= 1;
+                    if (self.size6 > 0) self.size6 -= 1;
                 }
             }
         }
