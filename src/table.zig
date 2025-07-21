@@ -21,330 +21,345 @@
 // that loops in hot paths (4x uint64 = 256) can be accelerated by loop unrolling.
 
 const std = @import("std");
+const print = std.debug.print;
 const node = @import("node.zig");
-const direct_node = @import("direct_node.zig");
-const base_index = @import("base_index.zig");
+const art = @import("art_base_index.zig");
+const SparseArray256 = @import("sparse_array256.zig").Array256;
+const BitSet256 = @import("bitset256.zig").BitSet256;
+const lpm_lookup = @import("lpm_lookup_table.zig");
+
 const IPAddr = node.IPAddr;
 const Prefix = node.Prefix;
-// const PrefixType = node.PrefixType; // Not used in DirectNode implementation
 
-// DirectNodeベースの実装に変更
+/// ZART Table with Go BART complete compatibility
+/// Uses sparse.Array256 exactly like Go BART implementation
 pub fn Table(comptime V: type) type {
     return struct {
         const Self = @This();
-        const Node = direct_node.DirectNode(V);
+        
+        // Go BART完全互換のNode実装
+        const Node = struct {
+            /// prefixes contains the routes, indexed as a complete binary tree with payload V
+            /// Go BART: prefixes sparse.Array256[V]
+            prefixes: SparseArray256(V),
+            
+            /// children, recursively spans the trie with a branching factor of 256.
+            /// Go BART: children sparse.Array256[*Node]
+            children: SparseArray256(*Node),
+            
+            /// allocator for memory management
+            allocator: std.mem.Allocator,
+            
+            pub fn init(allocator: std.mem.Allocator) !*Node {
+                const self = try allocator.create(Node);
+                self.* = Node{
+                    .prefixes = SparseArray256(V).init(allocator),
+                    .children = SparseArray256(*Node).init(allocator),
+                .allocator = allocator,
+                };
+                return self;
+            }
+            
+            pub fn deinit(self: *Node) void {
+                // Recursively cleanup children (Go BART style)
+                var i: u8 = 0;
+                while (i < 255) : (i += 1) {
+                    if (self.children.testBit(i)) {
+                        const child = self.children.mustGet(i);
+                        child.deinit();
+                    }
+                }
+                
+                self.prefixes.deinit();
+                self.children.deinit();
+                self.allocator.destroy(self);
+            }
+            
+            /// Go BART完全互換 insertPrefix
+            pub fn insertPrefix(self: *Node, idx: u8, value: V) !bool {
+                const was_existing = try self.prefixes.insertAt(idx, value);
+                return !was_existing; // 新規挿入の場合true
+            }
+            
+            /// Go BART完全互換 getPrefix
+            pub fn getPrefix(self: *const Node, idx: u8) ?V {
+                return self.prefixes.get(idx);
+            }
+            
+            /// Go BART完全互換 deletePrefix
+            pub fn deletePrefix(self: *Node, idx: u8) bool {
+                return self.prefixes.deleteAt(idx) != null;
+            }
+            
+            /// Go BART完全互換 hasChild
+            pub fn hasChild(self: *const Node, octet: u8) bool {
+                return self.children.testBit(octet);
+            }
+            
+            /// Go BART完全互換 getChild
+            pub fn getChild(self: *const Node, octet: u8) ?*Node {
+                return self.children.get(octet);
+            }
+            
+            /// Go BART完全互換 setChild
+            pub fn setChild(self: *Node, octet: u8, child: *Node) !bool {
+                return try self.children.insertAt(octet, child);
+            }
+            
+            /// Go BART完全互換 lpmGet - backtracking bitset使用
+            pub fn lpmGet(self: *const Node, octets: []const u8, depth: usize) ?V {
+                if (depth >= octets.len) return null;
+                
+                const octet = octets[depth];
+                const host_idx = art.hostIdx(octet);
+                
+                print("LPM: depth={}, octet={}, host_idx={}\n", .{ depth, octet, host_idx });
+                
+                // Use backtracking bitset for LPM (Go BART algorithm)
+                const backtracking_bs = lpm_lookup.backTrackingBitset(@as(u16, @intCast(host_idx))).*;
+                
+                // Create bitset from prefixes
+                var prefixes_bs = BitSet256.init();
+                var i: u8 = 1;
+                while (i < 255) : (i += 1) {
+                    if (self.prefixes.testBit(i)) {
+                        prefixes_bs.set(i);
+                        print("LPM: Found prefix at idx={}\n", .{i});
+                    }
+                }
+                
+                print("LPM: prefixes_count={}, backtrack_count={}\n", .{ prefixes_bs.popcnt(), backtracking_bs.popcnt() });
+                
+                // Find intersection and get highest bit
+                const intersection = prefixes_bs.intersection(&backtracking_bs);
+                print("LPM: intersection_count={}\n", .{intersection.popcnt()});
+                
+                if (intersection.intersectionTop(&intersection)) |bit| {
+                    print("LPM: Found highest bit={}\n", .{bit});
+                    return self.prefixes.get(bit);
+                }
+                
+                print("LPM: No intersection found\n", .{});
+                return null;
+            }
+        };
         
         allocator: std.mem.Allocator,
-        root4: *Node,
-        root6: *Node,
-        size4: usize,
-        size6: usize,
-        node_pool: ?*void,  // 互換性のために追加（現在は未使用）
+        root4: ?*Node,
+        root6: ?*Node,
+        _size4: usize,
+        _size6: usize,
         
-        /// init - DirectNodeベースの初期化
-        pub fn init(allocator: std.mem.Allocator) Self {
+        /// Initialize table
+        pub fn init(allocator: std.mem.Allocator) !Self {
             return Self{
                 .allocator = allocator,
-                .root4 = Node.init(allocator),
-                .root6 = Node.init(allocator),
-                .size4 = 0,
-                .size6 = 0,
-                .node_pool = null,  // DirectNodeではNodePoolは未使用
+                .root4 = null,
+                .root6 = null,
+                ._size4 = 0,
+                ._size6 = 0,
             };
         }
         
-        /// deinit - 安全なクリーンアップ
+        /// Deinitialize and free all memory
         pub fn deinit(self: *Self) void {
-            self.root4.deinit();
-            self.root6.deinit();
-            
-            // persistent操作で作成されたテーブルの場合、自分自身も解放
-            // 判定方法：allocatorが設定されていて、かつこれがヒープ上のテーブルの場合
-            // ただし、スタック上のテーブルと区別するのは困難なので、
-            // より安全な方法を使用する
+            if (self.root4) |root| {
+                root.deinit();
+            }
+            if (self.root6) |root| {
+                root.deinit();
+            }
         }
         
-        /// deinitPersistent - persistent操作で作成されたテーブル用のクリーンアップ
-        pub fn deinitPersistent(self: *Self) void {
-            self.root4.deinitPersistent();
-            self.root6.deinitPersistent();
-            self.allocator.destroy(self);
+        /// Get or create root node for IP version
+        fn getRootNode(self: *Self, is_ipv4: bool) !*Node {
+            if (is_ipv4) {
+                if (self.root4 == null) {
+                    self.root4 = try Node.init(self.allocator);
+                }
+                return self.root4.?;
+            } else {
+                if (self.root6 == null) {
+                    self.root6 = try Node.init(self.allocator);
+                }
+                return self.root6.?;
+            }
         }
         
-        /// insert - Go BART互換のinsert
-        pub fn insert(self: *Self, prefix: *const Prefix, value: V) void {
-            if (!prefix.isValid()) return;
+        /// Insert a prefix with its associated value - Go BART完全互換
+        pub fn insert(self: *Self, prefix: Prefix, value: V) !void {
+            const root = try self.getRootNode(prefix.addr.isIPv4());
             
-            const canonical_prefix = prefix.masked();
-            const is_ipv4 = canonical_prefix.addr.is4();
-            const root = if (is_ipv4) self.root4 else self.root6;
+            // Go BART algorithm: traverse to correct depth
+            const octets = prefix.addr.octets();
+            const max_depth = @min(prefix.bits / 8, octets.len - 1);
+            const last_bits = if (prefix.bits % 8 == 0) 8 else @as(u8, @intCast(prefix.bits % 8));
             
-            const was_new = !(root.insertAtDepth(canonical_prefix, value, 0) catch false);
+            print("INSERT: octets={any}, max_depth={}, last_bits={}\n", .{ octets, max_depth, last_bits });
+            
+            var current_node = root;
+            
+            // Traverse to the correct depth (Go BART style)
+            for (0..max_depth) |depth| {
+                const octet = octets[depth];
+                
+                print("INSERT: depth={}, octet={}\n", .{ depth, octet });
+                
+                if (!current_node.hasChild(octet)) {
+                    const new_node = try Node.init(self.allocator);
+                    _ = try current_node.setChild(octet, new_node);
+                    print("INSERT: Created new child node at octet={}\n", .{octet});
+                }
+                
+                current_node = current_node.getChild(octet).?;
+            }
+            
+            // Insert prefix using ART baseIndex (Go BART style)
+            const final_octet = octets[max_depth];
+            const idx = art.pfxToIdx256(final_octet, last_bits);
+            
+            print("INSERT: final_octet={}, idx={}\n", .{ final_octet, idx });
+            
+            const was_new = try current_node.insertPrefix(idx, value);
+            print("INSERT: was_new={}, current prefixes_len={}\n", .{ was_new, current_node.prefixes.len() });
+            
             if (was_new) {
-                if (is_ipv4) {
-                    self.size4 += 1;
-                } else {
-                    self.size6 += 1;
+                if (prefix.addr.isIPv4()) {
+                    self._size4 += 1;
+            } else {
+                    self._size6 += 1;
                 }
             }
         }
         
-        /// insertPersist - Go BART互換のimmutable insert
-        pub fn insertPersist(self: *const Self, prefix: *const Prefix, value: V) *Self {
-            const new_table = self.allocator.create(Self) catch unreachable;
+        /// Lookup an IP address and return the associated value - Go BART完全互換
+        pub fn lookup(self: *const Self, addr: IPAddr) ?V {
+            const root = if (addr.isIPv4()) self.root4 else self.root6;
+            if (root == null) return null;
             
-            // まず元のテーブルをクローン
-            new_table.* = Self{
-                .allocator = self.allocator,
-                .root4 = self.root4.clone(self.allocator),
-                .root6 = self.root6.clone(self.allocator),
-                .size4 = self.size4,
-                .size6 = self.size6,
-                .node_pool = self.node_pool,
-            };
+            const octets = addr.octets();
+            var current_node = root.?;
             
-            // 新しいテーブルに挿入
-            new_table.insert(prefix, value);
+            // Go BART style backtracking LPM search
+            var stack: [16]*Node = undefined;
+            var depth: usize = 0;
             
-            return new_table;
-        }
-        
-        /// lookup - Go BART互換のLPM検索
-        pub fn lookup(self: *const Self, addr: *const IPAddr) node.LookupResult(V) {
-            const is_ipv4 = addr.is4();
-            const root = if (is_ipv4) self.root4 else self.root6;
-            return root.lookupOptimized(addr);
-        }
-        
-        /// lookupPrefix - プレフィックスでの検索
-        pub fn lookupPrefix(self: *const Self, prefix: *const Prefix) node.LookupResult(V) {
-            if (!prefix.isValid()) {
-                return node.LookupResult(V){
-                    .prefix = undefined,
-                    .value = undefined,
-                    .ok = false,
-                };
-            }
-            
-            const canonical_prefix = prefix.masked();
-            const is_ipv4 = canonical_prefix.addr.is4();
-            const root = if (is_ipv4) self.root4 else self.root6;
-            
-            const result = root.lookupPrefix(&canonical_prefix);
-                    if (result.ok) {
-                return node.LookupResult(V){
-                    .prefix = canonical_prefix,
-                    .value = result.val,
-                    .ok = true,
-                };
-            }
-            return node.LookupResult(V){
-                .prefix = undefined,
-                .value = undefined,
-                .ok = false,
-            };
-        }
-        
-        /// lookupPrefixLPM - プレフィックスでのLPM検索
-        pub fn lookupPrefixLPM(self: *const Self, prefix: *const Prefix) ?V {
-            if (!prefix.isValid()) return null;
-            
-            const canonical_prefix = prefix.masked();
-            const is_ipv4 = canonical_prefix.addr.is4();
-            const root = if (is_ipv4) self.root4 else self.root6;
-            
-            const result = root.lookupPrefixLPM(&canonical_prefix);
-            if (result.ok) {
-                return result.val;
-            }
-                return null;
-        }
-        
-        /// contains - Go BART互換の包含チェック
-        pub fn contains(self: *const Self, addr: *const IPAddr) bool {
-            return self.lookup(addr).ok;
-        }
-        
-        /// get - Go BART互換のexact match
-        pub fn get(self: *const Self, prefix: *const Prefix) ?V {
-            if (!prefix.isValid()) return null;
-            
-            const canonical_prefix = prefix.masked();
-            const is_ipv4 = canonical_prefix.addr.is4();
-            const root = if (is_ipv4) self.root4 else self.root6;
-            
-            return root.get(&canonical_prefix);
-        }
-        
-        /// delete - Go BART互換のdelete
-        pub fn delete(self: *Self, prefix: *const Prefix) void {
-            if (!prefix.isValid()) return;
-            
-            const canonical_prefix = prefix.masked();
-            const is_ipv4 = canonical_prefix.addr.is4();
-            const root = if (is_ipv4) self.root4 else self.root6;
-            
-            // DirectNodeのdeleteは戻り値を返すので、その戻り値を使ってサイズを更新
-            if (root.delete(&canonical_prefix)) |_| {
-                if (is_ipv4) {
-                    if (self.size4 > 0) self.size4 -= 1;
-                } else {
-                    if (self.size6 > 0) self.size6 -= 1;
+            // Traverse down the trie
+            for (octets, 0..) |octet, d| {
+                stack[depth] = current_node;
+                depth = d + 1;
+                
+                print("LOOKUP: depth={}, octet={}, hasChild={}\n", .{ d, octet, current_node.hasChild(octet) });
+                
+                if (!current_node.hasChild(octet)) {
+                    break;
                 }
+                
+                current_node = current_node.getChild(octet).?;
             }
-        }
-        
-        /// deletePersist - Go BART互換のimmutable delete
-        pub fn deletePersist(self: *const Self, prefix: *const Prefix) *Self {
-            const new_table = self.allocator.create(Self) catch unreachable;
             
-            // まず元のテーブルをクローン
-            new_table.* = Self{
-                .allocator = self.allocator,
-                .root4 = self.root4.clone(self.allocator),
-                .root6 = self.root6.clone(self.allocator),
-                .size4 = self.size4,
-                .size6 = self.size6,
-                .node_pool = self.node_pool,
-            };
+            print("LOOKUP: Starting backtrack from depth={}\n", .{depth});
             
-            // 新しいテーブルから削除
-            new_table.delete(prefix);
-            
-            return new_table;
-        }
-        
-        /// update - Go BART互換のupdate
-        pub fn update(self: *Self, prefix: *const Prefix, callback: fn(V, bool) V) V {
-            const old_value = self.get(prefix);
-            const new_value = callback(old_value orelse @as(V, undefined), old_value != null);
-            self.insert(prefix, new_value);
-            return new_value;
-        }
-        
-        /// updatePersist - Go BART互換のimmutable update
-        pub fn updatePersist(self: *const Self, prefix: *const Prefix, callback: fn(V, bool) V) struct { table: *Self, value: V } {
-            const old_value = self.get(prefix);
-            const new_value = callback(old_value orelse @as(V, undefined), old_value != null);
-            const new_table = self.insertPersist(prefix, new_value);
-            return .{ .table = new_table, .value = new_value };
-        }
-        
-        /// getAndDelete - Go BART互換のget and delete
-        pub fn getAndDelete(self: *Self, prefix: *const Prefix) node.LookupResult(V) {
-            const value = self.get(prefix);
-            if (value) |val| {
-                self.delete(prefix);
-                return node.LookupResult(V){
-                    .prefix = prefix.*,
-                    .value = val,
-                    .ok = true,
-                };
-            }
-            return node.LookupResult(V){
-                .prefix = undefined,
-                .value = undefined,
-                .ok = false,
-            };
-        }
-        
-        /// getAndDeletePersist - Go BART互換のimmutable get and delete
-        pub fn getAndDeletePersist(self: *const Self, prefix: *const Prefix) struct { table: *Self, value: node.LookupResult(V) } {
-            const value = self.get(prefix);
-            const new_table = self.deletePersist(prefix);
-            if (value) |val| {
-                return .{ 
-                    .table = new_table, 
-                    .value = node.LookupResult(V){
-                        .prefix = prefix.*,
-                        .value = val,
-                        .ok = true,
+            // Backtrack and look for longest prefix match (Go BART algorithm)
+            while (depth > 0) {
+                depth -= 1;
+                current_node = stack[depth];
+                
+                print("LOOKUP: backtrack depth={}, prefixes_len={}\n", .{ depth, current_node.prefixes.len() });
+                
+                if (current_node.prefixes.len() > 0) {
+                    if (current_node.lpmGet(octets, depth)) |result| {
+                        print("LOOKUP: Found result at depth={}: {}\n", .{ depth, result });
+                        return result;
                     }
-                };
-            }
-            return .{ 
-                .table = new_table, 
-                .value = node.LookupResult(V){
-                    .prefix = undefined,
-                    .value = undefined,
-                    .ok = false,
                 }
-            };
-        }
-        
-        /// size - 総サイズ
-        pub fn size(self: *const Self) usize {
-            return self.size4 + self.size6;
-        }
-        
-        /// size4 - IPv4サイズ
-        pub fn getSize4(self: *const Self) usize {
-            return self.size4;
-        }
-        
-        /// size6 - IPv6サイズ
-        pub fn getSize6(self: *const Self) usize {
-            return self.size6;
-        }
-        
-        /// clone - ディープコピー
-        pub fn clone(self: *const Self) *Self {
-            const new_table = self.allocator.create(Self) catch unreachable;
-            new_table.* = Self{
-                .allocator = self.allocator,
-                .root4 = self.root4.clone(self.allocator),
-                .root6 = self.root6.clone(self.allocator),
-                .size4 = self.size4,
-                .size6 = self.size6,
-                .node_pool = self.node_pool,
-            };
-            return new_table;
-        }
-        
-        /// union - テーブル統合
-        pub fn unionWith(self: *Self, other: *const Self) void {
-            // TODO: DirectNodeベースのunion実装
-            // 現在は基本実装のみ
-            _ = self;
-            _ = other;
-        }
-        
-        /// overlapsPrefix - プレフィックスとの重複チェック
-        pub fn overlapsPrefix(self: *const Self, prefix: *const Prefix) bool {
-            if (!prefix.isValid()) return false;
+            }
             
-            const canonical_prefix = prefix.masked();
-            const is_ipv4 = canonical_prefix.addr.is4();
-            const root = if (is_ipv4) self.root4 else self.root6;
-            
-            return root.overlapsPrefixAtDepth(canonical_prefix, 0);
-        }
-
-        /// overlaps - 他のテーブルとの重複チェック
-        pub fn overlaps(self: *const Self, other: *const Self) bool {
-            // TODO: DirectNodeベースのoverlaps実装
-            // 暫定的に単純な実装
-            _ = self;
-            _ = other;
-            return false;
+            print("LOOKUP: No match found\n", .{});
+            return null;
         }
         
-        /// overlaps4 - IPv4での重複チェック
-        pub fn overlaps4(self: *const Self, other: *const Self) bool {
-            // TODO: DirectNodeベースのoverlaps4実装
-            // 暫定的に単純な実装
-            _ = self;
-            _ = other;
+        /// Check if an IP address has any matching route - Go BART完全互換
+        pub fn contains(self: *const Self, addr: IPAddr) bool {
+            return self.lookup(addr) != null;
+        }
+        
+        /// Get an exact prefix match - Go BART完全互換
+        pub fn get(self: *const Self, prefix: Prefix) ?V {
+            const root = if (prefix.addr.isIPv4()) self.root4 else self.root6;
+            if (root == null) return null;
+            
+            const octets = prefix.addr.octets();
+            const max_depth = @min(prefix.bits / 8, octets.len - 1);
+            const last_bits = if (prefix.bits % 8 == 0) 8 else @as(u8, @intCast(prefix.bits % 8));
+            
+            var current_node = root.?;
+            
+            // Traverse to the correct depth (Go BART style)
+            for (0..max_depth) |depth| {
+                const octet = octets[depth];
+                if (!current_node.hasChild(octet)) {
+                    return null;
+                }
+                current_node = current_node.getChild(octet).?;
+            }
+            
+            // Check if the exact prefix exists using ART baseIndex
+            const final_octet = octets[max_depth];
+            const idx = art.pfxToIdx256(final_octet, last_bits);
+            
+            return current_node.getPrefix(idx);
+        }
+        
+        /// Delete a prefix - Go BART完全互換
+        pub fn delete(self: *Self, prefix: Prefix) bool {
+            const root = if (prefix.addr.isIPv4()) self.root4 else self.root6;
+            if (root == null) return false;
+            
+            const octets = prefix.addr.octets();
+            const max_depth = @min(prefix.bits / 8, octets.len - 1);
+            const last_bits = if (prefix.bits % 8 == 0) 8 else @as(u8, @intCast(prefix.bits % 8));
+            
+            var current_node = root.?;
+            
+            // Traverse to the correct depth
+            for (0..max_depth) |depth| {
+                const octet = octets[depth];
+                if (!current_node.hasChild(octet)) {
                 return false;
+            }
+                current_node = current_node.getChild(octet).?;
+            }
+            
+            // Delete the prefix using ART baseIndex
+            const final_octet = octets[max_depth];
+            const idx = art.pfxToIdx256(final_octet, last_bits);
+            
+            if (current_node.deletePrefix(idx)) {
+                if (prefix.addr.isIPv4()) {
+                    self._size4 -= 1;
+            } else {
+                    self._size6 -= 1;
+                }
+                return true;
+            }
+            
+            return false;
         }
 
-        /// overlaps6 - IPv6での重複チェック
-        pub fn overlaps6(self: *const Self, other: *const Self) bool {
-            // TODO: DirectNodeベースのoverlaps6実装
-            // 暫定的に単純な実装
-            _ = self;
-            _ = other;
-            return false;
+        /// Get the number of IPv4 routes
+        pub fn size4(self: *const Self) usize {
+            return self._size4;
+        }
+        
+        /// Get the number of IPv6 routes
+        pub fn size6(self: *const Self) usize {
+            return self._size6;
+        }
+        
+        /// Get the total number of routes
+        pub fn size(self: *const Self) usize {
+            return self._size4 + self._size6;
         }
     };
 }

@@ -65,6 +65,26 @@ pub const Prefix = struct {
     addr: IPAddr,
     bits: u8,
     
+    /// Parse a CIDR notation string into a Prefix
+    pub fn parse(cidr_str: []const u8) !Prefix {
+        const slash_pos = std.mem.indexOf(u8, cidr_str, "/") orelse return error.InvalidCIDR;
+        
+        const addr_str = cidr_str[0..slash_pos];
+        const bits_str = cidr_str[slash_pos + 1..];
+        
+        const bits = try std.fmt.parseInt(u8, bits_str, 10);
+        
+        // Try to parse as IPv4 first, then IPv6
+        if (IPAddr.parseIPv4(addr_str)) |addr| {
+            if (bits > 32) return error.InvalidPrefixLength;
+            return Prefix{ .addr = addr, .bits = bits };
+        } else |_| {
+            const addr = try IPAddr.parseIPv6(addr_str);
+            if (bits > 128) return error.InvalidPrefixLength;
+            return Prefix{ .addr = addr, .bits = bits };
+        }
+    }
+    
     pub fn init(addr: *const IPAddr, bits: u8) Prefix {
         const pfx = Prefix{ .addr = addr.*, .bits = bits };
         return pfx;
@@ -136,6 +156,125 @@ pub const IPAddr = union(enum) {
     v4: [4]u8,
     v6: [16]u8,
     
+    /// Parse IPv4 address from string like "192.168.1.1"
+    pub fn parseIPv4(addr_str: []const u8) !IPAddr {
+        var parts = std.mem.splitScalar(u8, addr_str, '.');
+        var addr_octets: [4]u8 = undefined;
+        
+        for (0..4) |i| {
+            const part = parts.next() orelse return error.InvalidIPv4;
+            addr_octets[i] = try std.fmt.parseInt(u8, part, 10);
+        }
+        
+        if (parts.next() != null) return error.InvalidIPv4; // Too many parts
+        
+        return IPAddr{ .v4 = addr_octets };
+    }
+    
+    /// Parse IPv6 address from string like "2001:db8::1"
+    /// Go BART完全互換のIPv6パーサー
+    pub fn parseIPv6(addr_str: []const u8) !IPAddr {
+        var result: [16]u8 = std.mem.zeroes([16]u8);
+        
+        // Handle "::" compression
+        if (std.mem.indexOf(u8, addr_str, "::")) |double_colon_pos| {
+            const left_part = addr_str[0..double_colon_pos];
+            const right_part = addr_str[double_colon_pos + 2..];
+            
+            var left_groups: usize = 0;
+            var right_groups: usize = 0;
+            
+            // Parse left part
+            if (left_part.len > 0) {
+                var left_iter = std.mem.splitScalar(u8, left_part, ':');
+                while (left_iter.next()) |group| {
+                    if (group.len == 0) continue;
+                    if (left_groups >= 8) return error.InvalidIPv6;
+                    const value = try std.fmt.parseInt(u16, group, 16);
+                    result[left_groups * 2] = @as(u8, @intCast(value >> 8));
+                    result[left_groups * 2 + 1] = @as(u8, @intCast(value & 0xff));
+                    left_groups += 1;
+                }
+            }
+            
+            // Parse right part
+            if (right_part.len > 0) {
+                var right_iter = std.mem.splitScalar(u8, right_part, ':');
+                var right_parts = std.ArrayList(u16).init(std.heap.page_allocator);
+                defer right_parts.deinit();
+                
+                while (right_iter.next()) |group| {
+                    if (group.len == 0) continue;
+                    const value = try std.fmt.parseInt(u16, group, 16);
+                    try right_parts.append(value);
+                }
+                
+                right_groups = right_parts.items.len;
+                
+                // Fill right part from the end
+                for (0..right_groups) |i| {
+                    const pos = (8 - right_groups + i) * 2;
+                    const value = right_parts.items[i];
+                    result[pos] = @as(u8, @intCast(value >> 8));
+                    result[pos + 1] = @as(u8, @intCast(value & 0xff));
+                }
+            }
+            
+            // Verify total groups don't exceed 8
+            if (left_groups + right_groups > 8) return error.InvalidIPv6;
+            
+            return IPAddr{ .v6 = result };
+        }
+        
+        // Handle full address without compression
+        var groups: usize = 0;
+        var iter = std.mem.splitScalar(u8, addr_str, ':');
+        
+        while (iter.next()) |group| {
+            if (group.len == 0) return error.InvalidIPv6;
+            if (groups >= 8) return error.InvalidIPv6;
+            
+            const value = try std.fmt.parseInt(u16, group, 16);
+            result[groups * 2] = @as(u8, @intCast(value >> 8));
+            result[groups * 2 + 1] = @as(u8, @intCast(value & 0xff));
+            groups += 1;
+        }
+        
+        if (groups != 8) return error.InvalidIPv6;
+        
+        return IPAddr{ .v6 = result };
+    }
+    
+    /// Check if this is an IPv4 address
+    pub fn isIPv4(self: IPAddr) bool {
+        return switch (self) {
+            .v4 => true,
+            .v6 => false,
+        };
+    }
+    
+    /// Get octets as slice (for IPv4: 4 bytes, for IPv6: 16 bytes)
+    pub fn octets(self: IPAddr) []const u8 {
+        switch (self) {
+            .v4 => |v4| {
+                // Create a static buffer to avoid stack corruption
+                const static = struct {
+                    var buf: [4]u8 = undefined;
+                };
+                static.buf = v4;
+                return static.buf[0..];
+            },
+            .v6 => |v6| {
+                // Create a static buffer for IPv6
+                const static = struct {
+                    var buf: [16]u8 = undefined;
+                };
+                static.buf = v6;
+                return static.buf[0..];
+            },
+        }
+    }
+    
     pub fn eql(self: IPAddr, other: IPAddr) bool {
         switch (self) {
             .v4 => |self_v4| {
@@ -153,30 +292,16 @@ pub const IPAddr = union(enum) {
         }
     }
     
-    pub fn asSlice(self: *const IPAddr) []const u8 {
-        return switch (self.*) {
-            .v4 => |*v4| v4[0..],
-            .v6 => |*v6| v6[0..],
-        };
-    }
-    
-    pub fn is4(self: IPAddr) bool {
-        return switch (self) {
-            .v4 => true,
-            .v6 => false,
-        };
-    }
-    
     /// Format function for std.debug.print
     pub fn format(self: IPAddr, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
         switch (self) {
             .v4 => |v4| {
-                try writer.print("IPv4({}.{}.{}.{})", .{v4[0], v4[1], v4[2], v4[3]});
+                try writer.print("{}.{}.{}.{}", .{v4[0], v4[1], v4[2], v4[3]});
             },
             .v6 => |v6| {
-                try writer.print("IPv6({x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2})", .{
+                try writer.print("{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
                     v6[0], v6[1], v6[2], v6[3], v6[4], v6[5], v6[6], v6[7],
                     v6[8], v6[9], v6[10], v6[11], v6[12], v6[13], v6[14], v6[15]
                 });
@@ -231,14 +356,6 @@ pub const IPAddr = union(enum) {
         }
     }
     
-    /// Check if this is an IPv6 address
-    pub fn is6(self: IPAddr) bool {
-        return switch (self) {
-            .v4 => false,
-            .v6 => true,
-        };
-    }
-    
     /// Check if this IP address is valid (not zero)
     pub fn isValid(self: IPAddr) bool {
         return switch (self) {
@@ -248,3 +365,29 @@ pub const IPAddr = union(enum) {
     }
 };
 
+
+/// Check if prefix is a fringe - HOT PATH: Force inline + Lookup Table
+/// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table for maximum performance
+pub inline fn isFringe(depth: usize, bits: u8) bool {
+    if (depth >= 32) return false; // Bounds check
+    return isFringeLookupTable[depth][bits];
+}
+
+/// Precomputed isFringe lookup table
+/// isFringeLookupTable[depth][bits] = isFringe(depth, bits)
+/// Eliminates runtime modulo and comparison operations
+pub const isFringeLookupTable = blk: {
+    @setEvalBranchQuota(50000);
+    var table: [32][256]bool = undefined;
+    
+    for (0..32) |depth| {
+        for (0..256) |bits| {
+            const max_depth = bits / 8;
+            const last_bits = bits % 8;
+            // Fix overflow: check max_depth > 0 before subtraction
+            table[depth][bits] = (max_depth > 0) and (depth == max_depth - 1) and (last_bits == 0);
+        }
+    }
+    
+    break :blk table;
+};
