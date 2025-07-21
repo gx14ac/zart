@@ -1,6 +1,6 @@
-const bitset = @import("Bitset256.zig");
+const bitset = @import("bitset256.zig");
 
-pub fn idxToPrefixRoutes(idx: u8) *bitset.BitSet256 {
+pub fn idxToPrefixRoutes(idx: u8) *const bitset.BitSet256 {
     return &pfxRoutesLookupTbl[idx];
 }
 

@@ -1,7 +1,7 @@
 const std = @import("std");
 const lookup_tbl = @import("lookup_tbl.zig");
 
-const BitSet256 = struct {
+pub const BitSet256 = struct {
     data: [4]u64,
 
     const Self = @This();

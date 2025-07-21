@@ -1,10 +1,10 @@
 const bitset = @import("bitset256.zig");
 
-pub fn idxToFringeRoutes(idx: u8) *bitset.BitSet256 {
+pub fn idxToFringeRoutes(idx: u8) *const bitset.BitSet256 {
     return &fringeRoutesLookupTbl[idx];
 }
 
-const fringeRoutesLookupTbl = [256]*bitset.BitSet256{
+const fringeRoutesLookupTbl = [256]bitset.BitSet256{
     // idx:   0
     .{ .data = .{ 0x0, 0x0, 0x0, 0x0 } }, // invalid
     // idx:   1
