@@ -67,7 +67,7 @@ pub const hostIdxLookupTable = blk: {
 ///               ^ << 3      ^
 ///      + -----------------------
 ///                0b0000_1101 = 13
-fn pfxToIdx(octet: u8, pfx_len: u8) usize {
+pub fn pfxToIdx(octet: u8, pfx_len: u8) usize {
     const shift: u6 = @intCast(pfx_len);
     const right_shift: u6 = @intCast(8 - pfx_len);
     return (@as(usize, octet) >> right_shift) + (@as(usize, 1) << shift);
@@ -194,6 +194,12 @@ pub const idxToPfxLookupTable = blk: {
     break :blk table;
 };
 
+/// Go BART bits.Len8 equivalent - returns number of bits required to represent idx
+inline fn bitsLen8(idx: u8) u8 {
+    if (idx == 0) return 0;
+    return @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1;
+}
+
 /// Returns octet and prefix length from index (Go art.IdxToPfx256 equivalent)
 /// Go BART: pfxLen = bits.Len8(idx) - 1, octet = (idx & mask) << shiftBits
 pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
@@ -201,17 +207,13 @@ pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
         return error.InvalidIndex;
     }
     
-    // Go BART algorithm exactly
-    const pfx_len = @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1 - 1; // bits.Len8(idx) - 1
+    // Go BART algorithm exactly: pfxLen = bits.Len8(idx) - 1
+    const pfx_len = bitsLen8(idx) - 1;
     const shift_bits = 8 - pfx_len;
     
-    // Ensure shift_bits is within valid range for u3 (0-7)
-    if (shift_bits > 7) {
-        return error.InvalidShiftBits;
-    }
-    
-    const mask = @as(u8, 0xff) >> @as(u3, @intCast(shift_bits));
-    const octet = (idx & mask) << @as(u3, @intCast(shift_bits));
+    // Handle shift_bits >= 8 case (Go allows this, result is 0)
+    const mask: u8 = if (shift_bits >= 8) 0 else @as(u8, 0xff) >> @as(u3, @intCast(shift_bits));
+    const octet: u8 = if (shift_bits >= 8) 0 else (idx & mask) << @as(u3, @intCast(shift_bits));
     
     return .{
         .octet = octet,
@@ -225,7 +227,7 @@ pub fn pfxLen256(depth: i32, idx: u8) !u8 {
         return error.InvalidIndex;
     }
     // Go実装: return uint8(depth<<3 + bits.Len8(idx) - 1)
-    const bits_len = @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1;
+    const bits_len = bitsLen8(idx);
     return @as(u8, @intCast(depth * 8)) + bits_len - 1;
 }
 
