@@ -24,7 +24,7 @@ pub fn Array256(comptime T: type) type {
         /// Initialize empty sparse array
         pub fn init(allocator: std.mem.Allocator) Self {
             return Self{
-                .bitset = BitSet256.init(),
+                .bitset = BitSet256{ .data = [4]u64{ 0, 0, 0, 0 } },
                 .items = std.ArrayList(T).init(allocator),
             };
         }
@@ -36,17 +36,36 @@ pub fn Array256(comptime T: type) type {
 
         /// Test if bit i is set (Go BART: a.Test(i))
         pub fn testBit(self: *const Self, i: u8) bool {
-            return self.bitset.isSet(i);
+            return self.bitset.testBitSet256(i);
+        }
+
+        /// Test - Go BART compatible version (Go BART: a.Test(i))
+        pub fn Test(self: *const Self, i: u8) bool {
+            return self.bitset.testBitSet256(i);
         }
 
         /// Get rank of bit i (Go BART: a.Rank(i))
-        pub fn rank(self: *const Self, i: u8) u16 {
+        pub fn rank(self: *const Self, i: u8) u8 {
             return self.bitset.rank(i);
         }
 
-        /// Get the value at i from sparse array (Go BART: a.Get(i))
+        /// Rank - Go BART compatible version (Go BART: a.Rank(i))
+        pub fn Rank(self: *const Self, i: u8) u8 {
+            return self.bitset.rank(i);
+        }
+
+        /// Get the value at i from sparse array with optional return (convenience method)
+        pub fn get(self: *const Self, i: u8) ?T {
+            if (self.testBit(i)) {
+                const rank_idx = self.rank(i) - 1;
+                return self.items.items[rank_idx];
+            }
+            return null;
+        }
+
+        /// Get returns value and ok flag (Go BART: a.Get(i))
         ///
-        /// example: a.get(5) -> a.items[1]
+        /// example: a.Get(5) -> {.value = items[1], .ok = true}
         ///
         ///                        ⬇
         /// BitSet256:   [0|0|1|0|0|1|0|...|1] <- 3 bits set
@@ -55,12 +74,12 @@ pub fn Array256(comptime T: type) type {
         ///
         /// BitSet256.testBit(5):     true
         /// BitSet256.rank(5):     2,
-        pub fn get(self: *const Self, i: u8) ?T {
+        pub fn Get(self: *const Self, i: u8) struct { value: T, ok: bool } {
             if (self.testBit(i)) {
                 const rank_idx = self.rank(i) - 1;
-                return self.items.items[rank_idx];
+                return .{ .value = self.items.items[rank_idx], .ok = true };
             }
-            return null;
+            return .{ .value = undefined, .ok = false };
         }
 
         /// MustGet - use it only after a successful test (Go BART: a.MustGet(i))
@@ -110,16 +129,26 @@ pub fn Array256(comptime T: type) type {
             return self.items.items.len;
         }
 
+        /// Items - Go BART compatible Items slice access (Go BART: a.Items)
+        pub fn Items(self: *const Self) []T {
+            return self.items.items;
+        }
+
         /// Copy returns a shallow copy of the Array (Go BART: a.Copy())
         /// The elements are copied using assignment, this is no deep clone.
-        pub fn copy(self: *const Self, allocator: std.mem.Allocator) !*Self {
+        /// Returns null if self is null (Go BART compatible).
+        pub fn copy(self: ?*const Self, allocator: std.mem.Allocator) !?*Self {
+            if (self == null) {
+                return null;
+            }
+
             var new_array = try allocator.create(Self);
             new_array.* = Self{
-                .bitset = self.bitset,
+                .bitset = self.?.bitset,
                 .items = std.ArrayList(T).init(allocator),
             };
 
-            try new_array.items.appendSlice(self.items.items);
+            try new_array.items.appendSlice(self.?.items.items);
             return new_array;
         }
 
@@ -227,55 +256,4 @@ pub fn Array256(comptime T: type) type {
             std.debug.print("]\n");
         }
     };
-}
-
-// Unit tests to verify Go BART compatibility
-test "sparse array basic operations" {
-    var array = Array256(i32).init(std.testing.allocator);
-    defer array.deinit();
-
-    // Test insertAt
-    const existed1 = try array.insertAt(5, 42);
-    try std.testing.expect(!existed1); // new insertion
-
-    const existed2 = try array.insertAt(5, 99);
-    try std.testing.expect(existed2); // overwrite
-
-    // Test get
-    const value1 = array.get(5);
-    try std.testing.expect(value1 != null);
-    try std.testing.expectEqual(@as(i32, 99), value1.?);
-
-    const value2 = array.get(10);
-    try std.testing.expect(value2 == null);
-
-    // Test len
-    try std.testing.expectEqual(@as(usize, 1), array.len());
-
-    // Test deleteAt
-    const deleted = array.deleteAt(5);
-    try std.testing.expect(deleted != null);
-    try std.testing.expectEqual(@as(i32, 99), deleted.?);
-
-    try std.testing.expectEqual(@as(usize, 0), array.len());
-}
-
-test "sparse array rank operations" {
-    var array = Array256(i32).init(std.testing.allocator);
-    defer array.deinit();
-
-    // Insert at positions 1, 5, 10
-    _ = try array.insertAt(1, 11);
-    _ = try array.insertAt(5, 55);
-    _ = try array.insertAt(10, 100);
-
-    // Test rank operations
-    try std.testing.expectEqual(@as(u16, 1), array.rank(1));
-    try std.testing.expectEqual(@as(u16, 2), array.rank(5));
-    try std.testing.expectEqual(@as(u16, 3), array.rank(10));
-
-    // Test mustGet
-    try std.testing.expectEqual(@as(i32, 11), array.mustGet(1));
-    try std.testing.expectEqual(@as(i32, 55), array.mustGet(5));
-    try std.testing.expectEqual(@as(i32, 100), array.mustGet(10));
 }

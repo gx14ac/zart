@@ -27,7 +27,7 @@ test "BackTrackingBitset compatibility with Go BART" {
         const bitset = lookup_tbl.backTrackingBitset(tc.idx);
         const got = try bitset.all(testing.allocator);
         defer testing.allocator.free(got);
-        
+
         // Compare arrays
         try testing.expectEqual(tc.want.len, got.len);
         for (tc.want, 0..) |expected, i| {
