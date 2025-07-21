@@ -1,8 +1,8 @@
 //! Prefix and base index conversion functionality
-//! 
+//!
 //! This module provides conversion between prefixes (octet and prefix length)
 //! and base indices.
-//! 
+//!
 //! Main features:
 //! - Convert prefix to index
 //! - Convert index to prefix
@@ -23,12 +23,12 @@ pub fn hostIdx(octet: u8) usize {
 // Eliminates runtime addition operations
 // コンパイル時に一度だけ実行する。
 // コンパイル時に生成される内容（概念的表現）
-// 
+//
 // const hostIdxLookupTable = [256]usize{
 //     256,   // octet=0 の場合
 //     257,   // octet=1 の場合
 //     258,   // octet=2 の場合
-//     // ... 
+//     // ...
 //     511,   // octet=255 の場合
 // };
 //
@@ -47,22 +47,22 @@ pub fn hostIdx(octet: u8) usize {
 pub const hostIdxLookupTable = blk: {
     @setEvalBranchQuota(1000);
     var table: [256]usize = undefined;
-    
+
     for (0..256) |octet| {
         table[octet] = @as(usize, octet) + 256;
     }
-    
+
     break :blk table;
 };
 
 /// Map 8-bit prefix to numeric value
 /// Prefixes range from 0/0 to 255/8, mapped values range from 1 to 511.
-/// 
+///
 /// Example: octet/pfxLen: 160/3 = 0b1010_0000/3 => idxToPfx(160/3) => 13
-/// 
+///
 ///     0b1010_0000 => 0b0000_0101
 ///      ^^^ >> (8-3)         ^^^
-/// 
+///
 ///     0b0000_0001 => 0b0000_1000
 ///               ^ << 3      ^
 ///      + -----------------------
@@ -104,7 +104,7 @@ pub inline fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
 pub const pfxToIdx256LookupTable = blk: {
     @setEvalBranchQuota(100000);
     var table: [9][256]u8 = undefined;
-    
+
     // Precompute for pfx_len 0-8 and all octets 0-255
     for (0..9) |pfx_len| {
         for (0..256) |octet| {
@@ -117,7 +117,7 @@ pub const pfxToIdx256LookupTable = blk: {
             table[pfx_len][octet] = @as(u8, @intCast(idx));
         }
     }
-    
+
     break :blk table;
 };
 
@@ -142,7 +142,7 @@ pub const netMaskLookupTable = [_]u8{
 pub const maxDepthLastBitsLookupTable = blk: {
     @setEvalBranchQuota(10000);
     var table: [256]struct { max_depth: u8, last_bits: u8 } = undefined;
-    
+
     for (0..256) |bits| {
         // Go BART algorithm:
         // maxDepth = bits >> 3
@@ -151,7 +151,7 @@ pub const maxDepthLastBitsLookupTable = blk: {
         const last_bits = @as(u8, @intCast(bits & 7));
         table[bits] = .{ .max_depth = max_depth, .last_bits = last_bits };
     }
-    
+
     break :blk table;
 };
 
@@ -161,12 +161,12 @@ pub const maxDepthLastBitsLookupTable = blk: {
 pub const idxToPfxLookupTable = blk: {
     @setEvalBranchQuota(10000);
     var table: [256]struct { octet: u8, pfx_len: u8, valid: bool } = undefined;
-    
+
     // Initialize all entries as invalid
     for (0..256) |i| {
         table[i] = .{ .octet = 0, .pfx_len = 0, .valid = false };
     }
-    
+
     // Precompute valid entries by reverse mapping
     // Process in reverse order to prefer higher pfx_len (longer prefixes)
     var pfx_len: i32 = 8;
@@ -179,18 +179,14 @@ pub const idxToPfxLookupTable = blk: {
                 idx >>= 1;
             }
             const idx_u8 = @as(u8, @intCast(idx));
-            
+
             // Only set if not already set (prefer higher pfx_len for conflicts)
             if (!table[idx_u8].valid) {
-                table[idx_u8] = .{ 
-                    .octet = @as(u8, @intCast(octet)), 
-                    .pfx_len = @as(u8, @intCast(pfx_len)), 
-                    .valid = true 
-                };
+                table[idx_u8] = .{ .octet = @as(u8, @intCast(octet)), .pfx_len = @as(u8, @intCast(pfx_len)), .valid = true };
             }
         }
     }
-    
+
     break :blk table;
 };
 
@@ -206,15 +202,15 @@ pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
     if (idx == 0) {
         return error.InvalidIndex;
     }
-    
+
     // Go BART algorithm exactly: pfxLen = bits.Len8(idx) - 1
     const pfx_len = bitsLen8(idx) - 1;
     const shift_bits = 8 - pfx_len;
-    
+
     // Handle shift_bits >= 8 case (Go allows this, result is 0)
     const mask: u8 = if (shift_bits >= 8) 0 else @as(u8, 0xff) >> @as(u3, @intCast(shift_bits));
     const octet: u8 = if (shift_bits >= 8) 0 else (idx & mask) << @as(u3, @intCast(shift_bits));
-    
+
     return .{
         .octet = octet,
         .pfx_len = pfx_len,
@@ -243,7 +239,7 @@ pub fn idxToRange256(idx: u8) !struct { first: u8, last: u8 } {
 
 // Generate network mask based on bit count
 // ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table
-// 
+//
 // 0b0000_0000, // bits == 0
 // 0b1000_0000, // bits == 1
 // 0b1100_0000, // bits == 2

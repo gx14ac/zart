@@ -1,5 +1,5 @@
 //! Test for base_index.zig - Go BART compatibility tests
-//! 
+//!
 //! All test cases are identical to Go BART's base_index_test.go
 //! to ensure 100% compatibility
 
@@ -137,4 +137,3 @@ test "idxToRange256 compatibility with Go BART" {
         try std.testing.expectEqual(tc.want_last, result.last);
     }
 }
- 

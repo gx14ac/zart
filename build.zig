@@ -16,28 +16,28 @@ pub fn build(b: *std.Build) void {
 
     // ZART Benchmark executable - matching Go BART's fulltable_test.go
     const zart_bench = b.addExecutable(.{
-        .name = "zart_benchmark", 
+        .name = "zart_benchmark",
         .root_source_file = b.path("src/zart_benchmark.zig"),
         .target = target,
         .optimize = optimize,
         .strip = true, // Strip symbols for maximum performance
         .link_libc = false, // Avoid libc overhead
     });
-    
+
     const contains_lookup_bench = b.addExecutable(.{
-        .name = "contains_lookup_bench", 
+        .name = "contains_lookup_bench",
         .root_source_file = b.path("src/benchmark_contains_lookup.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const insert_bench = b.addExecutable(.{
-        .name = "insert_bench", 
+        .name = "insert_bench",
         .root_source_file = b.path("src/benchmark_insert.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     b.installArtifact(zart_bench);
     b.installArtifact(contains_lookup_bench);
     b.installArtifact(insert_bench);
@@ -63,8 +63,6 @@ pub fn build(b: *std.Build) void {
         insert_cmd.addArgs(args);
     }
 
-
-
     // Build steps
     const bench_step = b.step("bench", "Run ZART benchmarks (matches Go BART's fulltable_test.go)");
     bench_step.dependOn(&bench_cmd.step);
@@ -72,10 +70,8 @@ pub fn build(b: *std.Build) void {
     const contains_lookup_step = b.step("contains_lookup", "Run contains_lookup benchmarks");
     contains_lookup_step.dependOn(&contains_lookup_cmd.step);
 
-    const insert_step = b.step("insert", "Run insert benchmarks"); 
+    const insert_step = b.step("insert", "Run insert benchmarks");
     insert_step.dependOn(&insert_cmd.step);
-
-
 
     // Unit tests
     const lib_unit_tests = b.addTest(.{
@@ -145,47 +141,47 @@ pub fn build(b: *std.Build) void {
     const test_index_mapping_step = b.step("test_index_mapping", "Test index mapping analysis");
     test_index_mapping_step.dependOn(&test_index_mapping_exe.step);
 
-    // Debug: pfx_len check analysis  
+    // Debug: pfx_len check analysis
     const debug_pfx_len_check = b.addExecutable(.{
         .name = "debug_pfx_len_check",
         .root_source_file = b.path("src/debug_pfx_len_check.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     const debug_pfx_len_check_step = b.step("debug_pfx_len_check", "pfx_len check analysis");
     debug_pfx_len_check_step.dependOn(&b.addRunArtifact(debug_pfx_len_check).step);
 
-    // Debug: Range check analysis  
+    // Debug: Range check analysis
     const debug_range_check = b.addExecutable(.{
         .name = "debug_range_check",
         .root_source_file = b.path("src/debug_range_check.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     const debug_range_check_step = b.step("debug_range_check", "Range check analysis");
     debug_range_check_step.dependOn(&b.addRunArtifact(debug_range_check).step);
 
-    // Debug: ZART individual bitsets analysis  
+    // Debug: ZART individual bitsets analysis
     const debug_zart_individual_bitsets = b.addExecutable(.{
         .name = "debug_zart_individual_bitsets",
         .root_source_file = b.path("src/debug_zart_individual_bitsets.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     const debug_zart_individual_bitsets_step = b.step("debug_zart_individual_bitsets", "ZART individual bitsets analysis");
     debug_zart_individual_bitsets_step.dependOn(&b.addRunArtifact(debug_zart_individual_bitsets).step);
 
-    // Debug: ZART bitset analysis  
+    // Debug: ZART bitset analysis
     const debug_zart_bitset = b.addExecutable(.{
         .name = "debug_zart_bitset",
         .root_source_file = b.path("src/debug_zart_bitset.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     const debug_zart_bitset_step = b.step("debug_zart_bitset", "ZART bitset analysis");
     debug_zart_bitset_step.dependOn(&b.addRunArtifact(debug_zart_bitset).step);
 
@@ -196,7 +192,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     const debug_detailed_octet_step = b.step("debug_detailed_octet", "Detailed octet matching debug");
     debug_detailed_octet_step.dependOn(&b.addRunArtifact(debug_detailed_octet).step);
 
@@ -207,7 +203,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     const debug_simple_test_step = b.step("debug_simple_test", "Simple DirectNode test");
     debug_simple_test_step.dependOn(&b.addRunArtifact(debug_simple_test).step);
 
@@ -218,9 +214,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     const debug_lmp_detailed_analysis_step = b.step("debug_lmp_detailed_analysis", "Debug LPM detailed analysis");
     debug_lmp_detailed_analysis_step.dependOn(&b.addRunArtifact(debug_lmp_detailed_analysis).step);
-
-
 }

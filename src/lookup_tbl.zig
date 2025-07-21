@@ -1,7 +1,7 @@
 //! BackTrackingBitset lookup table for LPM
 //! This implements the backtracking sequence in the complete binary tree
 //! of the prefixes as bitstring.
-//! 
+//!
 //! Direct port from Go BART lookuptbl.go with identical static data.
 
 const std = @import("std");

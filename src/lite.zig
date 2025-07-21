@@ -249,108 +249,104 @@ pub const Lite = struct {
 // テスト
 test "Lite basic operations" {
     const allocator = std.testing.allocator;
-    
+
     var lite = Lite.init(allocator);
     defer lite.deinit();
-    
+
     // Create test prefixes using Prefix.init and IPAddr
     const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16); // 192.168.0.0/16
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);     // 10.0.0.0/8
+    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8); // 10.0.0.0/8
     const pfx3 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32); // 2001:db8::/32
-    
+
     // Test insert and exists
     lite.insert(&pfx1);
     lite.insert(&pfx2);
     lite.insert(&pfx3);
-    
+
     std.debug.print("挿入されたプレフィックス:\n", .{});
     std.debug.print("  pfx1: {}\n", .{pfx1});
     std.debug.print("  pfx2: {}\n", .{pfx2});
     std.debug.print("  pfx3: {}\n", .{pfx3});
-    
+
     try std.testing.expect(lite.exists(&pfx1));
     try std.testing.expect(lite.exists(&pfx2));
     try std.testing.expect(lite.exists(&pfx3));
-    
+
     // Test size
     try std.testing.expectEqual(@as(usize, 3), lite.size());
     try std.testing.expectEqual(@as(usize, 2), lite.size4());
     try std.testing.expectEqual(@as(usize, 1), lite.size6());
-    
+
     // Test lookupPrefix
     try std.testing.expect(lite.lookupPrefix(&pfx1));
     try std.testing.expect(lite.lookupPrefix(&pfx2));
     try std.testing.expect(lite.lookupPrefix(&pfx3));
-    
+
     // Test contains with IP addresses - before delete
     const addr1 = IPAddr{ .v4 = .{ 192, 168, 1, 1 } }; // should match 192.168.0.0/16
-    const addr2 = IPAddr{ .v4 = .{ 10, 0, 0, 1 } };    // should match 10.0.0.0/8
-    
+    const addr2 = IPAddr{ .v4 = .{ 10, 0, 0, 1 } }; // should match 10.0.0.0/8
+
     std.debug.print("テスト前の状態:\n", .{});
     std.debug.print("  テーブルサイズ: {}\n", .{lite.size()});
     std.debug.print("  addr1 contains: {}\n", .{lite.contains(&addr1)});
     std.debug.print("  addr2 contains: {}\n", .{lite.contains(&addr2)});
-    
+
     // Test individual lookups
     const result1 = lite.table.lookup(&addr1);
     const result2 = lite.table.lookup(&addr2);
     std.debug.print("  result1.ok: {}\n", .{result1.ok});
     std.debug.print("  result2.ok: {}\n", .{result2.ok});
-    
+
     try std.testing.expect(lite.contains(&addr1));
     try std.testing.expect(lite.contains(&addr2));
-    
+
     // Test delete
     lite.delete(&pfx2);
     try std.testing.expect(!lite.exists(&pfx2));
     try std.testing.expectEqual(@as(usize, 2), lite.size());
-    
+
     std.debug.print("✅ Lite basic operations test passed!\n", .{});
 }
 
-
-
 test "Lite ACL example" {
     const allocator = std.testing.allocator;
-    
+
     var acl = Lite.init(allocator);
     defer acl.deinit();
-    
+
     // Insert some ACL rules (blocked networks) using Prefix.init
     const blocked_prefixes = [_]Prefix{
-        Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16),   // 192.168.0.0/16
-        Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12),    // 172.16.0.0/12
-        Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8),       // 10.0.0.0/8
-        Prefix.init(&IPAddr{ .v4 = .{ 127, 0, 0, 0 } }, 8),      // 127.0.0.0/8
-        Prefix.init(&IPAddr{ .v4 = .{ 169, 254, 0, 0 } }, 16),   // 169.254.0.0/16
-        Prefix.init(&IPAddr{ .v4 = .{ 224, 0, 0, 0 } }, 4),      // 224.0.0.0/4
+        Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16), // 192.168.0.0/16
+        Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12), // 172.16.0.0/12
+        Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8), // 10.0.0.0/8
+        Prefix.init(&IPAddr{ .v4 = .{ 127, 0, 0, 0 } }, 8), // 127.0.0.0/8
+        Prefix.init(&IPAddr{ .v4 = .{ 169, 254, 0, 0 } }, 16), // 169.254.0.0/16
+        Prefix.init(&IPAddr{ .v4 = .{ 224, 0, 0, 0 } }, 4), // 224.0.0.0/4
         Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10), // fe80::/10
-        Prefix.init(&IPAddr{ .v6 = .{ 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 7),     // fc00::/7
+        Prefix.init(&IPAddr{ .v6 = .{ 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 7), // fc00::/7
     };
-    
+
     for (blocked_prefixes) |pfx| {
         acl.insert(&pfx);
     }
-    
+
     try std.testing.expectEqual(@as(usize, 8), acl.size());
     try std.testing.expectEqual(@as(usize, 6), acl.size4());
     try std.testing.expectEqual(@as(usize, 2), acl.size6());
-    
+
     // Test if specific IP addresses are blocked
     const test_blocked_ip = IPAddr{ .v4 = .{ 192, 168, 1, 100 } }; // should be blocked by 192.168.0.0/16
-    const test_allowed_ip = IPAddr{ .v4 = .{ 8, 8, 8, 8 } };       // should not be blocked
-    
+    const test_allowed_ip = IPAddr{ .v4 = .{ 8, 8, 8, 8 } }; // should not be blocked
+
     try std.testing.expect(acl.contains(&test_blocked_ip));
     try std.testing.expect(!acl.contains(&test_allowed_ip));
-    
+
     // Test prefix LPM
     const test_blocked_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24); // 192.168.1.0/24
-    const test_allowed_pfx = Prefix.init(&IPAddr{ .v4 = .{ 8, 8, 8, 0 } }, 24);     // 8.8.8.0/24
-    
+    const test_allowed_pfx = Prefix.init(&IPAddr{ .v4 = .{ 8, 8, 8, 0 } }, 24); // 8.8.8.0/24
+
     try std.testing.expect(acl.lookupPrefixLPM(&test_blocked_pfx));
     try std.testing.expect(!acl.lookupPrefixLPM(&test_allowed_pfx));
-    
+
     std.debug.print("✅ Lite ACL example test passed!\n", .{});
 }
-
- 

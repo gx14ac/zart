@@ -24,7 +24,7 @@ pub fn main() !void {
     const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
     const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);
     const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 0, 0, 0, 0 } }, 0); // Default route
-    
+
     tbl.insert(&pfx1, 100);
     tbl.insert(&pfx2, 200);
     tbl.insert(&pfx3, 300);
@@ -51,11 +51,11 @@ pub fn main() !void {
     const lookup_ip1 = IPAddr{ .v4 = .{ 10, 1, 2, 3 } };
     const lookup_ip2 = IPAddr{ .v4 = .{ 192, 168, 1, 100 } };
     const lookup_ip3 = IPAddr{ .v4 = .{ 8, 8, 8, 8 } };
-    
+
     const result1 = tbl.lookup(&lookup_ip1);
     const result2 = tbl.lookup(&lookup_ip2);
     const result3 = tbl.lookup(&lookup_ip3);
-    
+
     std.debug.print("10.1.2.3 -> {?}\n", .{if (result1.ok) result1.value else null});
     std.debug.print("192.168.1.100 -> {?}\n", .{if (result2.ok) result2.value else null});
     std.debug.print("8.8.8.8 -> {?} (default route)\n", .{if (result3.ok) result3.value else null});
@@ -71,14 +71,14 @@ pub fn main() !void {
 /// Simple insert benchmark using standard BART API only
 fn simpleInsertBenchmark(allocator: std.mem.Allocator) !void {
     const test_sizes = [_]usize{ 1000, 10000, 100000 };
-    
+
     for (test_sizes) |size| {
         std.debug.print("\n--- Testing {} prefixes ---\n", .{size});
-        
+
         // Generate test prefixes
         var prefixes = std.ArrayList(Prefix).init(allocator);
         defer prefixes.deinit();
-        
+
         var rng = std.Random.DefaultPrng.init(42);
         for (0..size) |i| {
             const addr = IPAddr{ .v4 = .{
@@ -90,24 +90,24 @@ fn simpleInsertBenchmark(allocator: std.mem.Allocator) !void {
             const bits = @as(u8, @intCast(16 + rng.random().uintLessThan(u8, 17))); // /16-/32
             try prefixes.append(Prefix.init(&addr, bits));
         }
-        
+
         // Create table and benchmark inserts
         var table = Table(u32).init(allocator);
         defer table.deinit();
-        
+
         const start_time = std.time.nanoTimestamp();
-        
+
         for (prefixes.items, 0..) |pfx, i| {
             table.insert(&pfx, @as(u32, @intCast(i)));
         }
-        
+
         const end_time = std.time.nanoTimestamp();
         const total_ns = end_time - start_time;
         const per_op_ns = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(size));
-        
+
         std.debug.print("Insert: {d:.1} ns/op\n", .{per_op_ns});
         std.debug.print("Final table size: {}\n", .{table.size()});
-        
+
         // Go BART comparison
         if (per_op_ns <= 20.0) {
             std.debug.print("🏆 Go BARTレベル達成! ({d:.1} ns/op)\n", .{per_op_ns});
