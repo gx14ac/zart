@@ -23,8 +23,16 @@ pub const BitSet256 = struct {
         self.data[bit >> 6] &= ~(@as(u64, 1) << (bit & 63));
     }
 
-    pub fn all(self: *const Self) []u8 {
-        return self.asSlice(&[256]u8{});
+    /// Returns all set bits as a slice (Go BART: All() method)
+    /// Caller owns the returned slice
+    pub fn all(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+        var buf: [256]u8 = undefined;
+        const slice = self.asSlice(&buf);
+        
+        // Create owned slice like Go BART's All() method
+        const result = try allocator.alloc(u8, slice.len);
+        @memcpy(result, slice);
+        return result;
     }
 
     pub fn asSlice(self: *const Self, buf: *[256]u8) []u8 {
