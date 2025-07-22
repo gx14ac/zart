@@ -113,7 +113,8 @@ pub fn Cloner(comptime V: type) type {
 // Go BART: func cloneOrCopy[V any](val V) V
 pub fn cloneOrCopy(comptime V: type, val: V) V {
     // Check if type V has a 'clone' method at compile time
-    if (@hasDecl(V, "clone")) {
+    const type_info = @typeInfo(V);
+    if (type_info == .@"struct" and @hasDecl(V, "clone")) {
         // Go BART: cloner.Clone()
         return val.clone();
     } else {
@@ -228,8 +229,75 @@ pub fn Node(comptime V: type) type {
             return cloned;
         }
 
-        /// Check if node is empty (has neither prefixes nor children)
+        /// Go BART: func (n *node[V]) cloneRec() *node[V]
+        /// cloneRec, clones the node recursive.
+        /// Returns a deep clone of this node and all its children.
+        pub fn cloneRec(self: *const Self, allocator: std.mem.Allocator) !*Self {
+            // Go BART: c := new(node[V])
+            const c = try allocator.create(Self);
+            
+            // Go BART: if n.isEmpty() { return c }
+            if (self.isEmpty()) {
+                c.* = Self.init(allocator);
+                return c;
+            }
+
+            // Initialize cloned node
+            c.* = Self.init(allocator);
+
+            // Go BART: c.prefixes = *(n.prefixes.Copy())
+            // shallow copy of prefixes array
+            if (try self.prefixes.copy(allocator)) |prefixes_copy| {
+                c.prefixes.deinit(); // Clean up the init
+                c.prefixes = prefixes_copy.*;
+                allocator.destroy(prefixes_copy); // Free the allocated copy pointer
+                
+                // Go BART: _, isCloner := any(*new(V)).(Cloner[V])
+                // deep copy if V implements Cloner[V]
+                const type_info = @typeInfo(V);
+                if (type_info == .@"struct" and @hasDecl(V, "clone")) {
+                    // Go BART: for i, val := range c.prefixes.Items
+                    const items = c.prefixes.Items();
+                    for (items) |*item| {
+                        item.* = cloneOrCopy(V, item.*);
+                    }
+                }
+            }
+
+            // Go BART: c.children = *(n.children.Copy())
+            // shallow copy of children array
+            if (try self.children.copy(allocator)) |children_copy| {
+                c.children.deinit(); // Clean up the init
+                c.children = children_copy.*;
+                allocator.destroy(children_copy); // Free the allocated copy pointer
+
+                // Go BART: for i, kidAny := range c.children.Items
+                // deep copy of nodes and leaves
+                const items = c.children.Items();
+                for (items) |*item| {
+                    // Go BART: switch kid := kidAny.(type)
+                    switch (item.*) {
+                        .node => |kid_node| {
+                            // Go BART: case *node[V]: c.children.Items[i] = kid.cloneRec()
+                            item.* = Self.ChildNode{ .node = try kid_node.cloneRec(allocator) };
+                        },
+                        .leaf => |kid_leaf| {
+                            // Go BART: case *leafNode[V]: c.children.Items[i] = kid.cloneLeaf()
+                            item.* = Self.ChildNode{ .leaf = try kid_leaf.cloneLeaf(allocator) };
+                        },
+                        .fringe => |kid_fringe| {
+                            // Go BART: case *fringeNode[V]: c.children.Items[i] = kid.cloneFringe()
+                            item.* = Self.ChildNode{ .fringe = try kid_fringe.cloneFringe(allocator) };
+                        },
+                    }
+                }
+            }
+
+            return c;
+        }
+
         /// Go BART: func (n *node[V]) isEmpty() bool
+        /// isEmpty returns true if node has neither prefixes nor children
         pub fn isEmpty(self: *const Self) bool {
             return self.prefixes.len() == 0 and self.children.len() == 0;
         }
@@ -707,4 +775,174 @@ test "lpmGet with backtracking bitset" {
     const result = node.lpmGet(384); // Some high index value
     try testing.expect(result.ok);
     // Should find the most specific matching prefix
+}
+
+test "cloneRec Go BART compatibility" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Create original node with simple structure
+    var original = TestNode.init(testing.allocator);
+    defer original.deinit();
+    
+    // Add some prefixes only (避けるcomplex children for now)
+    _ = try original.prefixes.insertAt(1, 100);
+    _ = try original.prefixes.insertAt(5, 500);
+    
+    // Clone the structure
+    const cloned = try original.cloneRec(testing.allocator);
+    defer {
+        cloned.deinit();
+        testing.allocator.destroy(cloned);
+    }
+    
+    // Verify structure was cloned correctly
+    try testing.expectEqual(original.prefixes.len(), cloned.prefixes.len());
+    try testing.expectEqual(original.children.len(), cloned.children.len());
+    
+    // Verify prefixes were cloned
+    const orig_result1 = original.prefixes.Get(1);
+    const clone_result1 = cloned.prefixes.Get(1);
+    try testing.expect(orig_result1.ok and clone_result1.ok);
+    try testing.expectEqual(orig_result1.value, clone_result1.value);
+    
+    const orig_result5 = original.prefixes.Get(5);
+    const clone_result5 = cloned.prefixes.Get(5);
+    try testing.expect(orig_result5.ok and clone_result5.ok);
+    try testing.expectEqual(orig_result5.value, clone_result5.value);
+    
+    // Verify independence: modifying original shouldn't affect clone
+    _ = try original.prefixes.insertAt(7, 700);
+    const orig_result7 = original.prefixes.Get(7);
+    const clone_result7 = cloned.prefixes.Get(7);
+    try testing.expect(orig_result7.ok and !clone_result7.ok);
+}
+
+test "cloneRec empty node" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    var empty_node = TestNode.init(testing.allocator);
+    defer empty_node.deinit();
+    
+    const cloned = try empty_node.cloneRec(testing.allocator);
+    defer {
+        cloned.deinit();
+        testing.allocator.destroy(cloned);
+    }
+    
+    try testing.expect(cloned.isEmpty());
+    try testing.expectEqual(@as(usize, 0), cloned.prefixes.len());
+    try testing.expectEqual(@as(usize, 0), cloned.children.len());
+}
+
+test "cloneRec with children nodes" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    const TestLeafNode = LeafNode(TestV);
+    const TestFringeNode = FringeNode(TestV);
+    
+    // Create original node with complex structure
+    var original = TestNode.init(testing.allocator);
+    defer {
+        // Clean up original's children manually
+        const items = original.children.Items();
+        for (items) |*item| {
+            switch (item.*) {
+                .leaf => |leaf_node| {
+                    testing.allocator.destroy(leaf_node);
+                },
+                .fringe => |fringe_node| {
+                    testing.allocator.destroy(fringe_node);
+                },
+                else => {},
+            }
+        }
+        original.deinit();
+    }
+    
+    // Add some prefixes
+    _ = try original.prefixes.insertAt(1, 100);
+    _ = try original.prefixes.insertAt(5, 500);
+    
+    // Create and add leaf node
+    const leaf = try testing.allocator.create(TestLeafNode);
+    leaf.* = TestLeafNode{
+        .prefix = netip.Prefix.fromIPv4(192, 168, 1, 0, 24),
+        .value = 1000,
+    };
+    _ = try original.children.insertAt(10, TestNode.ChildNode{ .leaf = leaf });
+    
+    // Create and add fringe node
+    const fringe = try testing.allocator.create(TestFringeNode);
+    fringe.* = TestFringeNode{ .value = 2000 };
+    _ = try original.children.insertAt(20, TestNode.ChildNode{ .fringe = fringe });
+    
+    // Clone the entire structure
+    const cloned = try original.cloneRec(testing.allocator);
+    defer cloneRecCleanup(TestV, cloned, testing.allocator);
+    
+    // Verify structure was cloned correctly
+    try testing.expectEqual(original.prefixes.len(), cloned.prefixes.len());
+    try testing.expectEqual(original.children.len(), cloned.children.len());
+    
+    // Verify prefixes were cloned
+    const orig_result1 = original.prefixes.Get(1);
+    const clone_result1 = cloned.prefixes.Get(1);
+    try testing.expect(orig_result1.ok and clone_result1.ok);
+    try testing.expectEqual(orig_result1.value, clone_result1.value);
+    
+    // Verify children were cloned with correct types
+    const orig_child_10 = original.children.Get(10);
+    const clone_child_10 = cloned.children.Get(10);
+    try testing.expect(orig_child_10.ok and clone_child_10.ok);
+    
+    // Both should be leaf nodes
+    try testing.expect(std.meta.activeTag(orig_child_10.value) == std.meta.activeTag(clone_child_10.value));
+    
+    const orig_child_20 = original.children.Get(20);
+    const clone_child_20 = cloned.children.Get(20);
+    try testing.expect(orig_child_20.ok and clone_child_20.ok);
+    
+    // Both should be fringe nodes
+    try testing.expect(std.meta.activeTag(orig_child_20.value) == std.meta.activeTag(clone_child_20.value));
+    
+    // Verify the cloned values are correct
+    switch (clone_child_10.value) {
+        .leaf => |leaf_node| {
+            try testing.expectEqual(@as(i32, 1000), leaf_node.value);
+        },
+        else => try testing.expect(false),
+    }
+    
+    switch (clone_child_20.value) {
+        .fringe => |fringe_node| {
+            try testing.expectEqual(@as(i32, 2000), fringe_node.value);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+// Helper function to clean up cloned structure recursively  
+fn cloneRecCleanup(comptime V: type, node: *Node(V), allocator: std.mem.Allocator) void {
+    // Clean up children first
+    const items = node.children.Items();
+    for (items) |*item| {
+        switch (item.*) {
+            .node => |child_node| {
+                cloneRecCleanup(V, child_node, allocator);
+                allocator.destroy(child_node);
+            },
+            .leaf => |leaf_node| {
+                allocator.destroy(leaf_node);
+            },
+            .fringe => |fringe_node| {
+                allocator.destroy(fringe_node);
+            },
+        }
+    }
+    
+    // Clean up this node
+    node.deinit();
+    allocator.destroy(node);
 }
