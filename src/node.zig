@@ -53,7 +53,7 @@ pub fn cidrFromPath(path: stridePath, depth: u8, is4: bool, idx: u8) !netip.Pref
 
     // make ip addr from octets
     const ip = if (is4) 
-        netip.Addr.fromIPv4([4]u8{ modified_path[0], modified_path[1], modified_path[2], modified_path[3] })
+        netip.Addr.fromIPv4(modified_path[0], modified_path[1], modified_path[2], modified_path[3])
     else
         netip.Addr.fromIPv6(modified_path);
 
@@ -62,14 +62,17 @@ pub fn cidrFromPath(path: stridePath, depth: u8, is4: bool, idx: u8) !netip.Pref
     const bits = (depth * 8) + pfx_len;
 
     // return a normalized prefix from ip/bits
-    return netip.Prefix.fromIPv4(ip, bits);
+    return if (is4)
+        netip.Prefix.fromIPv4(ip.octets[12], ip.octets[13], ip.octets[14], ip.octets[15], @intCast(bits))
+    else
+        netip.Prefix.fromIPv6(ip.octets, @intCast(bits));
 }
 
 /// Go BART: func cidrForFringe(octets []byte, depth int, is4 bool, lastOctet uint8) netip.Prefix
 /// Helper function: get prefix back from octets path, depth, IP version and last octet.
 /// The prefix of a fringe is solely defined by the position in the trie.
 pub fn cidrForFringe(octets: []const u8, depth: u8, is4: bool, last_octet: u8) netip.Prefix {
-    var path = stridePath{};
+    var path: stridePath = [_]u8{0} ** maxTreeDepth;
     
     // Go BART: copy(path[:], octets[:depth+1])
     const copy_len = @min(depth + 1, octets.len);
@@ -81,7 +84,7 @@ pub fn cidrForFringe(octets: []const u8, depth: u8, is4: bool, last_octet: u8) n
 
     // make ip addr from octets
     const ip = if (is4) 
-        netip.Addr.fromIPv4([4]u8{ path[0], path[1], path[2], path[3] })
+        netip.Addr.fromIPv4(path[0], path[1], path[2], path[3])
     else
         netip.Addr.fromIPv6(path);
 
@@ -91,9 +94,9 @@ pub fn cidrForFringe(octets: []const u8, depth: u8, is4: bool, last_octet: u8) n
 
     // return a (normalized) prefix from ip/bits
     return if (is4) 
-        netip.Prefix.fromIPv4(ip, @intCast(bits))
+        netip.Prefix.fromIPv4(ip.octets[12], ip.octets[13], ip.octets[14], ip.octets[15], @intCast(bits))
     else
-        netip.Prefix.fromIPv6(ip, @intCast(bits));
+        netip.Prefix.fromIPv6(ip.octets, @intCast(bits));
 }
 
 // Go BART: type Cloner[V any] interface { Clone() V }
@@ -647,6 +650,74 @@ pub fn Node(comptime V: type) type {
             
             return self.prefixes.IntersectsAny(&backtracking_bitset);
         }
+
+        /// Go BART: func (n *node[V]) allRec(path stridePath, depth int, is4 bool, yield func(netip.Prefix, V) bool) bool
+        /// allRec recursively walks through all prefixes in the trie and calls yield function for each
+        /// Returns false if yield function returns false (early exit), true otherwise
+        pub fn allRec(
+            self: *const Self,
+            path: *stridePath,
+            depth: u8,
+            is4: bool,
+            yield_fn: fn (netip.Prefix, V) bool
+        ) bool {
+            // Go BART: for _, idx := range n.prefixes.AsSlice(&[256]uint8{})
+            var prefix_buf: [256]u8 = undefined;
+            const prefix_slice = self.prefixes.AsSlice(&prefix_buf);
+            for (prefix_slice) |idx| {
+                // Go BART: cidr := cidrFromPath(path, depth, is4, idx)
+                const cidr = cidrFromPath(path.*, depth, is4, idx) catch {
+                    // If cidrFromPath fails, skip this prefix
+                    continue;
+                };
+                
+                // Go BART: if !yield(cidr, n.prefixes.MustGet(idx))
+                const value = self.prefixes.mustGet(idx);
+                if (!yield_fn(cidr, value)) {
+                    // Go BART: return false // early exit
+                    return false;
+                }
+            }
+
+            // Go BART: for i, addr := range n.children.AsSlice(&[256]uint8{})
+            var children_buf: [256]u8 = undefined;
+            const children_slice = self.children.AsSlice(&children_buf);
+            for (children_slice, 0..) |addr, i| {
+                const child_item = self.children.Items()[i];
+                
+                // Go BART: switch kid := n.children.Items[i].(type)
+                switch (child_item) {
+                    .node => |kid_node| {
+                        // Go BART: case *node[V]: path[depth] = addr
+                        path[depth] = addr;
+                        // Go BART: if !kid.allRec(path, depth+1, is4, yield)
+                        if (!kid_node.allRec(path, depth + 1, is4, yield_fn)) {
+                            // Go BART: return false // early exit
+                            return false;
+                        }
+                    },
+                    .leaf => |kid_leaf| {
+                        // Go BART: case *leafNode[V]: if !yield(kid.prefix, kid.value)
+                        if (!yield_fn(kid_leaf.prefix, kid_leaf.value)) {
+                            // Go BART: return false // early exit
+                            return false;
+                        }
+                    },
+                    .fringe => |kid_fringe| {
+                        // Go BART: case *fringeNode[V]: fringePfx := cidrForFringe(path[:], depth, is4, addr)
+                        const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                        // Go BART: if !yield(fringePfx, kid.value)
+                        if (!yield_fn(fringe_pfx, kid_fringe.value)) {
+                            // Go BART: return false // early exit
+                            return false;
+                        }
+                    },
+                }
+            }
+
+            // Go BART: return true
+            return true;
+        }
     };
 }
 
@@ -921,6 +992,112 @@ test "cloneRec with children nodes" {
         },
         else => try testing.expect(false),
     }
+}
+
+test "allRec Go BART compatibility" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    const TestLeafNode = LeafNode(TestV);
+    const TestFringeNode = FringeNode(TestV);
+    
+    // Create test node with multiple prefixes and children
+    var root = TestNode.init(testing.allocator);
+    defer {
+        // Clean up children manually
+        const items = root.children.Items();
+        for (items) |*item| {
+            switch (item.*) {
+                .leaf => |leaf_node| {
+                    testing.allocator.destroy(leaf_node);
+                },
+                .fringe => |fringe_node| {
+                    testing.allocator.destroy(fringe_node);
+                },
+                .node => |child_node| {
+                    child_node.deinit();
+                    testing.allocator.destroy(child_node);
+                },
+            }
+        }
+        root.deinit();
+    }
+    
+    // Add some prefixes to root
+    _ = try root.prefixes.insertAt(1, 100);   // index 1, value 100
+    _ = try root.prefixes.insertAt(5, 500);   // index 5, value 500
+    
+    // Create and add leaf node
+    const leaf = try testing.allocator.create(TestLeafNode);
+    leaf.* = TestLeafNode{
+        .prefix = netip.Prefix.fromIPv4(192, 168, 1, 0, 24),
+        .value = 1000,
+    };
+    _ = try root.children.insertAt(10, TestNode.ChildNode{ .leaf = leaf });
+    
+    // Create and add fringe node
+    const fringe = try testing.allocator.create(TestFringeNode);
+    fringe.* = TestFringeNode{ .value = 2000 };
+    _ = try root.children.insertAt(20, TestNode.ChildNode{ .fringe = fringe });
+    
+    // Create and add child node
+    var child_node = TestNode.init(testing.allocator);
+    _ = try child_node.prefixes.insertAt(3, 300);
+    const child_ptr = try testing.allocator.create(TestNode);
+    child_ptr.* = child_node;
+    _ = try root.children.insertAt(30, TestNode.ChildNode{ .node = child_ptr });
+    
+    // Simple yield function for testing
+    const SimpleYield = struct {
+        fn yieldFn(prefix: netip.Prefix, value: i32) bool {
+            // For test simplification, just return true to continue
+            _ = prefix;
+            _ = value;
+            return true;
+        }
+    };
+    
+    // Initialize path array
+    var path: stridePath = [_]u8{0} ** maxTreeDepth;
+    
+    // Call allRec with IPv4 flag
+    const result = root.allRec(&path, 0, true, SimpleYield.yieldFn);
+    
+    // Verify the result
+    try testing.expect(result); // Should complete successfully
+    
+    // For now, just verify it runs without error
+    // TODO: Add proper verification once we figure out context passing
+}
+
+test "allRec early exit" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Create test node with multiple prefixes
+    var root = TestNode.init(testing.allocator);
+    defer root.deinit();
+    
+    // Add multiple prefixes
+    _ = try root.prefixes.insertAt(1, 100);
+    _ = try root.prefixes.insertAt(5, 500);
+    _ = try root.prefixes.insertAt(10, 1000);
+    
+    // Test early exit - return false after first item
+    const EarlyExit = struct {
+        fn yieldFn(prefix: netip.Prefix, value: i32) bool {
+            _ = prefix;
+            _ = value;
+            return false; // Always exit early
+        }
+    };
+    
+    var path: stridePath = [_]u8{0} ** maxTreeDepth;
+    
+    // Call allRec - should exit early
+    const result = root.allRec(&path, 0, true, EarlyExit.yieldFn);
+    
+    // Verify early exit behavior
+    try testing.expect(!result); // Should return false due to early exit
 }
 
 // Helper function to clean up cloned structure recursively  

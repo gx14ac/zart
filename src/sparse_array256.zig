@@ -256,6 +256,20 @@ pub fn Array256(comptime T: type) type {
             std.debug.print("]\n");
         }
 
+        /// AsSlice - Go BART compatible AsSlice method (Go BART: a.AsSlice(&[256]uint8{}))
+        /// Returns a slice of all set bit indices in this sparse array's bitset
+        /// The buf parameter provides the backing storage for the result slice
+        pub fn AsSlice(self: *const Self, buf: *[256]u8) []u8 {
+            return self.bitset.asSlice(buf);
+        }
+
+        /// asSlice - Go BART compatible asSlice method (Go BART: a.asSlice(&[256]uint8{}))
+        /// Returns a slice of all set bit indices in this sparse array's bitset
+        /// The buf parameter provides the backing storage for the result slice
+        pub fn asSlice(self: *const Self, buf: *[256]u8) []u8 {
+            return self.bitset.asSlice(buf);
+        }
+
         /// IntersectionTop - Go BART compatible IntersectionTop method (Go BART: a.IntersectionTop(other))
         /// Returns the highest bit index from the intersection of this sparse array's bitset and the given bitset
         pub fn IntersectionTop(self: *const Self, other: *const BitSet256) ?u8 {
