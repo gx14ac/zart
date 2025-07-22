@@ -31,6 +31,71 @@ pub fn isFringe(depth: u8, bits: u8) bool {
     return depth == result.max_depth - 1 and result.last_bits == 0;
 }
 
+/// Go BART: func cidrFromPath(path stridePath, depth int, is4 bool, idx uint8) netip.Prefix
+/// Helper function: get prefix back from stride path, depth and idx.
+/// The prefix is solely defined by the position in the trie and the baseIndex.
+pub fn cidrFromPath(path: stridePath, depth: u8, is4: bool, idx: u8) !netip.Prefix {
+    const pfx_result = try base_index.idxToPfx256(idx);
+    const octet = pfx_result.octet;
+    const pfx_len = pfx_result.pfx_len;
+
+    // set masked byte in path at depth
+    var modified_path = path;
+    modified_path[depth] = octet;
+
+    // zero/mask the bytes after prefix bits
+    // Go BART: clear(path[depth+1:])
+    if (depth + 1 < maxTreeDepth) {
+        for (modified_path[depth + 1..]) |*byte| {
+            byte.* = 0;
+        }
+    }
+
+    // make ip addr from octets
+    const ip = if (is4) 
+        netip.Addr.fromIPv4([4]u8{ modified_path[0], modified_path[1], modified_path[2], modified_path[3] })
+    else
+        netip.Addr.fromIPv6(modified_path);
+
+    // calc bits with pathLen and pfxLen
+    // Go BART: bits := depth<<3 + int(pfxLen)
+    const bits = (depth * 8) + pfx_len;
+
+    // return a normalized prefix from ip/bits
+    return netip.Prefix.fromIPv4(ip, bits);
+}
+
+/// Go BART: func cidrForFringe(octets []byte, depth int, is4 bool, lastOctet uint8) netip.Prefix
+/// Helper function: get prefix back from octets path, depth, IP version and last octet.
+/// The prefix of a fringe is solely defined by the position in the trie.
+pub fn cidrForFringe(octets: []const u8, depth: u8, is4: bool, last_octet: u8) netip.Prefix {
+    var path = stridePath{};
+    
+    // Go BART: copy(path[:], octets[:depth+1])
+    const copy_len = @min(depth + 1, octets.len);
+    @memcpy(path[0..copy_len], octets[0..copy_len]);
+
+    // replace last octet
+    // Go BART: path[depth] = lastOctet
+    path[depth] = last_octet;
+
+    // make ip addr from octets
+    const ip = if (is4) 
+        netip.Addr.fromIPv4([4]u8{ path[0], path[1], path[2], path[3] })
+    else
+        netip.Addr.fromIPv6(path);
+
+    // it's a fringe, bits are alway /8, /16, /24, ...
+    // Go BART: bits := (depth + 1) << 3
+    const bits = (depth + 1) * 8;
+
+    // return a (normalized) prefix from ip/bits
+    return if (is4) 
+        netip.Prefix.fromIPv4(ip, @intCast(bits))
+    else
+        netip.Prefix.fromIPv6(ip, @intCast(bits));
+}
+
 // Go BART: type Cloner[V any] interface { Clone() V }
 // Cloner interface equivalent in Zig (compile-time trait checking)
 pub fn Cloner(comptime V: type) type {
@@ -380,6 +445,108 @@ pub fn Node(comptime V: type) type {
             }
 
             @panic("unreachable");
+        }
+
+        /// Go BART: func (n *node[V]) purgeAndCompress(stack []*node[V], octets []uint8, is4 bool)
+        /// purgeAndCompress: purge empty nodes or compress nodes with single prefix or leaf.
+        /// This method performs path compression and cleanup after deletion operations.
+        pub fn purgeAndCompress(self: *Self, stack: []*Self, octets: []const u8, is4: bool, allocator: std.mem.Allocator) !void {
+            var current_node = self;
+            
+            // unwind the stack
+            // Go BART: for depth := len(stack) - 1; depth >= 0; depth--
+            var depth: i32 = @as(i32, @intCast(stack.len)) - 1;
+            while (depth >= 0) : (depth -= 1) {
+                const depth_u8 = @as(u8, @intCast(depth));
+                const parent = stack[@intCast(depth)];
+                const octet = octets[depth_u8];
+
+                const pfx_count = current_node.prefixes.len();
+                const child_count = current_node.children.len();
+
+                // Go BART: switch cases
+                if (current_node.isEmpty()) {
+                    // Go BART: case n.isEmpty()
+                    // just delete this empty node from parent
+                    _ = parent.children.deleteAt(octet);
+                    
+                } else if (pfx_count == 0 and child_count == 1) {
+                    // Go BART: case pfxCount == 0 && childCount == 1
+                    // Get the single child
+                    const kid = current_node.children.Items()[0];
+                    
+                    // Go BART: switch kid := n.children.Items[0].(type)
+                    switch (kid) {
+                        .node => |_| {
+                            // Go BART: case *node[V]
+                            // fast exit, we are at an intermediate path node
+                            // no further delete/compress upwards the stack is possible
+                            return;
+                        },
+                        
+                        .leaf => |leaf_ptr| {
+                            // Go BART: case *leafNode[V]
+                            // just one leaf, delete this node and reinsert the leaf above
+                            _ = parent.children.deleteAt(octet);
+
+                            // ... (re)insert the leaf at parents depth
+                            _ = try parent.insertAtDepth(leaf_ptr.prefix, leaf_ptr.value, depth_u8, allocator);
+                        },
+                        
+                        .fringe => |fringe_ptr| {
+                            // Go BART: case *fringeNode[V]
+                            // just one fringe, delete this node and reinsert the fringe as leaf above
+                            _ = parent.children.deleteAt(octet);
+
+                            // get the last octet back, the only item is also the first item
+                            // Go BART: lastOctet, _ := n.children.firstSet()
+                            const first_set_result = current_node.children.firstSet();
+                            if (first_set_result.ok) {
+                                const last_octet = first_set_result.value;
+
+                                // rebuild the prefix with octets, depth, ip version and addr
+                                // depth is the parent's depth, so add +1 here for the kid
+                                // Go BART: fringePfx := cidrForFringe(octets, depth+1, is4, lastOctet)
+                                const fringe_pfx = cidrForFringe(octets, depth_u8 + 1, is4, last_octet);
+
+                                // ... (re)reinsert prefix/value at parents depth
+                                _ = try parent.insertAtDepth(fringe_pfx, fringe_ptr.value, depth_u8, allocator);
+                            }
+                        },
+                    }
+                    
+                } else if (pfx_count == 1 and child_count == 0) {
+                    // Go BART: case pfxCount == 1 && childCount == 0
+                    // just one prefix, delete this node and reinsert the idx as leaf above
+                    _ = parent.children.deleteAt(octet);
+
+                    // get prefix back from idx ...
+                    // Go BART: idx, _ := n.prefixes.firstSet()
+                    const first_set_result = current_node.prefixes.firstSet();
+                    if (first_set_result.ok) {
+                        const idx = first_set_result.value;
+                        // Go BART: val := n.prefixes.Items[0]
+                        const val = current_node.prefixes.Items()[0];
+
+                        // ... and octet path
+                        // Go BART: path := stridePath{}, copy(path[:], octets)
+                        var path = stridePath{};
+                        const copy_len = @min(octets.len, maxTreeDepth);
+                        @memcpy(path[0..copy_len], octets[0..copy_len]);
+
+                        // depth is the parent's depth, so add +1 here for the kid
+                        // Go BART: pfx := cidrFromPath(path, depth+1, is4, idx)
+                        const pfx = try cidrFromPath(path, depth_u8 + 1, is4, idx);
+
+                        // ... (re)insert prefix/value at parents depth
+                        _ = try parent.insertAtDepth(pfx, val, depth_u8, allocator);
+                    }
+                }
+
+                // climb up the stack
+                // Go BART: n = parent
+                current_node = parent;
+            }
         }
     };
 }

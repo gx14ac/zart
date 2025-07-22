@@ -255,5 +255,15 @@ pub fn Array256(comptime T: type) type {
             }
             std.debug.print("]\n");
         }
+
+        /// firstSet - Go BART compatible firstSet method (Go BART: a.firstSet())
+        /// Returns the first set bit and true if any bit is set, or 0 and false if empty
+        pub fn firstSet(self: *const Self) struct { value: u8, ok: bool } {
+            const first_bit = self.bitset.firstSet();
+            if (first_bit) |bit| {
+                return .{ .value = bit, .ok = true };
+            }
+            return .{ .value = 0, .ok = false };
+        }
     };
 }
