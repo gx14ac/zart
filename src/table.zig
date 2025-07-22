@@ -23,10 +23,10 @@
 const std = @import("std");
 const print = std.debug.print;
 const node = @import("node.zig");
-const art = @import("art_base_index.zig");
+const art = @import("base_index.zig");
 const SparseArray256 = @import("sparse_array256.zig").Array256;
 const BitSet256 = @import("bitset256.zig").BitSet256;
-const lpm_lookup = @import("lpm_lookup_table.zig");
+const lpm_lookup = @import("lookup_tbl.zig");
 
 const IPAddr = node.IPAddr;
 const Prefix = node.Prefix;
