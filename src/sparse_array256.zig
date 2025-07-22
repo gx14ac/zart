@@ -256,14 +256,28 @@ pub fn Array256(comptime T: type) type {
             std.debug.print("]\n");
         }
 
-        /// firstSet - Go BART compatible firstSet method (Go BART: a.firstSet())
-        /// Returns the first set bit and true if any bit is set, or 0 and false if empty
-        pub fn firstSet(self: *const Self) struct { value: u8, ok: bool } {
-            const first_bit = self.bitset.firstSet();
-            if (first_bit) |bit| {
-                return .{ .value = bit, .ok = true };
-            }
-            return .{ .value = 0, .ok = false };
+        /// IntersectionTop - Go BART compatible IntersectionTop method (Go BART: a.IntersectionTop(other))
+        /// Returns the highest bit index from the intersection of this sparse array's bitset and the given bitset
+        pub fn IntersectionTop(self: *const Self, other: *const BitSet256) ?u8 {
+            return self.bitset.intersectionTop(other);
+        }
+
+        /// intersectionTop - Go BART compatible intersectionTop method (Go BART: a.intersectionTop(other))
+        /// Returns the highest bit index from the intersection of this sparse array's bitset and the given bitset
+        pub fn intersectionTop(self: *const Self, other: *const BitSet256) ?u8 {
+            return self.bitset.intersectionTop(other);
+        }
+
+        /// IntersectsAny - Go BART compatible IntersectsAny method (Go BART: a.IntersectsAny(other))
+        /// Returns true if this sparse array's bitset intersects with the given bitset
+        pub fn IntersectsAny(self: *const Self, other: *const BitSet256) bool {
+            return self.bitset.intersectsAny(other);
+        }
+
+        /// intersectsAny - Go BART compatible intersectsAny method (Go BART: a.intersectsAny(other))
+        /// Returns true if this sparse array's bitset intersects with the given bitset
+        pub fn intersectsAny(self: *const Self, other: *const BitSet256) bool {
+            return self.bitset.intersectsAny(other);
         }
     };
 }

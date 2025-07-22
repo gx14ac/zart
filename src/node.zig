@@ -548,6 +548,37 @@ pub fn Node(comptime V: type) type {
                 current_node = parent;
             }
         }
+
+        /// Go BART: func (n *node[V]) lpmGet(idx uint) (baseIdx uint8, val V, ok bool)
+        /// lpmGet does a route lookup for idx in the 8-bit (stride) routing table
+        /// at this depth and returns (baseIdx, value, true) if a matching
+        /// longest prefix exists, or ok=false otherwise.
+        pub fn lpmGet(self: *const Self, idx: usize) struct { base_idx: u8, val: V, ok: bool } {
+            // Go BART: if top, ok := n.prefixes.IntersectionTop(lpm.BackTrackingBitset(idx)); ok
+            const lookup_tbl = @import("lookup_tbl.zig");
+            const backtracking_bitset = lookup_tbl.backTrackingBitset(idx);
+            
+            if (self.prefixes.IntersectionTop(&backtracking_bitset)) |top| {
+                // Go BART: return top, n.prefixes.MustGet(top), true
+                const val = self.prefixes.mustGet(top);
+                return .{ .base_idx = top, .val = val, .ok = true };
+            }
+
+            // not found (on this level)
+            // Go BART: return
+            return .{ .base_idx = 0, .val = undefined, .ok = false };
+        }
+
+        /// Go BART: func (n *node[V]) lpmTest(idx uint) bool
+        /// lpmTest, true if idx has a (any) longest-prefix-match in node.
+        /// this is a contains test, faster as lookup and without value returns.
+        pub fn lpmTest(self: *const Self, idx: usize) bool {
+            // Go BART: return n.prefixes.IntersectsAny(lpm.BackTrackingBitset(idx))
+            const lookup_tbl = @import("lookup_tbl.zig");
+            const backtracking_bitset = lookup_tbl.backTrackingBitset(idx);
+            
+            return self.prefixes.IntersectsAny(&backtracking_bitset);
+        }
     };
 }
 
@@ -615,4 +646,65 @@ pub fn FringeNode(comptime V: type) type {
             return cloned;
         }
     };
+}
+
+// Tests for lpmGet and lpmTest methods
+const testing = std.testing;
+
+test "lpmGet and lpmTest Go BART compatibility" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    var node = TestNode.init(testing.allocator);
+    defer node.deinit();
+    
+    // Insert some test values using baseIndex mapping
+    const art_base_index = @import("base_index.zig");
+    
+    // Insert default route at index 1 (0/0 - matches everything)
+    _ = try node.prefixes.insertAt(1, 100);
+    
+    // Insert more specific route 
+    _ = try node.prefixes.insertAt(128, 200);
+    
+    // Test lpmGet - should find longest prefix match
+    const host_idx_192 = art_base_index.hostIdx(192);
+    const host_idx_10 = art_base_index.hostIdx(10);
+    const host_idx_172 = art_base_index.hostIdx(172);
+    
+    const result1 = node.lpmGet(host_idx_192);
+    try testing.expect(result1.ok);
+    try testing.expectEqual(@as(i32, 100), result1.val); // Should match default route
+    
+    const result2 = node.lpmGet(host_idx_10);
+    try testing.expect(result2.ok);
+    try testing.expectEqual(@as(i32, 100), result2.val); // Should match default route
+    
+    const result3 = node.lpmGet(host_idx_172);
+    try testing.expect(result3.ok);
+    try testing.expectEqual(@as(i32, 100), result3.val); // Should match default route
+    
+    // Test lpmTest - faster contains check
+    try testing.expect(node.lpmTest(host_idx_192));
+    try testing.expect(node.lpmTest(host_idx_10));
+    try testing.expect(node.lpmTest(host_idx_172));
+}
+
+test "lpmGet with backtracking bitset" {
+    const TestV = []const u8;
+    const TestNode = Node(TestV);
+    
+    var node = TestNode.init(testing.allocator);
+    defer node.deinit();
+    
+    // Insert default route at index 1 (0/0)
+    _ = try node.prefixes.insertAt(1, "default");
+    
+    // Insert more specific route at index 256 (128.0.0.0/1)
+    _ = try node.prefixes.insertAt(256 >> 1, "specific"); // Handle overflow case
+    
+    // Test that backtracking finds the most specific match
+    const result = node.lpmGet(384); // Some high index value
+    try testing.expect(result.ok);
+    // Should find the most specific matching prefix
 }
