@@ -719,6 +719,212 @@ pub fn Node(comptime V: type) type {
             return true;
         }
 
+        /// Go BART: func (n *node[V]) eachLookupPrefix(octets []byte, depth int, is4 bool, pfxIdx uint, yield func(netip.Prefix, V) bool) (ok bool)
+        /// eachLookupPrefix does an all prefix match in the 8-bit (stride) routing table
+        /// at this depth and calls yield() for any matching CIDR.
+        pub fn eachLookupPrefix(
+            self: *const Self,
+            octets: []const u8,
+            depth: u8,
+            is4: bool,
+            pfx_idx: u32,
+            yield_fn: fn (netip.Prefix, V) bool
+        ) bool {
+            // Go BART: path needed below more than once in loop
+            var path: stridePath = [_]u8{0} ** maxTreeDepth;
+            // Go BART: copy(path[:], octets)
+            const copy_len = @min(octets.len, maxTreeDepth);
+            @memcpy(path[0..copy_len], octets[0..copy_len]);
+            
+            // Go BART: fast forward, it's a /8 route, too big for bitset256
+            var idx = pfx_idx;
+            if (pfx_idx > 255) {
+                idx >>= 1;
+            }
+            var idx_u8 = @as(u8, @intCast(idx)); // now it fits into uint8
+            
+            // Go BART: for ; idx > 0; idx >>= 1
+            while (idx_u8 > 0) : (idx_u8 >>= 1) {
+                if (self.prefixes.Test(idx_u8)) {
+                    const val = self.prefixes.mustGet(idx_u8);
+                    const cidr = cidrFromPath(path, depth, is4, idx_u8) catch {
+                        continue; // Skip on error
+                    };
+                    
+                    if (!yield_fn(cidr, val)) {
+                        return false;
+                    }
+                }
+            }
+            
+            return true;
+        }
+
+        /// Go BART: func (n *node[V]) eachSubnet(octets []byte, depth int, is4 bool, pfxIdx uint8, yield func(netip.Prefix, V) bool) bool
+        /// eachSubnet calls yield() for any covered CIDR by parent prefix in natural CIDR sort order.
+        pub fn eachSubnet(
+            self: *const Self,
+            octets: []const u8,
+            depth: u8,
+            is4: bool,
+            pfx_idx: u8,
+            yield_fn: fn (netip.Prefix, V) bool
+        ) bool {
+            // Go BART: octets as array, needed below more than once
+            var path: stridePath = [_]u8{0} ** maxTreeDepth;
+            // Go BART: copy(path[:], octets)
+            const copy_len = @min(octets.len, maxTreeDepth);
+            @memcpy(path[0..copy_len], octets[0..copy_len]);
+            
+            // Go BART: pfxFirstAddr, pfxLastAddr := art.IdxToRange256(pfxIdx)
+            const pfx_range = base_index.idxToRange256(pfx_idx) catch {
+                return true; // On error, return early
+            };
+            const pfx_first_addr = pfx_range.first;
+            const pfx_last_addr = pfx_range.last;
+            
+            // Go BART: allCoveredIndices := make([]uint8, 0, maxItems)
+            var all_covered_indices = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer all_covered_indices.deinit();
+            
+            // Go BART: for _, idx := range n.prefixes.AsSlice(&[256]uint8{})
+            var prefix_buf: [256]u8 = undefined;
+            const prefix_slice = self.prefixes.AsSlice(&prefix_buf);
+            
+            for (prefix_slice) |idx| {
+                // Go BART: thisFirstAddr, thisLastAddr := art.IdxToRange256(idx)
+                const this_range = base_index.idxToRange256(idx) catch {
+                    continue; // Skip on error
+                };
+                const this_first_addr = this_range.first;
+                const this_last_addr = this_range.last;
+                
+                // Go BART: if thisFirstAddr >= pfxFirstAddr && thisLastAddr <= pfxLastAddr
+                if (this_first_addr >= pfx_first_addr and this_last_addr <= pfx_last_addr) {
+                    all_covered_indices.append(idx) catch continue;
+                }
+            }
+            
+            // Go BART: sort indices in CIDR sort order
+            // Go BART: slices.SortFunc(allCoveredIndices, cmpIndexRank)
+            std.sort.pdq(u8, all_covered_indices.items, {}, cmpIndexRank);
+            
+            // Go BART: 2. collect all covered child addrs by prefix
+            var all_covered_child_addrs = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer all_covered_child_addrs.deinit();
+            
+            // Go BART: for _, addr := range n.children.AsSlice(&[256]uint8{})
+            var children_buf: [256]u8 = undefined;
+            const children_slice = self.children.AsSlice(&children_buf);
+            
+            for (children_slice) |addr| {
+                // Go BART: if addr >= pfxFirstAddr && addr <= pfxLastAddr
+                if (addr >= pfx_first_addr and addr <= pfx_last_addr) {
+                    all_covered_child_addrs.append(addr) catch continue;
+                }
+            }
+            
+            // Go BART: 3. yield covered indices, pathcomp prefixes and childs in CIDR sort order
+            var addr_cursor: usize = 0;
+            
+            // Go BART: yield indices and childs in CIDR sort order
+            for (all_covered_indices.items) |pfx_idx_item| {
+                // Go BART: pfxOctet, _ := art.IdxToPfx256(pfxIdx)
+                const pfx_result = base_index.idxToPfx256(pfx_idx_item) catch {
+                    continue; // Skip on error
+                };
+                const pfx_octet = pfx_result.octet;
+                
+                // Go BART: yield all childs before idx
+                while (addr_cursor < all_covered_child_addrs.items.len) {
+                    const addr = all_covered_child_addrs.items[addr_cursor];
+                    // Go BART: if addr >= pfxOctet { break }
+                    if (addr >= pfx_octet) {
+                        break;
+                    }
+                    
+                    // Go BART: yield the node or leaf?
+                    const child_result = self.children.Get(addr);
+                    if (child_result.ok) {
+                        switch (child_result.value) {
+                            .node => |kid_node| {
+                                // Go BART: case *node[V]: path[depth] = addr
+                                path[depth] = addr;
+                                // Go BART: if !kid.allRecSorted(path, depth+1, is4, yield)
+                                if (!kid_node.allRecSorted(&path, depth + 1, is4, yield_fn)) {
+                                    return false;
+                                }
+                            },
+                            .leaf => |kid_leaf| {
+                                // Go BART: case *leafNode[V]: if !yield(kid.prefix, kid.value)
+                                if (!yield_fn(kid_leaf.prefix, kid_leaf.value)) {
+                                    return false;
+                                }
+                            },
+                            .fringe => |kid_fringe| {
+                                // Go BART: case *fringeNode[V]: fringePfx := cidrForFringe(path[:], depth, is4, addr)
+                                const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                                // Go BART: if !yield(fringePfx, kid.value)
+                                if (!yield_fn(fringe_pfx, kid_fringe.value)) {
+                                    return false;
+                                }
+                            },
+                        }
+                    }
+                    
+                    addr_cursor += 1;
+                }
+                
+                // Go BART: yield the prefix for this idx
+                const cidr = cidrFromPath(path, depth, is4, pfx_idx_item) catch {
+                    continue; // Skip on error
+                };
+                // Go BART: n.prefixes.Items[i] not possible after sorting allIndices
+                const value = self.prefixes.mustGet(pfx_idx_item);
+                if (!yield_fn(cidr, value)) {
+                    return false;
+                }
+            }
+            
+            // Go BART: yield the rest of leaves and nodes (rec-descent)
+            while (addr_cursor < all_covered_child_addrs.items.len) {
+                const addr = all_covered_child_addrs.items[addr_cursor];
+                
+                // Go BART: yield the node or leaf?
+                const child_result = self.children.Get(addr);
+                if (child_result.ok) {
+                    switch (child_result.value) {
+                        .node => |kid_node| {
+                            // Go BART: case *node[V]: path[depth] = addr
+                            path[depth] = addr;
+                            // Go BART: if !kid.allRecSorted(path, depth+1, is4, yield)
+                            if (!kid_node.allRecSorted(&path, depth + 1, is4, yield_fn)) {
+                                return false;
+                            }
+                        },
+                        .leaf => |kid_leaf| {
+                            // Go BART: case *leafNode[V]: if !yield(kid.prefix, kid.value)
+                            if (!yield_fn(kid_leaf.prefix, kid_leaf.value)) {
+                                return false;
+                            }
+                        },
+                        .fringe => |kid_fringe| {
+                            // Go BART: case *fringeNode[V]: fringePfx := cidrForFringe(path[:], depth, is4, addr)
+                            const fringe_pfx = cidrForFringe(path[0..depth], depth, is4, addr);
+                            // Go BART: if !yield(fringePfx, kid.value)
+                            if (!yield_fn(fringe_pfx, kid_fringe.value)) {
+                                return false;
+                            }
+                        },
+                    }
+                }
+                
+                addr_cursor += 1;
+            }
+            
+            return true;
+        }
+
         /// Go BART: func cmpIndexRank(aIdx, bIdx uint8) int
         /// Sort indexes in prefix sort order.
         /// Returns comparison result for sorting (negative if a < b, 0 if equal, positive if a > b)
@@ -877,6 +1083,222 @@ pub fn Node(comptime V: type) type {
             
             // Go BART: return true
             return true;
+        }
+
+        /// Go BART: func (n *node[V]) unionRec(o *node[V], depth int) (duplicates int)
+        /// unionRec merges another node into this node recursively and returns the number of duplicates
+        /// This implements the complex 12-case combination matrix for node merging
+        pub fn unionRec(self: *Self, other: *const Self, depth: u8) !u32 {
+            var duplicates: u32 = 0;
+            
+            // Go BART: for all prefixes in other node do ...
+            var other_prefix_buf: [256]u8 = undefined;
+            const other_indices = other.prefixes.AsSlice(&other_prefix_buf);
+            
+            for (other_indices, 0..) |o_idx, i| {
+                // Go BART: clone/copy the value from other node at idx
+                const other_value = other.prefixes.Items()[i];
+                const cloned_val = cloneOrCopy(V, other_value);
+                
+                // Go BART: insert/overwrite cloned value from o into n
+                // Go BART: if n.prefixes.InsertAt(oIdx, clonedVal)
+                if (self.prefixes.Test(o_idx)) {
+                    // Go BART: this prefix is duplicate in n and o
+                    duplicates += 1;
+                }
+                _ = try self.prefixes.insertAt(o_idx, cloned_val);
+            }
+            
+            // Go BART: for all child addrs in other node do ...
+            var other_children_buf: [256]u8 = undefined;
+            const other_child_addrs = other.children.AsSlice(&other_children_buf);
+            
+            for (other_child_addrs, 0..) |addr, i| {
+                // Go BART: 12 possible combinations to union this child and other child
+                const other_child = other.children.Items()[i];
+                
+                // Go BART: try to get child at same addr from n
+                const this_result = self.children.Get(addr);
+                
+                if (!this_result.ok) {
+                    // Go BART: NULL, ... slot at addr is empty
+                    switch (other_child) {
+                        .node => |other_kid_node| {
+                            // Go BART: NULL, node
+                            const cloned_node = try other_kid_node.cloneRec(self.prefixes.items.allocator);
+                            _ = try self.children.insertAt(addr, Self.ChildNode{ .node = cloned_node });
+                            continue;
+                        },
+                        .leaf => |other_kid_leaf| {
+                            // Go BART: NULL, leaf
+                            const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
+                            _ = try self.children.insertAt(addr, Self.ChildNode{ .leaf = cloned_leaf });
+                            continue;
+                        },
+                        .fringe => |other_kid_fringe| {
+                            // Go BART: NULL, fringe
+                            const cloned_fringe = try other_kid_fringe.cloneFringe(self.prefixes.items.allocator);
+                            _ = try self.children.insertAt(addr, Self.ChildNode{ .fringe = cloned_fringe });
+                            continue;
+                        },
+                    }
+                }
+                
+                // Handle existing child cases
+                const this_child = this_result.value;
+                switch (this_child) {
+                    .node => |this_kid_node| {
+                        // Go BART: node, ...
+                        switch (other_child) {
+                            .node => |other_kid_node| {
+                                // Go BART: node, node
+                                // both childs have node at addr, call union rec-descent on child nodes
+                                const cloned_other = try other_kid_node.cloneRec(self.prefixes.items.allocator);
+                                duplicates += try this_kid_node.unionRec(cloned_other, depth + 1);
+                                continue;
+                            },
+                            .leaf => |other_kid_leaf| {
+                                // Go BART: node, leaf
+                                // push this cloned leaf down, count duplicate entry
+                                const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
+                                if (try this_kid_node.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.prefixes.items.allocator)) {
+                                    duplicates += 1;
+                                }
+                                continue;
+                            },
+                            .fringe => |other_kid_fringe| {
+                                // Go BART: node, fringe
+                                // push this fringe down, a fringe becomes a default route one level down
+                                const cloned_fringe = try other_kid_fringe.cloneFringe(self.prefixes.items.allocator);
+                                if (this_kid_node.prefixes.Test(1)) {
+                                    duplicates += 1;
+                                }
+                                _ = try this_kid_node.prefixes.insertAt(1, cloned_fringe.value);
+                                continue;
+                            },
+                        }
+                    },
+                    .leaf => |this_kid_leaf| {
+                        // Go BART: leaf, ...
+                        switch (other_child) {
+                            .node => |other_kid_node| {
+                                // Go BART: leaf, node
+                                // create new node
+                                const nc = try self.prefixes.items.allocator.create(Self);
+                                nc.* = Self.init(self.prefixes.items.allocator);
+                                
+                                // push this leaf down
+                                _ = try nc.insertAtDepth(this_kid_leaf.prefix, this_kid_leaf.value, depth + 1, self.prefixes.items.allocator);
+                                
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                                
+                                // unionRec this new node with other kid node
+                                const cloned_other = try other_kid_node.cloneRec(self.prefixes.items.allocator);
+                                duplicates += try nc.unionRec(cloned_other, depth + 1);
+                                continue;
+                            },
+                            .leaf => |other_kid_leaf| {
+                                // Go BART: leaf, leaf
+                                // shortcut, prefixes are equal
+                                if (this_kid_leaf.prefix.eql(&other_kid_leaf.prefix)) {
+                                    this_kid_leaf.value = cloneOrCopy(V, other_kid_leaf.value);
+                                    duplicates += 1;
+                                    continue;
+                                }
+                                
+                                // create new node
+                                const nc = try self.prefixes.items.allocator.create(Self);
+                                nc.* = Self.init(self.prefixes.items.allocator);
+                                
+                                // push this leaf down
+                                _ = try nc.insertAtDepth(this_kid_leaf.prefix, this_kid_leaf.value, depth + 1, self.prefixes.items.allocator);
+                                
+                                // insert at depth cloned leaf, maybe duplicate
+                                const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
+                                if (try nc.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.prefixes.items.allocator)) {
+                                    duplicates += 1;
+                                }
+                                
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                                continue;
+                            },
+                            .fringe => |other_kid_fringe| {
+                                // Go BART: leaf, fringe
+                                // create new node
+                                const nc = try self.prefixes.items.allocator.create(Self);
+                                nc.* = Self.init(self.prefixes.items.allocator);
+                                
+                                // push this leaf down
+                                _ = try nc.insertAtDepth(this_kid_leaf.prefix, this_kid_leaf.value, depth + 1, self.prefixes.items.allocator);
+                                
+                                // push this cloned fringe down, it becomes the default route
+                                const cloned_fringe = try other_kid_fringe.cloneFringe(self.prefixes.items.allocator);
+                                if (nc.prefixes.Test(1)) {
+                                    duplicates += 1;
+                                }
+                                _ = try nc.prefixes.insertAt(1, cloned_fringe.value);
+                                
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                                continue;
+                            },
+                        }
+                    },
+                    .fringe => |this_kid_fringe| {
+                        // Go BART: fringe, ...
+                        switch (other_child) {
+                            .node => |other_kid_node| {
+                                // Go BART: fringe, node
+                                // create new node
+                                const nc = try self.prefixes.items.allocator.create(Self);
+                                nc.* = Self.init(self.prefixes.items.allocator);
+                                
+                                // push this fringe down, it becomes the default route
+                                _ = try nc.prefixes.insertAt(1, this_kid_fringe.value);
+                                
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                                
+                                // unionRec this new node with other kid node
+                                const cloned_other = try other_kid_node.cloneRec(self.prefixes.items.allocator);
+                                duplicates += try nc.unionRec(cloned_other, depth + 1);
+                                continue;
+                            },
+                            .leaf => |other_kid_leaf| {
+                                // Go BART: fringe, leaf
+                                // create new node
+                                const nc = try self.prefixes.items.allocator.create(Self);
+                                nc.* = Self.init(self.prefixes.items.allocator);
+                                
+                                // push this fringe down, it becomes the default route
+                                _ = try nc.prefixes.insertAt(1, this_kid_fringe.value);
+                                
+                                // push this cloned leaf down
+                                const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
+                                if (try nc.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.prefixes.items.allocator)) {
+                                    duplicates += 1;
+                                }
+                                
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                                continue;
+                            },
+                            .fringe => |other_kid_fringe| {
+                                // Go BART: fringe, fringe
+                                // thisKid.value = otherKid.cloneFringe().value
+                                this_kid_fringe.value = cloneOrCopy(V, other_kid_fringe.value);
+                                duplicates += 1;
+                                continue;
+                            },
+                        }
+                    },
+                }
+            }
+            
+            // Go BART: return duplicates
+            return duplicates;
         }
     };
 }
@@ -1153,4 +1575,375 @@ test "allRecSorted early exit" {
     
     // Verify early exit behavior
     try testing.expect(!result); // Should return false due to early exit
+}
+
+test "unionRec basic functionality" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Create two test nodes for union
+    var node1 = TestNode.init(testing.allocator);
+    defer node1.deinit();
+    var node2 = TestNode.init(testing.allocator);
+    defer node2.deinit();
+    
+    // Add some prefixes to node1
+    _ = try node1.prefixes.insertAt(1, 100);
+    _ = try node1.prefixes.insertAt(64, 640);
+    
+    // Add some prefixes to node2 (some overlapping)
+    _ = try node2.prefixes.insertAt(1, 111);  // duplicate - should count
+    _ = try node2.prefixes.insertAt(128, 1280); // new prefix
+    
+    // Perform union
+    const duplicates = try node1.unionRec(&node2, 0);
+    
+    // Verify results
+    try testing.expectEqual(@as(u32, 1), duplicates); // One duplicate (index 1)
+    
+    // Verify node1 now has all prefixes
+    try testing.expectEqual(@as(usize, 3), node1.prefixes.len());
+    
+    // Check specific values
+    const result1 = node1.prefixes.Get(1);
+    const result64 = node1.prefixes.Get(64);
+    const result128 = node1.prefixes.Get(128);
+    
+    try testing.expect(result1.ok and result64.ok and result128.ok);
+    try testing.expectEqual(@as(i32, 111), result1.value); // Should be overwritten
+    try testing.expectEqual(@as(i32, 640), result64.value); // Original value
+    try testing.expectEqual(@as(i32, 1280), result128.value); // New value from node2
+}
+
+test "unionRec with empty nodes" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Test union with empty node
+    var node1 = TestNode.init(testing.allocator);
+    defer node1.deinit();
+    var empty_node = TestNode.init(testing.allocator);
+    defer empty_node.deinit();
+    
+    // Add some prefixes to node1
+    _ = try node1.prefixes.insertAt(1, 100);
+    _ = try node1.prefixes.insertAt(64, 640);
+    
+    // Union with empty node
+    const duplicates = try node1.unionRec(&empty_node, 0);
+    
+    // Should have no duplicates and no changes
+    try testing.expectEqual(@as(u32, 0), duplicates);
+    try testing.expectEqual(@as(usize, 2), node1.prefixes.len());
+    
+    // Union empty node with filled node
+    const duplicates2 = try empty_node.unionRec(&node1, 0);
+    
+    // Should have no duplicates but empty_node should now have all prefixes
+    try testing.expectEqual(@as(u32, 0), duplicates2);
+    try testing.expectEqual(@as(usize, 2), empty_node.prefixes.len());
+}
+
+test "unionRec fringe-fringe case" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    const TestFringeNode = FringeNode(TestV);
+    
+    // Create two nodes with fringe children at same address
+    var node1 = TestNode.init(testing.allocator);
+    defer {
+        // Clean up children manually
+        const items = node1.children.Items();
+        for (items) |*item| {
+            switch (item.*) {
+                .fringe => |fringe_node| {
+                    testing.allocator.destroy(fringe_node);
+                },
+                else => {},
+            }
+        }
+        node1.deinit();
+    }
+    
+    var node2 = TestNode.init(testing.allocator);
+    defer {
+        // Clean up children manually
+        const items = node2.children.Items();
+        for (items) |*item| {
+            switch (item.*) {
+                .fringe => |fringe_node| {
+                    testing.allocator.destroy(fringe_node);
+                },
+                else => {},
+            }
+        }
+        node2.deinit();
+    }
+    
+    // Create fringe nodes
+    const fringe1 = try testing.allocator.create(TestFringeNode);
+    fringe1.* = TestFringeNode{ .value = 1000 };
+    _ = try node1.children.insertAt(10, TestNode.ChildNode{ .fringe = fringe1 });
+    
+    const fringe2 = try testing.allocator.create(TestFringeNode);
+    fringe2.* = TestFringeNode{ .value = 2000 };
+    _ = try node2.children.insertAt(10, TestNode.ChildNode{ .fringe = fringe2 });
+    
+    // Perform union - should handle fringe, fringe case
+    const duplicates = try node1.unionRec(&node2, 0);
+    
+    // Should count as one duplicate
+    try testing.expectEqual(@as(u32, 1), duplicates);
+    
+    // Check that fringe value was overwritten
+    const child_result = node1.children.Get(10);
+    try testing.expect(child_result.ok);
+    
+    switch (child_result.value) {
+        .fringe => |fringe_node| {
+            try testing.expectEqual(@as(i32, 2000), fringe_node.value);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "unionRec complex children combinations" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    const TestLeafNode = LeafNode(TestV);
+    
+    // Create nodes with leaf children for NULL, leaf case
+    var node1 = TestNode.init(testing.allocator);
+    defer {
+        // Clean up children manually
+        const items = node1.children.Items();
+        for (items) |*item| {
+            switch (item.*) {
+                .leaf => |leaf_node| {
+                    testing.allocator.destroy(leaf_node);
+                },
+                .node => |child_node| {
+                    child_node.deinit();
+                    testing.allocator.destroy(child_node);
+                },
+                else => {},
+            }
+        }
+        node1.deinit();
+    }
+    
+    var node2 = TestNode.init(testing.allocator);
+    defer {
+        // Clean up children manually
+        const items = node2.children.Items();
+        for (items) |*item| {
+            switch (item.*) {
+                .leaf => |leaf_node| {
+                    testing.allocator.destroy(leaf_node);
+                },
+                else => {},
+            }
+        }
+        node2.deinit();
+    }
+    
+    // node1 is empty at address 20, node2 has leaf at address 20
+    const leaf2 = try testing.allocator.create(TestLeafNode);
+    leaf2.* = TestLeafNode{
+        .prefix = netip.Prefix.fromIPv4(192, 168, 1, 0, 24),
+        .value = 5000,
+    };
+    _ = try node2.children.insertAt(20, TestNode.ChildNode{ .leaf = leaf2 });
+    
+    // Perform union - should handle NULL, leaf case
+    const duplicates = try node1.unionRec(&node2, 0);
+    
+    // Should have no duplicates (NULL, leaf case)
+    try testing.expectEqual(@as(u32, 0), duplicates);
+    
+    // Check that leaf was copied to node1
+    const child_result = node1.children.Get(20);
+    try testing.expect(child_result.ok);
+    
+    switch (child_result.value) {
+        .leaf => |leaf_node| {
+            try testing.expectEqual(@as(i32, 5000), leaf_node.value);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "eachLookupPrefix basic functionality" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Create test node with multiple prefixes
+    var node = TestNode.init(testing.allocator);
+    defer node.deinit();
+    
+    // Add some prefixes with different indices
+    _ = try node.prefixes.insertAt(1, 100);   // Default route
+    _ = try node.prefixes.insertAt(128, 1280); // More specific route
+    _ = try node.prefixes.insertAt(192, 1920); // Even more specific
+    
+    // Test path
+    const octets = [_]u8{192, 168, 1, 0};
+    
+    // Simple yield function for testing
+    const SimpleYield = struct {
+        fn yieldFn(prefix: netip.Prefix, value: i32) bool {
+            _ = prefix;
+            _ = value;
+            return true; // continue iteration
+        }
+    };
+    
+    // Call eachLookupPrefix - should find matching prefixes
+    const result = node.eachLookupPrefix(&octets, 0, true, 192, SimpleYield.yieldFn);
+    
+    // Should complete successfully
+    try testing.expect(result);
+}
+
+test "eachLookupPrefix early exit" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Create test node with multiple prefixes
+    var node = TestNode.init(testing.allocator);
+    defer node.deinit();
+    
+    // Add multiple prefixes
+    _ = try node.prefixes.insertAt(1, 100);
+    _ = try node.prefixes.insertAt(128, 1280);
+    _ = try node.prefixes.insertAt(192, 1920);
+    
+    // Test early exit - return false immediately
+    const EarlyExit = struct {
+        fn yieldFn(prefix: netip.Prefix, value: i32) bool {
+            _ = prefix;
+            _ = value;
+            return false; // Always exit early
+        }
+    };
+    
+    const octets = [_]u8{192, 168, 1, 0};
+    
+    // Call eachLookupPrefix - should exit early
+    const result = node.eachLookupPrefix(&octets, 0, true, 192, EarlyExit.yieldFn);
+    
+    // Should return false due to early exit
+    try testing.expect(!result);
+}
+
+test "eachSubnet basic functionality" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Create test node with multiple prefixes
+    var node = TestNode.init(testing.allocator);
+    defer node.deinit();
+    
+    // Add some prefixes that will be covered by a parent prefix
+    _ = try node.prefixes.insertAt(64, 640);   // 128.0.0.0/2 
+    _ = try node.prefixes.insertAt(128, 1280); // 192.0.0.0/1
+    _ = try node.prefixes.insertAt(192, 1920); // 192.0.0.0/2
+    
+    // Test path
+    const octets = [_]u8{192, 0, 0, 0};
+    
+    // Simple yield function for testing
+    const SimpleYield = struct {
+        fn yieldFn(prefix: netip.Prefix, value: i32) bool {
+            _ = prefix;
+            _ = value;
+            return true; // continue iteration
+        }
+    };
+    
+    // Call eachSubnet with parent prefix index that covers some of the added prefixes
+    const result = node.eachSubnet(&octets, 0, true, 32, SimpleYield.yieldFn); // Index for a broad prefix
+    
+    // Should complete successfully
+    try testing.expect(result);
+}
+
+test "eachSubnet early exit" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    
+    // Create test node with prefixes
+    var node = TestNode.init(testing.allocator);
+    defer node.deinit();
+    
+    // Add some prefixes
+    _ = try node.prefixes.insertAt(64, 640);
+    _ = try node.prefixes.insertAt(128, 1280);
+    
+    // Test early exit - return false immediately
+    const EarlyExit = struct {
+        fn yieldFn(prefix: netip.Prefix, value: i32) bool {
+            _ = prefix;
+            _ = value;
+            return false; // Always exit early
+        }
+    };
+    
+    const octets = [_]u8{128, 0, 0, 0};
+    
+    // Call eachSubnet - should exit early
+    const result = node.eachSubnet(&octets, 0, true, 32, EarlyExit.yieldFn);
+    
+    // Should return false due to early exit
+    try testing.expect(!result);
+}
+
+test "eachSubnet with complex children" {
+    const TestV = i32;
+    const TestNode = Node(TestV);
+    const TestLeafNode = LeafNode(TestV);
+    
+    // Create test node with children for more complex testing
+    var node = TestNode.init(testing.allocator);
+    defer {
+        // Clean up children manually
+        const items = node.children.Items();
+        for (items) |*item| {
+            switch (item.*) {
+                .leaf => |leaf_node| {
+                    testing.allocator.destroy(leaf_node);
+                },
+                else => {},
+            }
+        }
+        node.deinit();
+    }
+    
+    // Add some prefixes
+    _ = try node.prefixes.insertAt(128, 1280);
+    
+    // Add a leaf child within the range
+    const leaf = try testing.allocator.create(TestLeafNode);
+    leaf.* = TestLeafNode{
+        .prefix = netip.Prefix.fromIPv4(192, 168, 1, 0, 24),
+        .value = 5000,
+    };
+    _ = try node.children.insertAt(192, TestNode.ChildNode{ .leaf = leaf });
+    
+    // Simple yield function for testing
+    const SimpleYield = struct {
+        fn yieldFn(prefix: netip.Prefix, value: i32) bool {
+            _ = prefix;
+            _ = value;
+            return true; // continue iteration
+        }
+    };
+    
+    const octets = [_]u8{128, 0, 0, 0};
+    
+    // Call eachSubnet - should handle both prefixes and children
+    const result = node.eachSubnet(&octets, 0, true, 32, SimpleYield.yieldFn);
+    
+    // Should complete successfully
+    try testing.expect(result);
 }
