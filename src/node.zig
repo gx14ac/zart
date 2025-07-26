@@ -153,18 +153,53 @@ pub fn Node(comptime V: type) type {
         /// (Go BART: children sparse.Array256[any])
         children: Array256(ChildNode),
 
+        /// allocator for memory management
+        allocator: std.mem.Allocator,
+
         /// Initialize empty node
         pub fn init(allocator: std.mem.Allocator) Self {
             return Self{
                 .prefixes = Array256(V).init(allocator),
                 .children = Array256(ChildNode).init(allocator),
+                .allocator = allocator,
             };
         }
 
         /// Cleanup node resources
         pub fn deinit(self: *Self) void {
+            // First, recursively deinit and deallocate all child nodes
+            self.deinitChildren();
+            
+            // Then deinit the sparse arrays
             self.prefixes.deinit();
             self.children.deinit();
+        }
+
+        /// Recursively deallocate all child nodes
+        fn deinitChildren(self: *Self) void {
+            // Get all child items before deinitializing the children array
+            const items = self.children.Items();
+            
+            for (items) |child| {
+                switch (child) {
+                    .node => |node_ptr| {
+                        // Recursively deinit the child node
+                        node_ptr.deinit();
+                        // Deallocate the node itself
+                        self.allocator.destroy(node_ptr);
+                    },
+                    .leaf => |leaf_ptr| {
+                        // Deallocate the leaf node
+                        // LeafNode doesn't need recursive deinit
+                        self.allocator.destroy(leaf_ptr);
+                    },
+                    .fringe => |fringe_ptr| {
+                        // Deallocate the fringe node
+                        // FringeNode doesn't need recursive deinit
+                        self.allocator.destroy(fringe_ptr);
+                    },
+                }
+            }
         }
 
         /// Go BART: func (n *node[V]) cloneFlat() *node[V]
