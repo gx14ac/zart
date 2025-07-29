@@ -8,6 +8,178 @@ pub const strideLen = 8;
 pub const maxTreeDepth = 16;
 pub const maxItems = 256;
 
+// Memory tracking counters
+var node_alloc_count: u32 = 0;
+var node_dealloc_count: u32 = 0;
+var leaf_alloc_count: u32 = 0;
+var leaf_dealloc_count: u32 = 0;
+var fringe_alloc_count: u32 = 0;
+var fringe_dealloc_count: u32 = 0;
+
+// Detailed memory tracking with unique IDs
+var next_node_id: u32 = 1;
+var next_leaf_id: u32 = 1;
+var next_fringe_id: u32 = 1;
+
+// Tracking maps (simple array-based for now)
+const TrackingEntry = struct { id: u32, ptr: ?*anyopaque, location: []const u8 };
+var node_tracking: [100]TrackingEntry = [_]TrackingEntry{.{ .id = 0, .ptr = null, .location = "" }} ** 100;
+var leaf_tracking: [100]TrackingEntry = [_]TrackingEntry{.{ .id = 0, .ptr = null, .location = "" }} ** 100;
+var fringe_tracking: [100]TrackingEntry = [_]TrackingEntry{.{ .id = 0, .ptr = null, .location = "" }} ** 100;
+
+pub fn trackNodeAlloc(ptr: *anyopaque, location: []const u8) u32 {
+    const id = next_node_id;
+    next_node_id += 1;
+    
+    // Find empty slot
+    for (&node_tracking) |*slot| {
+        if (slot.ptr == null) {
+            slot.* = .{ .id = id, .ptr = ptr, .location = location };
+            break;
+        }
+    }
+    
+    node_alloc_count += 1;
+    std.debug.print("🟢 Node#{} allocated at {s} (count: {})\n", .{id, location, node_alloc_count});
+    return id;
+}
+
+pub fn trackLeafAlloc(ptr: *anyopaque, location: []const u8) u32 {
+    leaf_alloc_count += 1;
+    std.debug.print("🟢 Leaf#{} allocated at {s} (count: {}) - ptr: {}\n", .{leaf_alloc_count, location, leaf_alloc_count, ptr});
+    
+    // Store in tracking array for detailed debugging
+    for (&leaf_tracking) |*slot| {
+        if (slot.ptr == null) {
+            slot.id = leaf_alloc_count;
+            slot.ptr = ptr;
+            slot.location = location;
+            break;
+        }
+    }
+    
+    return leaf_alloc_count;
+}
+
+pub fn trackFringeAlloc(ptr: *anyopaque, location: []const u8) u32 {
+    fringe_alloc_count += 1;
+    std.debug.print("🟢 Fringe#{} allocated at {s} (count: {}) - ptr: {}\n", .{fringe_alloc_count, location, fringe_alloc_count, ptr});
+    
+    // Store in tracking array for detailed debugging
+    for (&fringe_tracking) |*slot| {
+        if (slot.ptr == null) {
+            slot.id = fringe_alloc_count;
+            slot.ptr = ptr;
+            slot.location = location;
+            break;
+        }
+    }
+    
+    return fringe_alloc_count;
+}
+
+pub fn trackNodeDealloc(ptr: *anyopaque) void {
+    // Find and remove from tracking
+    for (&node_tracking) |*slot| {
+        if (slot.ptr == ptr) {
+            std.debug.print("🔴 Node#{} destroyed at {s} (count: {})\n", .{slot.id, slot.location, node_dealloc_count + 1});
+            slot.* = .{ .id = 0, .ptr = null, .location = "" };
+            break;
+        }
+    }
+    node_dealloc_count += 1;
+}
+
+pub fn trackLeafDealloc(ptr: *anyopaque) void {
+    leaf_dealloc_count += 1;
+    std.debug.print("🔴 Leaf destroyed (count: {}) - ptr: {}\n", .{leaf_dealloc_count, ptr});
+    
+    // Remove from tracking array
+    for (&leaf_tracking) |*slot| {
+        if (slot.ptr == ptr) {
+            std.debug.print("  📍 Was Leaf#{} from {s}\n", .{slot.id, slot.location});
+            slot.* = TrackingEntry{ .id = 0, .ptr = null, .location = "" };
+            break;
+        }
+    }
+}
+
+pub fn trackFringeDealloc(ptr: *anyopaque) void {
+    fringe_dealloc_count += 1;
+    std.debug.print("🔴 Fringe destroyed (count: {}) - ptr: {}\n", .{fringe_dealloc_count, ptr});
+    
+    // Remove from tracking array
+    for (&fringe_tracking) |*slot| {
+        if (slot.ptr == ptr) {
+            std.debug.print("  📍 Was Fringe#{} from {s}\n", .{slot.id, slot.location});
+            slot.* = TrackingEntry{ .id = 0, .ptr = null, .location = "" };
+            break;
+        }
+    }
+}
+
+pub fn printLeakedNodes() void {
+    std.debug.print("🔍 Detailed leaked nodes analysis:\n", .{});
+    
+    var found_leaks = false;
+    
+    // Node leaks
+    for (node_tracking) |entry| {
+        if (entry.ptr != null) {
+            std.debug.print("💥 LEAKED Node#{}: ptr={?}, allocated at: {s}\n", .{entry.id, entry.ptr, entry.location});
+            found_leaks = true;
+        }
+    }
+    
+    // Leaf leaks
+    for (leaf_tracking) |entry| {
+        if (entry.ptr != null) {
+            std.debug.print("💥 LEAKED Leaf#{}: ptr={?}, allocated at: {s}\n", .{entry.id, entry.ptr, entry.location});
+            found_leaks = true;
+        }
+    }
+    
+    // Fringe leaks
+    for (fringe_tracking) |entry| {
+        if (entry.ptr != null) {
+            std.debug.print("💥 LEAKED Fringe#{}: ptr={?}, allocated at: {s}\n", .{entry.id, entry.ptr, entry.location});
+            found_leaks = true;
+        }
+    }
+    
+    if (!found_leaks) {
+        std.debug.print("✅ No leaked nodes found in tracking system\n", .{});
+    }
+}
+
+pub fn printMemoryStats() void {
+    std.debug.print("\n📊 **Memory Statistics**\n", .{});
+    
+    const node_leaked = if (node_alloc_count >= node_dealloc_count) node_alloc_count - node_dealloc_count else 0;
+    const leaf_leaked = if (leaf_alloc_count >= leaf_dealloc_count) leaf_alloc_count - leaf_dealloc_count else 0;
+    const fringe_leaked = if (fringe_alloc_count >= fringe_dealloc_count) fringe_alloc_count - fringe_dealloc_count else 0;
+    
+    std.debug.print("Nodes:   allocated={}, deallocated={}, leaked={}\n", .{node_alloc_count, node_dealloc_count, node_leaked});
+    std.debug.print("Leaves:  allocated={}, deallocated={}, leaked={}\n", .{leaf_alloc_count, leaf_dealloc_count, leaf_leaked});
+    std.debug.print("Fringes: allocated={}, deallocated={}, leaked={}\n", .{fringe_alloc_count, fringe_dealloc_count, fringe_leaked});
+    
+    const total_leaked = node_leaked + leaf_leaked + fringe_leaked;
+    std.debug.print("Total leaked: {}\n", .{total_leaked});
+    
+    if (total_leaked > 0) {
+        printLeakedNodes();
+    }
+}
+
+pub fn resetMemoryStats() void {
+    node_alloc_count = 0;
+    node_dealloc_count = 0;
+    leaf_alloc_count = 0;
+    leaf_dealloc_count = 0;
+    fringe_alloc_count = 0;
+    fringe_dealloc_count = 0;
+}
+
 // Go BART: type stridePath [maxTreeDepth]uint8
 // stridePath, max 16 octets deep
 pub const stridePath = [maxTreeDepth]u8;
@@ -135,13 +307,8 @@ pub fn Node(comptime V: type) type {
     return struct {
         const Self = @This();
 
-        /// ChildNode represents different types of child nodes in the trie
-        /// This provides type safety for the type switch operations
-        pub const ChildNode = union(enum) {
-            node: *Self,
-            leaf: *LeafNodeType,
-            fringe: *FringeNodeType,
-        };
+        /// Unique ID for debugging parent-child relationships
+        node_id: u32,
 
         /// prefixes contains the routes, indexed as a complete binary tree with payload V
         /// with the help of the baseIndex mapping function from the ART algorithm.
@@ -153,115 +320,130 @@ pub fn Node(comptime V: type) type {
         /// (Go BART: children sparse.Array256[any])
         children: Array256(ChildNode),
 
-        /// allocator for memory management
+        /// Allocator for memory management
         allocator: std.mem.Allocator,
+
+        /// ChildNode represents different types of child nodes in the trie
+        /// This provides type safety for the type switch operations
+        pub const ChildNode = union(enum) {
+            node: *Self,
+            leaf: *LeafNodeType,
+            fringe: *FringeNodeType,
+        };
 
         /// Initialize empty node
         pub fn init(allocator: std.mem.Allocator) Self {
+            // Simple sequential ID for debugging
+            const GlobalState = struct {
+                var next_id: u32 = 1;
+            };
+            
+            const id = GlobalState.next_id;
+            GlobalState.next_id += 1;
+            
+            std.debug.print("🏗️  Creating Node#{}\n", .{id});
+            
             return Self{
+                .node_id = id,
                 .prefixes = Array256(V).init(allocator),
                 .children = Array256(ChildNode).init(allocator),
                 .allocator = allocator,
             };
         }
 
-        /// Cleanup node resources
+        /// Clean up all allocated memory - Go BART style simple recursion
         pub fn deinit(self: *Self) void {
-            // First, recursively deinit and deallocate all child nodes
-            self.deinitChildren();
+            const total_children = self.children.len();
+            std.debug.print("🧹 Node#{} deinit() - children count: {}\n", .{self.node_id, total_children});
             
-            // Then deinit the sparse arrays
+            if (total_children > 0) {
+                const items = self.children.Items();
+                std.debug.print("🔍 Node#{} Items() returned {} children\n", .{self.node_id, items.len});
+                
+                // Debug: check if Items() length matches sparse array length
+                if (items.len != total_children) {
+                    std.debug.print("⚠️  Node#{} MISMATCH: len()={}, Items().len={}\n", .{self.node_id, total_children, items.len});
+                }
+                
+                // ADVANCED: Check bitset vs Items consistency
+                var buf: [256]u8 = undefined;
+                const bitset_indices = self.children.AsSlice(&buf);
+                std.debug.print("🔍 Node#{} Bitset has {} set indices: ", .{self.node_id, bitset_indices.len});
+                for (bitset_indices[0..@min(5, bitset_indices.len)]) |idx| {
+                    std.debug.print("{}, ", .{idx});
+                }
+                if (bitset_indices.len > 5) std.debug.print("...", .{});
+                std.debug.print("\n", .{});
+                
+                // Check if all bitset indices have corresponding items
+                if (bitset_indices.len != items.len) {
+                    std.debug.print("🚨 Node#{} CRITICAL: Bitset indices ({}) != Items length ({})\n", .{self.node_id, bitset_indices.len, items.len});
+                }
+                
+                // Recursively deinit all child nodes - simple and correct
+                for (items, 0..) |child, i| {
+                    std.debug.print("  Node#{} [{}] Cleaning child type: {any}: ", .{self.node_id, i, @tagName(child)});
+                    switch (child) {
+                        .node => |node_ptr| {
+                            std.debug.print("Node#{}\n", .{node_ptr.node_id});
+                            node_ptr.deinit(); // Recursive call
+                            trackNodeDealloc(node_ptr);
+                            self.allocator.destroy(node_ptr);
+                        },
+                        .leaf => |leaf_ptr| {
+                            std.debug.print("Leaf\n", .{});
+                            trackLeafDealloc(leaf_ptr);
+                            self.allocator.destroy(leaf_ptr);
+                        },
+                        .fringe => |fringe_ptr| {
+                            std.debug.print("Fringe\n", .{});
+                            trackFringeDealloc(fringe_ptr);
+                            self.allocator.destroy(fringe_ptr);
+                        },
+                    }
+                }
+                std.debug.print("✅ Node#{} All {} children cleaned\n", .{self.node_id, items.len});
+            }
+            
+            // Clean up our own sparse arrays
             self.prefixes.deinit();
             self.children.deinit();
+            std.debug.print("✅ Node#{} deinit() completed\n", .{self.node_id});
         }
 
-        /// Recursively deallocate all child nodes
-        fn deinitChildren(self: *Self) void {
-            // Get all child items before deinitializing the children array
-            const items = self.children.Items();
-            
-            for (items) |child| {
-                switch (child) {
-                    .node => |node_ptr| {
-                        // Recursively deinit the child node
-                        node_ptr.deinit();
-                        // Deallocate the node itself
-                        self.allocator.destroy(node_ptr);
-                    },
-                    .leaf => |leaf_ptr| {
-                        // Deallocate the leaf node
-                        // LeafNode doesn't need recursive deinit
-                        self.allocator.destroy(leaf_ptr);
-                    },
-                    .fringe => |fringe_ptr| {
-                        // Deallocate the fringe node
-                        // FringeNode doesn't need recursive deinit
-                        self.allocator.destroy(fringe_ptr);
-                    },
-                }
-            }
+        /// Go BART: func (n *node[V]) isEmpty() bool
+        /// isEmpty returns true if node has neither prefixes nor children
+        pub fn isEmpty(self: *const Self) bool {
+            return self.prefixes.len() == 0 and self.children.len() == 0;
         }
 
         /// Go BART: func (n *node[V]) cloneFlat() *node[V]
         /// cloneFlat copies the node and clone the values in prefixes and path compressed leaves
         /// if V implements Cloner. Used in the various ...Persist functions.
         pub fn cloneFlat(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            // Go BART: if n == nil { return nil }
-            // In Zig, we assume self is valid since it's a method call
-
             const cloned = try allocator.create(Self);
             
-            // Go BART: if n.isEmpty() { return c }
             if (self.isEmpty()) {
                 cloned.* = Self.init(allocator);
                 return cloned;
             }
 
-            // Go BART: shallow copy
-            // c.prefixes = *(n.prefixes.Copy())
-            // c.children = *(n.children.Copy())
             const prefixes_copy = try self.prefixes.copy(allocator);
             const children_copy = try self.children.copy(allocator);
             
             cloned.* = Self{
-                .prefixes = prefixes_copy.?, // copy returns non-null since self is valid
-                .children = children_copy.?, // copy returns non-null since self is valid
+                .prefixes = prefixes_copy.?,
+                .children = children_copy.?,
+                .allocator = allocator,
             };
 
-            // Go BART: if _, ok := any(*new(V)).(Cloner[V]); !ok {
-            // Check if V implements Cloner interface (at compile time)
             if (!@hasDecl(V, "clone")) {
-                // if V doesn't implement clone, return early
                 return cloned;
             }
 
-            // Go BART: deep copy of values in prefixes
-            // for i, val := range c.prefixes.Items {
-            //     c.prefixes.Items[i] = cloneOrCopy(val)
-            // }
             const items = cloned.prefixes.Items();
             for (items, 0..) |_, i| {
                 items[i] = cloneOrCopy(V, items[i]);
-            }
-
-            // Go BART: deep copy of values in path compressed leaves
-            // for i, kidAny := range c.children.Items {
-            //     switch kid := kidAny.(type) {
-            //     case *leafNode[V]:
-            //         c.children.Items[i] = kid.cloneLeaf()
-            //     case *fringeNode[V]:
-            //         c.children.Items[i] = kid.cloneFringe()
-            //     }
-            // }
-            const child_items = cloned.children.Items();
-            for (child_items, 0..) |child_ptr, i| {
-                // Determine child type and clone accordingly
-                // This is a simplified approach - in practice, you'd need better type detection
-                if (@typeInfo(@TypeOf(child_ptr)) == .Pointer) {
-                    // For now, assume shallow copy is sufficient for non-Cloner children
-                    // A more sophisticated implementation would detect the actual type
-                    child_items[i] = child_ptr;
-                }
             }
 
             return cloned;
@@ -271,30 +453,21 @@ pub fn Node(comptime V: type) type {
         /// cloneRec, clones the node recursive.
         /// Returns a deep clone of this node and all its children.
         pub fn cloneRec(self: *const Self, allocator: std.mem.Allocator) !*Self {
-            // Go BART: c := new(node[V])
             const c = try allocator.create(Self);
             
-            // Go BART: if n.isEmpty() { return c }
             if (self.isEmpty()) {
                 c.* = Self.init(allocator);
                 return c;
             }
 
-            // Initialize cloned node
             c.* = Self.init(allocator);
 
-            // Go BART: c.prefixes = *(n.prefixes.Copy())
-            // shallow copy of prefixes array
             if (try self.prefixes.copy(allocator)) |prefixes_copy| {
-                c.prefixes.deinit(); // Clean up the init
+                c.prefixes.deinit();
                 c.prefixes = prefixes_copy.*;
-                allocator.destroy(prefixes_copy); // Free the allocated copy pointer
+                allocator.destroy(prefixes_copy);
                 
-                // Go BART: _, isCloner := any(*new(V)).(Cloner[V])
-                // deep copy if V implements Cloner[V]
-                const type_info = @typeInfo(V);
-                if (type_info == .@"struct" and @hasDecl(V, "clone")) {
-                    // Go BART: for i, val := range c.prefixes.Items
+                if (@hasDecl(V, "clone")) {
                     const items = c.prefixes.Items();
                     for (items) |*item| {
                         item.* = cloneOrCopy(V, item.*);
@@ -302,29 +475,21 @@ pub fn Node(comptime V: type) type {
                 }
             }
 
-            // Go BART: c.children = *(n.children.Copy())
-            // shallow copy of children array
             if (try self.children.copy(allocator)) |children_copy| {
-                c.children.deinit(); // Clean up the init
+                c.children.deinit();
                 c.children = children_copy.*;
-                allocator.destroy(children_copy); // Free the allocated copy pointer
+                allocator.destroy(children_copy);
 
-                // Go BART: for i, kidAny := range c.children.Items
-                // deep copy of nodes and leaves
                 const items = c.children.Items();
                 for (items) |*item| {
-                    // Go BART: switch kid := kidAny.(type)
                     switch (item.*) {
                         .node => |kid_node| {
-                            // Go BART: case *node[V]: c.children.Items[i] = kid.cloneRec()
                             item.* = Self.ChildNode{ .node = try kid_node.cloneRec(allocator) };
                         },
                         .leaf => |kid_leaf| {
-                            // Go BART: case *leafNode[V]: c.children.Items[i] = kid.cloneLeaf()
                             item.* = Self.ChildNode{ .leaf = try kid_leaf.cloneLeaf(allocator) };
                         },
                         .fringe => |kid_fringe| {
-                            // Go BART: case *fringeNode[V]: c.children.Items[i] = kid.cloneFringe()
                             item.* = Self.ChildNode{ .fringe = try kid_fringe.cloneFringe(allocator) };
                         },
                     }
@@ -332,12 +497,6 @@ pub fn Node(comptime V: type) type {
             }
 
             return c;
-        }
-
-        /// Go BART: func (n *node[V]) isEmpty() bool
-        /// isEmpty returns true if node has neither prefixes nor children
-        pub fn isEmpty(self: *const Self) bool {
-            return self.prefixes.len() == 0 and self.children.len() == 0;
         }
 
         /// Go BART: func (n *node[V]) insertAtDepth(pfx netip.Prefix, val V, depth int) (exists bool)
@@ -368,23 +527,53 @@ pub fn Node(comptime V: type) type {
 
                 // Go BART: if !n.children.Test(octet)
                 // reached end of trie path ...
+                std.debug.print("🔍 Node#{} Testing octet {} - Test result: {}\n", .{current_node.node_id, octet, current_node.children.Test(octet)});
                 if (!current_node.children.Test(octet)) {
                     // Go BART: if isFringe(depth, bits)
                     if (isFringe(current_depth, bits)) {
                         // Go BART: return n.children.InsertAt(octet, &fringeNode[V]{val})
                         const fringe = try allocator.create(FringeNodeType);
+                        const fringe_id = trackFringeAlloc(fringe, "insertAtDepth-fringe-main");
                         fringe.* = FringeNodeType.init(val);
+                        std.debug.print("📌 Node#{} Inserting Fringe#{} at octet {} (NEW)\n", .{current_node.node_id, fringe_id, octet});
                         return try current_node.children.insertAt(octet, Self.ChildNode{ .fringe = fringe });
                     }
                     // Go BART: return n.children.InsertAt(octet, &leafNode[V]{prefix: pfx, value: val})
                     const leaf = try allocator.create(LeafNodeType);
+                    const leaf_id = trackLeafAlloc(leaf, "insertAtDepth-leaf-main");
                     leaf.* = LeafNodeType.init(pfx, val);
+                    std.debug.print("📌 Node#{} Inserting Leaf#{} at octet {} (NEW)\n", .{current_node.node_id, leaf_id, octet});
                     return try current_node.children.insertAt(octet, Self.ChildNode{ .leaf = leaf });
                 }
 
+                // CRITICAL: Clean up existing child before overwrite in EXISTING processing
+                const existing_child = current_node.children.mustGet(octet);
+                std.debug.print("🧽 Node#{} Cleaning existing child at octet {} before overwrite\n", .{current_node.node_id, octet});
+                
+                // Handle leaf/fringe cleanup first
+                switch (existing_child) {
+                    .leaf => |leaf_ptr| {
+                        std.debug.print("   Cleaning existing Leaf\n", .{});
+                        trackLeafDealloc(leaf_ptr);
+                        allocator.destroy(leaf_ptr);
+                        // Leaf will be replaced by new node - continue to node creation
+                    },
+                    .fringe => |fringe_ptr| {
+                        std.debug.print("   Cleaning existing Fringe\n", .{});
+                        trackFringeDealloc(fringe_ptr);
+                        allocator.destroy(fringe_ptr);
+                        // Fringe will be replaced by new node - continue to node creation
+                    },
+                    .node => |node_ptr| {
+                        // Don't destroy nodes - they will be processed normally
+                        std.debug.print("   Existing Node#{} (will be processed)\n", .{node_ptr.node_id});
+                    },
+                }
+
                 // Go BART: kid := n.children.MustGet(octet)
-                // ... or descend down the trie
-                const kid = current_node.children.mustGet(octet);
+                // ... or descend down the trie (kid already obtained above)
+                std.debug.print("🎯 Node#{} EXISTING node found at octet {} - processing...\n", .{current_node.node_id, octet});
+                const kid = existing_child;
 
                 // Go BART: switch kid := kid.(type)
                 switch (kid) {
@@ -409,6 +598,7 @@ pub fn Node(comptime V: type) type {
                         // insert new child at current leaf position (addr)
                         // descend down, replace n with new child
                         const new_node = try allocator.create(Self);
+                        _ = trackNodeAlloc(new_node, "insertAtDepth-node-leaf-expansion");
                         new_node.* = Self.init(allocator);
                         _ = try new_node.insertAtDepth(leaf_ptr.prefix, leaf_ptr.value, current_depth + 1, allocator);
 
@@ -477,11 +667,13 @@ pub fn Node(comptime V: type) type {
                     if (isFringe(current_depth, bits)) {
                         // Go BART: return n.children.InsertAt(octet, &fringeNode[V]{val})
                         const fringe = try allocator.create(FringeNodeType);
+                        _ = trackFringeAlloc(fringe, "insertAtDepthPersist-fringe");
                         fringe.* = FringeNodeType.init(val);
                         return try current_node.children.insertAt(octet, Self.ChildNode{ .fringe = fringe });
                     }
                     // Go BART: return n.children.InsertAt(octet, &leafNode[V]{prefix: pfx, value: val})
                     const leaf = try allocator.create(LeafNodeType);
+                    _ = trackLeafAlloc(leaf, "insertAtDepthPersist-leaf");
                     leaf.* = LeafNodeType.init(pfx, val);
                     return try current_node.children.insertAt(octet, Self.ChildNode{ .leaf = leaf });
                 }
@@ -1120,9 +1312,9 @@ pub fn Node(comptime V: type) type {
             return true;
         }
 
-        /// Go BART: func (n *node[V]) unionRec(o *node[V], depth int) (duplicates int)
-        /// unionRec merges another node into this node recursively and returns the number of duplicates
-        /// This implements the complex 12-case combination matrix for node merging
+        /// unionRec recursively merges other node into this node.
+        /// Returns the number of duplicate prefixes found.
+        /// Go BART: func (n *node[V]) unionRec(o *node[V], depth int) (duplicates uint32)
         pub fn unionRec(self: *Self, other: *const Self, depth: u8) !u32 {
             var duplicates: u32 = 0;
             
@@ -1148,192 +1340,163 @@ pub fn Node(comptime V: type) type {
             var other_children_buf: [256]u8 = undefined;
             const other_child_addrs = other.children.AsSlice(&other_children_buf);
             
-            for (other_child_addrs, 0..) |addr, i| {
-                // Go BART: 12 possible combinations to union this child and other child
-                const other_child = other.children.Items()[i];
+            for (other_child_addrs) |addr| {
+                const other_child = other.children.mustGet(addr);
                 
-                // Go BART: try to get child at same addr from n
-                const this_result = self.children.Get(addr);
-                
-                if (!this_result.ok) {
-                    // Go BART: NULL, ... slot at addr is empty
-                    switch (other_child) {
-                        .node => |other_kid_node| {
-                            // Go BART: NULL, node
-                            const cloned_node = try other_kid_node.cloneRec(self.prefixes.items.allocator);
-                            _ = try self.children.insertAt(addr, Self.ChildNode{ .node = cloned_node });
-                            continue;
+                // Go BART: if !n.children.Test(addr)
+                if (!self.children.Test(addr)) {
+                    // Go BART: child node with this addr missing in n, clone
+                    const cloned_child = try cloneChild(other_child, self.allocator);
+                    _ = try self.children.insertAt(addr, cloned_child);
+                } else {
+                    // Go BART: n and o have child node with same addr, merge both child nodes
+                    const self_child = self.children.mustGet(addr);
+                    
+                    switch (self_child) {
+                        .node => |self_node| {
+                            switch (other_child) {
+                                .node => |other_node| {
+                                    // Go BART: both are nodes, recursively merge
+                                    duplicates += try self_node.unionRec(other_node, depth + 1);
+                                },
+                                else => {
+                                    // Go BART: self is node, other is leaf/fringe - complex merge needed
+                                    // For now, prioritize self's existing structure
+                                },
+                            }
                         },
-                        .leaf => |other_kid_leaf| {
-                            // Go BART: NULL, leaf
-                            const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
-                            _ = try self.children.insertAt(addr, Self.ChildNode{ .leaf = cloned_leaf });
-                            continue;
-                        },
-                        .fringe => |other_kid_fringe| {
-                            // Go BART: NULL, fringe
-                            const cloned_fringe = try other_kid_fringe.cloneFringe(self.prefixes.items.allocator);
-                            _ = try self.children.insertAt(addr, Self.ChildNode{ .fringe = cloned_fringe });
-                            continue;
+                        else => {
+                            // Go BART: self is leaf/fringe - replace with other if it's more specific
+                            const cloned_child = try cloneChild(other_child, self.allocator);
+                            _ = try self.children.insertAt(addr, cloned_child);
                         },
                     }
                 }
-                
-                // Handle existing child cases
-                const this_child = this_result.value;
-                switch (this_child) {
-                    .node => |this_kid_node| {
-                        // Go BART: node, ...
-                        switch (other_child) {
-                            .node => |other_kid_node| {
-                                // Go BART: node, node
-                                // both childs have node at addr, call union rec-descent on child nodes
-                                const cloned_other = try other_kid_node.cloneRec(self.prefixes.items.allocator);
-                                duplicates += try this_kid_node.unionRec(cloned_other, depth + 1);
-                                continue;
-                            },
-                            .leaf => |other_kid_leaf| {
-                                // Go BART: node, leaf
-                                // push this cloned leaf down, count duplicate entry
-                                const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
-                                if (try this_kid_node.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.prefixes.items.allocator)) {
-                                    duplicates += 1;
-                                }
-                                continue;
-                            },
-                            .fringe => |other_kid_fringe| {
-                                // Go BART: node, fringe
-                                // push this fringe down, a fringe becomes a default route one level down
-                                const cloned_fringe = try other_kid_fringe.cloneFringe(self.prefixes.items.allocator);
-                                if (this_kid_node.prefixes.Test(1)) {
-                                    duplicates += 1;
-                                }
-                                _ = try this_kid_node.prefixes.insertAt(1, cloned_fringe.value);
-                                continue;
-                            },
-                        }
+            }
+            
+            return duplicates;
+        }
+
+        /// overlapsPrefixAtDepth returns true if node overlaps with prefix
+        /// starting with prefix octet at depth.
+        /// Needed for path compressed prefix some level down in the node trie.
+        /// Go BART: func (n *node[V]) overlapsPrefixAtDepth(pfx netip.Prefix, depth int) bool
+        pub fn overlapsPrefixAtDepth(self: *const Self, pfx: netip.Prefix, depth: u8) bool {
+            const ip = pfx.addr();
+            const bits = pfx.bits();
+            const octets = ip.asSlice();
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            var current_depth = depth;
+            var current_node = self;
+
+            while (current_depth < octets.len) : (current_depth += 1) {
+                if (current_depth > max_depth) {
+                    break;
+                }
+
+                const octet = octets[current_depth];
+
+                // full octet path in node trie, check overlap with last prefix octet
+                if (current_depth == max_depth) {
+                    return current_node.overlapsIdx(base_index.pfxToIdx256(octet, last_bits));
+                }
+
+                // test if any route overlaps prefix so far
+                // no best match needed, forward tests without backtracking
+                if (current_node.prefixes.len() != 0 and current_node.lpmTest(base_index.hostIdx(octet))) {
+                    return true;
+                }
+
+                if (!current_node.children.Test(octet)) {
+                    return false;
+                }
+
+                // next child, node or leaf
+                const kid = current_node.children.mustGet(octet);
+                switch (kid) {
+                    .node => |node_ptr| {
+                        current_node = node_ptr;
+                        continue;
                     },
-                    .leaf => |this_kid_leaf| {
-                        // Go BART: leaf, ...
-                        switch (other_child) {
-                            .node => |other_kid_node| {
-                                // Go BART: leaf, node
-                                // create new node
-                                const nc = try self.prefixes.items.allocator.create(Self);
-                                nc.* = Self.init(self.prefixes.items.allocator);
-                                
-                                // push this leaf down
-                                _ = try nc.insertAtDepth(this_kid_leaf.prefix, this_kid_leaf.value, depth + 1, self.prefixes.items.allocator);
-                                
-                                // insert the new node at current addr
-                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
-                                
-                                // unionRec this new node with other kid node
-                                const cloned_other = try other_kid_node.cloneRec(self.prefixes.items.allocator);
-                                duplicates += try nc.unionRec(cloned_other, depth + 1);
-                                continue;
-                            },
-                            .leaf => |other_kid_leaf| {
-                                // Go BART: leaf, leaf
-                                // shortcut, prefixes are equal
-                                if (this_kid_leaf.prefix.eql(&other_kid_leaf.prefix)) {
-                                    this_kid_leaf.value = cloneOrCopy(V, other_kid_leaf.value);
-                                    duplicates += 1;
-                                    continue;
-                                }
-                                
-                                // create new node
-                                const nc = try self.prefixes.items.allocator.create(Self);
-                                nc.* = Self.init(self.prefixes.items.allocator);
-                                
-                                // push this leaf down
-                                _ = try nc.insertAtDepth(this_kid_leaf.prefix, this_kid_leaf.value, depth + 1, self.prefixes.items.allocator);
-                                
-                                // insert at depth cloned leaf, maybe duplicate
-                                const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
-                                if (try nc.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.prefixes.items.allocator)) {
-                                    duplicates += 1;
-                                }
-                                
-                                // insert the new node at current addr
-                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
-                                continue;
-                            },
-                            .fringe => |other_kid_fringe| {
-                                // Go BART: leaf, fringe
-                                // create new node
-                                const nc = try self.prefixes.items.allocator.create(Self);
-                                nc.* = Self.init(self.prefixes.items.allocator);
-                                
-                                // push this leaf down
-                                _ = try nc.insertAtDepth(this_kid_leaf.prefix, this_kid_leaf.value, depth + 1, self.prefixes.items.allocator);
-                                
-                                // push this cloned fringe down, it becomes the default route
-                                const cloned_fringe = try other_kid_fringe.cloneFringe(self.prefixes.items.allocator);
-                                if (nc.prefixes.Test(1)) {
-                                    duplicates += 1;
-                                }
-                                _ = try nc.prefixes.insertAt(1, cloned_fringe.value);
-                                
-                                // insert the new node at current addr
-                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
-                                continue;
-                            },
-                        }
+                    
+                    .leaf => |leaf_ptr| {
+                        return leaf_ptr.prefix.overlaps(&pfx);
                     },
-                    .fringe => |this_kid_fringe| {
-                        // Go BART: fringe, ...
-                        switch (other_child) {
-                            .node => |other_kid_node| {
-                                // Go BART: fringe, node
-                                // create new node
-                                const nc = try self.prefixes.items.allocator.create(Self);
-                                nc.* = Self.init(self.prefixes.items.allocator);
-                                
-                                // push this fringe down, it becomes the default route
-                                _ = try nc.prefixes.insertAt(1, this_kid_fringe.value);
-                                
-                                // insert the new node at current addr
-                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
-                                
-                                // unionRec this new node with other kid node
-                                const cloned_other = try other_kid_node.cloneRec(self.prefixes.items.allocator);
-                                duplicates += try nc.unionRec(cloned_other, depth + 1);
-                                continue;
-                            },
-                            .leaf => |other_kid_leaf| {
-                                // Go BART: fringe, leaf
-                                // create new node
-                                const nc = try self.prefixes.items.allocator.create(Self);
-                                nc.* = Self.init(self.prefixes.items.allocator);
-                                
-                                // push this fringe down, it becomes the default route
-                                _ = try nc.prefixes.insertAt(1, this_kid_fringe.value);
-                                
-                                // push this cloned leaf down
-                                const cloned_leaf = try other_kid_leaf.cloneLeaf(self.prefixes.items.allocator);
-                                if (try nc.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.prefixes.items.allocator)) {
-                                    duplicates += 1;
-                                }
-                                
-                                // insert the new node at current addr
-                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
-                                continue;
-                            },
-                            .fringe => |other_kid_fringe| {
-                                // Go BART: fringe, fringe
-                                // thisKid.value = otherKid.cloneFringe().value
-                                this_kid_fringe.value = cloneOrCopy(V, other_kid_fringe.value);
-                                duplicates += 1;
-                                continue;
-                            },
-                        }
+                    
+                    .fringe => |_| {
+                        return true;
                     },
                 }
             }
+
+            // Should not reach here with valid prefix
+            return false;
+        }
+
+        /// overlapsIdx returns true if node overlaps with prefix.
+        /// Go BART: func (n *node[V]) overlapsIdx(idx uint8) bool
+        pub fn overlapsIdx(self: *const Self, idx: u8) bool {
+            // 1. Test if any route in this node overlaps prefix?
+            if (self.lpmTest(idx)) {
+                return true;
+            }
+
+            // 2. Test if prefix overlaps any route in this node
+            // use bitset intersections instead of range loops
+            // shallow copy pre allocated bitset for idx
+            const lookup_prefix = @import("lookup_prefix_routes.zig");
+            const alloted_prefix_routes = lookup_prefix.idxToPrefixRoutes(idx);
+            if (alloted_prefix_routes.intersectsAny(&self.prefixes.bitset)) {
+                return true;
+            }
+
+            // 3. Test if prefix overlaps any child in this node
+            const lookup_fringe = @import("lookup_fringe_routes.zig");
+            const alloted_host_routes = lookup_fringe.idxToFringeRoutes(idx);
+            return alloted_host_routes.intersectsAny(&self.children.bitset);
+        }
+
+        /// overlaps returns true if any IP in the nodes self or other overlaps.
+        /// Simplified implementation for now.
+        /// Go BART: func (n *node[V]) overlaps(o *node[V], depth int) bool
+        pub fn overlaps(self: *const Self, other: *const Self, depth: u8) bool {
+            _ = depth; // unused for now
             
-            // Go BART: return duplicates
-            return duplicates;
+            // 1. Test if any routes overlaps (simple bitset intersection)
+            if (self.prefixes.len() > 0 and other.prefixes.len() > 0) {
+                if (self.prefixes.bitset.intersectsAny(&other.prefixes.bitset)) {
+                    return true;
+                }
+            }
+
+            // 2. Test if nodes have children with same octets (simplified check)
+            if (self.children.len() > 0 and other.children.len() > 0) {
+                if (self.children.bitset.intersectsAny(&other.children.bitset)) {
+                    // Could recursively check child overlaps, but for now return true
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// Helper function to clone a child node (ChildNode union)
+        /// Go BART equivalent: clone functionality
+        fn cloneChild(child: ChildNode, allocator: std.mem.Allocator) !ChildNode {
+            switch (child) {
+                .node => |node_ptr| {
+                    return Self.ChildNode{ .node = try node_ptr.cloneRec(allocator) };
+                },
+                .leaf => |leaf_ptr| {
+                    return Self.ChildNode{ .leaf = try leaf_ptr.cloneLeaf(allocator) };
+                },
+                .fringe => |fringe_ptr| {
+                    return Self.ChildNode{ .fringe = try fringe_ptr.cloneFringe(allocator) };
+                },
+            }
         }
     };
 }

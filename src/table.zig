@@ -21,9 +21,9 @@
 // that loops in hot paths (4x uint64 = 256) can be accelerated by loop unrolling.
 
 const std = @import("std");
+const netip = @import("netip.zig");
 const Node = @import("node.zig").Node;
 const isFringe = @import("node.zig").isFringe;
-const netip = @import("netip.zig");
 const base_index = @import("base_index.zig");
 
 // Table is an IPv4 and IPv6 routing table with payload V.
@@ -65,11 +65,20 @@ pub fn Table(comptime V: type) type {
             };
         }
 
-        /// Deinitialize the table and free memory
-        /// Go BART doesn't need explicit cleanup, but Zig does
+        /// Cleanup table resources
+        /// Go BART: No explicit deinit in Go (handled by GC)
         pub fn deinit(self: *Self) void {
+            std.debug.print("🧹 Table.deinit() called - size4: {}, size6: {}\n", .{self.size4_count, self.size6_count});
+            
+            std.debug.print("🔄 Cleaning up IPv4 root...\n", .{});
             self.root4.deinit();
+            std.debug.print("✅ IPv4 root cleanup completed\n", .{});
+            
+            std.debug.print("🔄 Cleaning up IPv6 root...\n", .{});
             self.root6.deinit();
+            std.debug.print("✅ IPv6 root cleanup completed\n", .{});
+            
+            std.debug.print("✅ Table.deinit() completed\n", .{});
         }
 
         /// rootNodeByVersion, root node getter for ip version.
@@ -107,6 +116,10 @@ pub fn Table(comptime V: type) type {
         pub fn size6(self: *const Self) i32 {
             return self.size6_count;
         }
+
+        /// Result types for lookup operations
+        const LookupResult = struct { value: V, ok: bool };
+        const LookupPrefixLPMResult = struct { lpm_prefix: netip.Prefix, value: V, ok: bool };
 
         /// Get returns the value for the exact prefix match and true,
         /// or false if no exact match was found.
@@ -226,7 +239,7 @@ pub fn Table(comptime V: type) type {
         /// Lookup does a route lookup (longest prefix match) for IP and
         /// returns the associated value and true, or false if no route matched.
         /// Go BART: func (t *Table[V]) Lookup(ip netip.Addr) (val V, ok bool)
-        pub fn lookup(self: *const Self, ip: *const netip.Addr) struct { value: V, ok: bool } {
+        pub fn lookup(self: *const Self, ip: *const netip.Addr) LookupResult {
             var zero: V = undefined;
             @memset(std.mem.asBytes(&zero), 0);
 
@@ -309,6 +322,398 @@ pub fn Table(comptime V: type) type {
             }
 
             return .{ .value = zero, .ok = false };
+        }
+
+        /// LookupPrefix does a route lookup (longest prefix match) for pfx and
+        /// returns the associated value and true, or false if no route matched.
+        /// Go BART: func (t *Table[V]) LookupPrefix(pfx netip.Prefix) (val V, ok bool)
+        pub fn lookupPrefix(self: *const Self, pfx: *const netip.Prefix) LookupResult {
+            const result = self.lookupPrefixLPMInternal(pfx, false);
+            return .{ .value = result.value, .ok = result.ok };
+        }
+
+        /// LookupPrefixLPM is similar to LookupPrefix,
+        /// but it returns the lpm prefix in addition to value,ok.
+        /// This method is about 20-30% slower than LookupPrefix and should only
+        /// be used if the matching lpm entry is also required for other reasons.
+        /// If LookupPrefixLPM is to be used for IP address lookups,
+        /// they must be converted to /32 or /128 prefixes.
+        /// Go BART: func (t *Table[V]) LookupPrefixLPM(pfx netip.Prefix) (lpmPfx netip.Prefix, val V, ok bool)
+        pub fn lookupPrefixLPM(self: *const Self, pfx: *const netip.Prefix) LookupPrefixLPMResult {
+            return self.lookupPrefixLPMInternal(pfx, true);
+        }
+
+        /// Internal implementation for both LookupPrefix and LookupPrefixLPM
+        /// Go BART: func (t *Table[V]) lookupPrefixLPM(pfx netip.Prefix, withLPM bool) (lpmPfx netip.Prefix, val V, ok bool)
+        fn lookupPrefixLPMInternal(self: *const Self, pfx: *const netip.Prefix, with_lpm: bool) LookupPrefixLPMResult {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+            const zero_prefix = netip.Prefix.fromIPv4(0, 0, 0, 0, 0);
+
+            if (!pfx.isValid()) {
+                return .{ .lpm_prefix = zero_prefix, .value = zero, .ok = false };
+            }
+
+            // canonicalize the prefix
+            const canonical_pfx = pfx.masked();
+
+            const ip = canonical_pfx.addr();
+            const bits = canonical_pfx.bits();
+            const is4 = ip.is4();
+            const octets = ip.asSlice();
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            var n = self.rootNodeByVersionConst(is4);
+
+            // record path to leaf node
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var stack: [maxTreeDepth]*const Node(V) = undefined;
+
+            var depth: usize = 0;
+            var octet: u8 = 0;
+
+            // find the last node on the octets path in the trie
+            for (octets, 0..) |current_octet, depth_idx| {
+                depth = depth_idx & 0xf; // BCE
+                octet = current_octet;
+
+                if (depth > max_depth) {
+                    depth -= 1;
+                    break;
+                }
+                // push current node on stack
+                stack[depth] = n;
+
+                // go down in tight loop to leaf node
+                if (!n.children.Test(octet)) {
+                    break;
+                }
+                
+                const kid = n.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+                    
+                    .leaf => |leaf_ptr| {
+                        // reached a path compressed prefix, stop traversing
+                        if (leaf_ptr.prefix.bitsGreaterThan(bits) or !leaf_ptr.prefix.containsAddr(&canonical_pfx)) {
+                            break;
+                        }
+                        return .{ .lpm_prefix = leaf_ptr.prefix, .value = leaf_ptr.value, .ok = true };
+                    },
+                    
+                    .fringe => |fringe_ptr| {
+                        // the bits of the fringe are defined by the depth
+                        // maybe the LPM isn't needed, saves some cycles
+                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
+                        if (fringe_bits > bits) {
+                            break;
+                        }
+
+                        // the LPM isn't needed, saves some cycles
+                        if (!with_lpm) {
+                            return .{ .lpm_prefix = zero_prefix, .value = fringe_ptr.value, .ok = true };
+                        }
+
+                        // sic, get the LPM prefix back, it costs some cycles!
+                        const fringe_pfx = @import("node.zig").cidrForFringe(octets, @intCast(depth), is4, octet);
+                        return .{ .lpm_prefix = fringe_pfx, .value = fringe_ptr.value, .ok = true };
+                    },
+                }
+            }
+
+            // start backtracking, unwind the stack
+            while (depth < maxTreeDepth) {
+                const current_depth = depth & 0xf; // BCE
+                
+                if (current_depth >= octets.len) break;
+                if (current_depth > maxTreeDepth) break;
+
+                n = stack[current_depth];
+
+                // longest prefix match, skip if node has no prefixes
+                if (n.prefixes.len() == 0) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    continue;
+                }
+
+                // only the lastOctet may have a different prefix len
+                // all others are just host routes
+                var idx: usize = 0;
+                const current_octet = octets[current_depth];
+                if (current_depth == max_depth) {
+                    idx = base_index.pfxToIdx256(current_octet, last_bits);
+                } else {
+                    idx = base_index.hostIdx(current_octet);
+                }
+
+                // manually inlined: lpmGet(idx)
+                const lookup_tbl = @import("lookup_tbl.zig");
+                const backtracking_bitset = lookup_tbl.backTrackingBitset(idx);
+                
+                if (n.prefixes.IntersectionTop(&backtracking_bitset)) |top_idx| {
+                    const val = n.prefixes.mustGet(top_idx);
+
+                    // called from LookupPrefix
+                    if (!with_lpm) {
+                        return .{ .lpm_prefix = zero_prefix, .value = val, .ok = true };
+                    }
+
+                    // called from LookupPrefixLPM
+                    // get the pfxLen from depth and top idx
+                    const pfx_len = base_index.pfxLen256(@intCast(current_depth), top_idx) catch {
+                        if (depth == 0) break;
+                        depth -= 1;
+                        continue;
+                    };
+
+                    // calculate the lpmPfx from incoming ip and new mask
+                    const lpm_pfx = ip.prefix(pfx_len);
+                    return .{ .lpm_prefix = lpm_pfx, .value = val, .ok = true };
+                }
+
+                if (depth == 0) break;
+                depth -= 1;
+            }
+
+            return .{ .lpm_prefix = zero_prefix, .value = zero, .ok = false };
+        }
+
+        /// Supernets iterates over all CIDRs covering pfx.
+        /// The iteration is in reverse CIDR sort order, from longest-prefix-match to shortest-prefix-match.
+        /// Go BART: func (t *Table[V]) Supernets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V]
+        pub fn supernets(self: *const Self, pfx: *const netip.Prefix, yield: fn(netip.Prefix, V) bool) void {
+            if (!pfx.isValid()) {
+                return;
+            }
+
+            // canonicalize the prefix
+            const canonical_pfx = pfx.masked();
+
+            const ip = canonical_pfx.addr();
+            const bits = canonical_pfx.bits();
+            const is4 = ip.is4();
+            const octets = ip.asSlice();
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            var n = self.rootNodeByVersionConst(is4);
+
+            // stack of the traversed nodes for reverse ordering of supernets
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var stack: [maxTreeDepth]*const Node(V) = undefined;
+
+            var depth: usize = 0;
+            var octet: u8 = 0;
+
+            // find last node along this octet path
+            for (octets, 0..) |current_octet, depth_idx| {
+                depth = depth_idx & 0xf; // BCE
+                octet = current_octet;
+
+                if (depth > max_depth) {
+                    depth -= 1;
+                    break;
+                }
+                // push current node on stack
+                stack[depth] = n;
+
+                // descend down the trie
+                if (!n.children.Test(octet)) {
+                    break;
+                }
+                
+                const kid = n.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+                    
+                    .leaf => |leaf_ptr| {
+                        if (leaf_ptr.prefix.bitsGreaterThan(canonical_pfx.bits())) {
+                            break;
+                        }
+
+                        if (leaf_ptr.prefix.overlaps(&canonical_pfx)) {
+                            if (!yield(leaf_ptr.prefix, leaf_ptr.value)) {
+                                // early exit
+                                return;
+                            }
+                        }
+                        // end of trie along this octets path
+                        break;
+                    },
+                    
+                    .fringe => |fringe_ptr| {
+                        const fringe_pfx = @import("node.zig").cidrForFringe(octets, @intCast(depth), is4, octet);
+                        if (fringe_pfx.bitsGreaterThan(canonical_pfx.bits())) {
+                            break;
+                        }
+
+                        if (fringe_pfx.overlaps(&canonical_pfx)) {
+                            if (!yield(fringe_pfx, fringe_ptr.value)) {
+                                // early exit
+                                return;
+                            }
+                        }
+                        // end of trie along this octets path
+                        break;
+                    },
+                }
+            }
+
+            // start backtracking, unwind the stack
+            while (depth < maxTreeDepth) {
+                const current_depth = depth & 0xf; // BCE
+                
+                if (current_depth >= octets.len) break;
+                if (current_depth > maxTreeDepth) break;
+
+                n = stack[current_depth];
+
+                // only the lastOctet may have a different prefix len
+                // all others are just host routes
+                var idx: usize = 0;
+                const current_octet = octets[current_depth];
+                if (current_depth == max_depth) {
+                    idx = base_index.pfxToIdx256(current_octet, last_bits);
+                } else {
+                    idx = base_index.hostIdx(current_octet);
+                }
+
+                // micro benchmarking, skip if there is no match
+                if (!n.lpmTest(idx)) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    continue;
+                }
+
+                // yield all the matching prefixes, not just the lpm
+                if (!n.eachLookupPrefix(octets, @intCast(current_depth), is4, @intCast(idx), yield)) {
+                    // early exit
+                    return;
+                }
+
+                if (depth == 0) break;
+                depth -= 1;
+            }
+        }
+
+        /// Subnets iterates over all CIDRs covered by pfx.
+        /// The iteration is in natural CIDR sort order.
+        /// Go BART: func (t *Table[V]) Subnets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V]
+        pub fn subnets(self: *const Self, pfx: *const netip.Prefix, yield: fn(netip.Prefix, V) bool) void {
+            if (!pfx.isValid()) {
+                return;
+            }
+
+            // canonicalize the prefix
+            const canonical_pfx = pfx.masked();
+
+            // values derived from pfx
+            const ip = canonical_pfx.addr();
+            const bits = canonical_pfx.bits();
+            const is4 = ip.is4();
+            const octets = ip.asSlice();
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            var n = self.rootNodeByVersionConst(is4);
+
+            // find the trie node
+            for (octets, 0..) |current_octet, depth_idx| {
+                const depth = depth_idx & 0xf; // BCE
+                
+                if (depth == max_depth) {
+                    const idx = base_index.pfxToIdx256(current_octet, last_bits);
+                    _ = n.eachSubnet(octets, @intCast(depth), is4, @intCast(idx), yield);
+                    return;
+                }
+
+                if (!n.children.Test(current_octet)) {
+                    return;
+                }
+                
+                const kid = n.children.mustGet(current_octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+                    
+                    .leaf => |leaf_ptr| {
+                        if (canonical_pfx.bits() <= leaf_ptr.prefix.bits() and canonical_pfx.overlaps(&leaf_ptr.prefix)) {
+                            _ = yield(leaf_ptr.prefix, leaf_ptr.value);
+                        }
+                        return;
+                    },
+                    
+                    .fringe => |fringe_ptr| {
+                        const fringe_pfx = @import("node.zig").cidrForFringe(octets, @intCast(depth), is4, current_octet);
+                        if (canonical_pfx.bits() <= fringe_pfx.bits() and canonical_pfx.overlaps(&fringe_pfx)) {
+                            _ = yield(fringe_pfx, fringe_ptr.value);
+                        }
+                        return;
+                    },
+                }
+            }
+        }
+
+        /// OverlapsPrefix reports whether any IP in pfx is matched by a route in the table or vice versa.
+        /// Go BART: func (t *Table[V]) OverlapsPrefix(pfx netip.Prefix) bool
+        pub fn overlapsPrefix(self: *const Self, pfx: *const netip.Prefix) bool {
+            if (!pfx.isValid()) {
+                return false;
+            }
+
+            // canonicalize the prefix
+            const canonical_pfx = pfx.masked();
+
+            const is4 = canonical_pfx.addr().is4();
+            const n = self.rootNodeByVersionConst(is4);
+
+            return n.overlapsPrefixAtDepth(canonical_pfx, 0);
+        }
+
+        /// Overlaps reports whether any IP in the table is matched by a route in the
+        /// other table or vice versa.
+        /// Go BART: func (t *Table[V]) Overlaps(o *Table[V]) bool
+        pub fn overlaps(self: *const Self, other: *const Self) bool {
+            return self.overlaps4(other) or self.overlaps6(other);
+        }
+
+        /// Overlaps4 reports whether any IPv4 in the table matches a route in the
+        /// other table or vice versa.
+        /// Go BART: func (t *Table[V]) Overlaps4(o *Table[V]) bool
+        pub fn overlaps4(self: *const Self, other: *const Self) bool {
+            if (self.size4_count == 0 or other.size4_count == 0) {
+                return false;
+            }
+            return self.root4.overlaps(&other.root4, 0);
+        }
+
+        /// Overlaps6 reports whether any IPv6 in the table matches a route in the
+        /// other table or vice versa.
+        /// Go BART: func (t *Table[V]) Overlaps6(o *Table[V]) bool
+        pub fn overlaps6(self: *const Self, other: *const Self) bool {
+            if (self.size6_count == 0 or other.size6_count == 0) {
+                return false;
+            }
+            return self.root6.overlaps(&other.root6, 0);
         }
 
         /// sizeUpdate, internal helper to update size counters

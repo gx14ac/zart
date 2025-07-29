@@ -27,6 +27,15 @@ pub const Addr = struct {
                std.mem.eql(u8, self.octets[10..12], &[_]u8{0xff, 0xff});
     }
     
+    /// Go BART: func (ip Addr) Prefix(int) netip.Prefix
+    /// Create a prefix from this address with the specified prefix length
+    pub fn prefix(self: *const Addr, prefix_len: u8) Prefix {
+        return Prefix{
+            .address = self.*,
+            .prefix_len = prefix_len,
+        };
+    }
+    
     /// Initialize from IPv4 address (mapped to IPv6)
     pub fn fromIPv4(a: u8, b: u8, c: u8, d: u8) Addr {
         return Addr{
@@ -95,6 +104,52 @@ pub const Prefix = struct {
             const prefix_masked = prefix_octets[full_bytes] & mask;
             const ip_masked = ip_octets[full_bytes] & mask;
             if (prefix_masked != ip_masked) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    /// Check if this prefix contains the IP address of another prefix
+    /// Used in LookupPrefixLPM for leaf node containment check
+    pub fn containsAddr(self: *const Prefix, other_prefix: *const Prefix) bool {
+        return self.contains(&other_prefix.address);
+    }
+    
+    /// Check if this prefix length is greater than another
+    pub fn bitsGreaterThan(self: *const Prefix, other_bits: u8) bool {
+        return self.prefix_len > other_bits;
+    }
+    
+    /// Go BART: func (p Prefix) Overlaps(other netip.Prefix) bool
+    /// Check if this prefix overlaps with another prefix
+    pub fn overlaps(self: *const Prefix, other: *const Prefix) bool {
+        // Two prefixes overlap if they have a common network portion
+        // Use the shorter prefix length to determine the comparison scope
+        const min_bits = @min(self.prefix_len, other.prefix_len);
+        
+        // Compare network portions using the shorter prefix length
+        const self_octets = self.address.asSlice();
+        const other_octets = other.address.asSlice();
+        
+        // Calculate how many complete bytes and remaining bits to check
+        const full_bytes = min_bits / 8;
+        const remaining_bits = min_bits % 8;
+        
+        // Check complete bytes
+        if (full_bytes > 0) {
+            if (!std.mem.eql(u8, self_octets[0..full_bytes], other_octets[0..full_bytes])) {
+                return false;
+            }
+        }
+        
+        // Check remaining bits in the last byte
+        if (remaining_bits > 0 and full_bytes < self_octets.len) {
+            const mask = (@as(u8, 0xFF) << @intCast(8 - remaining_bits));
+            const self_masked = self_octets[full_bytes] & mask;
+            const other_masked = other_octets[full_bytes] & mask;
+            if (self_masked != other_masked) {
                 return false;
             }
         }
