@@ -891,6 +891,18 @@ pub fn Table(comptime V: type) type {
 
             @panic("unreachable");
         }
+
+        /// Go BART: func (t *Table[V]) Union(o *Table[V])
+        /// Union merges all routes from another table into this table.
+        /// The values are cloned before merging.
+        /// Routes that exist in both tables are overwritten with values from the other table.
+        pub fn Union(self: *Self, other: *const Self) !void {
+            const dup4 = try self.root4.unionRec(&other.root4, 0);
+            const dup6 = try self.root6.unionRec(&other.root6, 0);
+
+            self.size4_count += other.size4_count - @as(i32, @intCast(dup4));
+            self.size6_count += other.size6_count - @as(i32, @intCast(dup6));
+        }
     };
 }
 

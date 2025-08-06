@@ -467,7 +467,8 @@ pub fn Node(comptime V: type) type {
                 c.prefixes = prefixes_copy.*;
                 allocator.destroy(prefixes_copy);
                 
-                if (@hasDecl(V, "clone")) {
+                const type_info = @typeInfo(V);
+                if (type_info == .@"struct" and @hasDecl(V, "clone")) {
                     const items = c.prefixes.Items();
                     for (items) |*item| {
                         item.* = cloneOrCopy(V, item.*);
@@ -1312,68 +1313,188 @@ pub fn Node(comptime V: type) type {
             return true;
         }
 
-        /// unionRec recursively merges other node into this node.
-        /// Returns the number of duplicate prefixes found.
-        /// Go BART: func (n *node[V]) unionRec(o *node[V], depth int) (duplicates uint32)
+        /// Go BART: func (n *node[V]) unionRec(o *node[V], depth int) (duplicates int)
+        /// unionRec merges another node into this node recursively.
+        /// The values are cloned before merging.
         pub fn unionRec(self: *Self, other: *const Self, depth: u8) !u32 {
             var duplicates: u32 = 0;
-            
-            // Go BART: for all prefixes in other node do ...
-            var other_prefix_buf: [256]u8 = undefined;
-            const other_indices = other.prefixes.AsSlice(&other_prefix_buf);
-            
-            for (other_indices, 0..) |o_idx, i| {
-                // Go BART: clone/copy the value from other node at idx
-                const other_value = other.prefixes.Items()[i];
-                const cloned_val = cloneOrCopy(V, other_value);
+
+            // for all prefixes in other node do ...
+            var buf: [256]u8 = undefined;
+            const other_prefix_indices = other.prefixes.AsSlice(&buf);
+            for (other.prefixes.Items(), 0..) |other_val, i| {
+                const other_idx = other_prefix_indices[i];
                 
-                // Go BART: insert/overwrite cloned value from o into n
-                // Go BART: if n.prefixes.InsertAt(oIdx, clonedVal)
-                if (self.prefixes.Test(o_idx)) {
-                    // Go BART: this prefix is duplicate in n and o
+                // clone/copy the value from other node at idx
+                const cloned_val = cloneOrCopy(V, other_val);
+
+                // insert/overwrite cloned value from other into self
+                if (try self.prefixes.insertAt(other_idx, cloned_val)) {
+                    // this prefix is duplicate in self and other
                     duplicates += 1;
                 }
-                _ = try self.prefixes.insertAt(o_idx, cloned_val);
             }
-            
-            // Go BART: for all child addrs in other node do ...
-            var other_children_buf: [256]u8 = undefined;
-            const other_child_addrs = other.children.AsSlice(&other_children_buf);
-            
-            for (other_child_addrs) |addr| {
-                const other_child = other.children.mustGet(addr);
-                
-                // Go BART: if !n.children.Test(addr)
-                if (!self.children.Test(addr)) {
-                    // Go BART: child node with this addr missing in n, clone
-                    const cloned_child = try cloneChild(other_child, self.allocator);
-                    _ = try self.children.insertAt(addr, cloned_child);
-                } else {
-                    // Go BART: n and o have child node with same addr, merge both child nodes
-                    const self_child = self.children.mustGet(addr);
-                    
-                    switch (self_child) {
-                        .node => |self_node| {
-                            switch (other_child) {
-                                .node => |other_node| {
-                                    // Go BART: both are nodes, recursively merge
-                                    duplicates += try self_node.unionRec(other_node, depth + 1);
-                                },
-                                else => {
-                                    // Go BART: self is node, other is leaf/fringe - complex merge needed
-                                    // For now, prioritize self's existing structure
-                                },
-                            }
+
+            // for all child addrs in other node do ...
+            var child_buf: [256]u8 = undefined;
+            const other_child_indices = other.children.AsSlice(&child_buf);
+            for (other.children.Items(), 0..) |other_child, i| {
+                const addr = other_child_indices[i];
+
+                // try to get child at same addr from self
+                const this_child_result = self.children.Get(addr);
+                if (!this_child_result.ok) { 
+                    // NULL, ... slot at addr is empty
+                    switch (other_child) {
+                        .node => |other_node| { // NULL, node
+                            const cloned_node = try other_node.cloneRec(self.allocator);
+                            _ = try self.children.insertAt(addr, Self.ChildNode{ .node = cloned_node });
+                            continue;
                         },
-                        else => {
-                            // Go BART: self is leaf/fringe - replace with other if it's more specific
-                            const cloned_child = try cloneChild(other_child, self.allocator);
-                            _ = try self.children.insertAt(addr, cloned_child);
+                        .leaf => |other_leaf| { // NULL, leaf
+                            const cloned_leaf = try other_leaf.cloneLeaf(self.allocator);
+                            _ = try self.children.insertAt(addr, Self.ChildNode{ .leaf = cloned_leaf });
+                            continue;
+                        },
+                        .fringe => |other_fringe| { // NULL, fringe
+                            const cloned_fringe = try other_fringe.cloneFringe(self.allocator);
+                            _ = try self.children.insertAt(addr, Self.ChildNode{ .fringe = cloned_fringe });
+                            continue;
                         },
                     }
                 }
+
+                // Process the combinations when both slots have children
+                const this_child = this_child_result.value;
+                // TODO: Implement the 9 combinations processing
+                // For now, handle the simple case
+                switch (this_child) {
+                    .node => |this_node| {
+                        switch (other_child) {
+                            .node => |other_node| { // node, node
+                                duplicates += try this_node.unionRec(other_node, depth + 1);
+                            },
+                            .leaf => |other_leaf| { // node, leaf
+                                const cloned_leaf = try other_leaf.cloneLeaf(self.allocator);
+                                if (try this_node.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                    duplicates += 1;
+                                }
+                            },
+                            .fringe => |other_fringe| { // node, fringe
+                                const cloned_fringe = try other_fringe.cloneFringe(self.allocator);
+                                if (try this_node.prefixes.insertAt(1, cloned_fringe.value)) {
+                                    duplicates += 1;
+                                }
+                            },
+                        }
+                    },
+                    .leaf => |this_leaf| { // leaf, ...
+                        switch (other_child) {
+                            .node => |other_node| { // leaf, node
+                                // create new node
+                                const nc = try self.allocator.create(Self);
+                                nc.* = Self.init(self.allocator);
+
+                                // push this leaf down
+                                _ = try nc.insertAtDepth(this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
+
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+
+                                // unionRec this new node with other kid node
+                                const cloned_other_node = try other_node.cloneRec(self.allocator);
+                                duplicates += try nc.unionRec(cloned_other_node, depth + 1);
+                            },
+                            .leaf => |other_leaf| { // leaf, leaf
+                                // shortcut, prefixes are equal
+                                if (this_leaf.prefix.eql(&other_leaf.prefix)) {
+                                    this_leaf.value = cloneOrCopy(V, other_leaf.value);
+                                    duplicates += 1;
+                                    continue;
+                                }
+
+                                // create new node
+                                const nc = try self.allocator.create(Self);
+                                nc.* = Self.init(self.allocator);
+
+                                // push this leaf down
+                                _ = try nc.insertAtDepth(this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
+
+                                // insert at depth cloned leaf, maybe duplicate
+                                const cloned_leaf = try other_leaf.cloneLeaf(self.allocator);
+                                if (try nc.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                    duplicates += 1;
+                                }
+
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                            },
+                            .fringe => |other_fringe| { // leaf, fringe
+                                // create new node
+                                const nc = try self.allocator.create(Self);
+                                nc.* = Self.init(self.allocator);
+
+                                // push this leaf down
+                                _ = try nc.insertAtDepth(this_leaf.prefix, this_leaf.value, depth + 1, self.allocator);
+
+                                // push this cloned fringe down, it becomes the default route
+                                const cloned_fringe = try other_fringe.cloneFringe(self.allocator);
+                                if (try nc.prefixes.insertAt(1, cloned_fringe.value)) {
+                                    duplicates += 1;
+                                }
+
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                            },
+                        }
+                    },
+                    .fringe => |this_fringe| { // fringe, ...
+                        switch (other_child) {
+                            .node => |other_node| { // fringe, node
+                                // create new node
+                                const nc = try self.allocator.create(Self);
+                                nc.* = Self.init(self.allocator);
+
+                                // push this fringe down, it becomes the default route
+                                if (try nc.prefixes.insertAt(1, this_fringe.value)) {
+                                    // This shouldn't be a duplicate, but follow Go BART logic
+                                }
+
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+
+                                // unionRec this new node with other kid node
+                                const cloned_other_node = try other_node.cloneRec(self.allocator);
+                                duplicates += try nc.unionRec(cloned_other_node, depth + 1);
+                            },
+                            .leaf => |other_leaf| { // fringe, leaf
+                                // create new node
+                                const nc = try self.allocator.create(Self);
+                                nc.* = Self.init(self.allocator);
+
+                                // push this fringe down, it becomes the default route
+                                if (try nc.prefixes.insertAt(1, this_fringe.value)) {
+                                    // This shouldn't be a duplicate, but follow Go BART logic
+                                }
+
+                                // push this cloned leaf down
+                                const cloned_leaf = try other_leaf.cloneLeaf(self.allocator);
+                                if (try nc.insertAtDepth(cloned_leaf.prefix, cloned_leaf.value, depth + 1, self.allocator)) {
+                                    duplicates += 1;
+                                }
+
+                                // insert the new node at current addr
+                                _ = try self.children.insertAt(addr, Self.ChildNode{ .node = nc });
+                            },
+                            .fringe => |other_fringe| { // fringe, fringe
+                                this_fringe.value = cloneOrCopy(V, other_fringe.value);
+                                duplicates += 1;
+                            },
+                        }
+                    },
+                }
             }
-            
+
             return duplicates;
         }
 

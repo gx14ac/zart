@@ -313,6 +313,59 @@ pub fn main() !void {
     
     std.debug.print("\n🎉 **ZART Demonstration Completed Successfully!**\n", .{});
     std.debug.print("✅ Complete memory safety achieved\n", .{});
+
+    // 🧪 **Union機能のテスト**
+    std.debug.print("\n🧪 **Testing Union Functionality**\n", .{});
+    std.debug.print("===========================================\n", .{});
+    
+    var union_table1 = Table(u32).init(allocator);
+    defer union_table1.deinit();
+    
+    var union_table2 = Table(u32).init(allocator);
+    defer union_table2.deinit();
+    
+    // Table1にいくつかのプレフィックスを追加
+    const pfx_10_0_0_0 = Prefix.fromIPv4(10, 0, 0, 0, 8);
+    const pfx_192_168_1_0 = Prefix.fromIPv4(192, 168, 1, 0, 24);
+    
+    union_table1.insert(&pfx_10_0_0_0, 100);
+    union_table1.insert(&pfx_192_168_1_0, 200);
+    
+    std.debug.print("Table1 before union: size4={}, size6={}\n", .{union_table1.size4(), union_table1.size6()});
+    
+    // Table2にいくつかのプレフィックスを追加（一部重複）
+    const pfx_10_0_0_0_dup = Prefix.fromIPv4(10, 0, 0, 0, 8); // 重複
+    const pfx_172_16_0_0 = Prefix.fromIPv4(172, 16, 0, 0, 12);
+    
+    union_table2.insert(&pfx_10_0_0_0_dup, 300); // 重複、値が異なる
+    union_table2.insert(&pfx_172_16_0_0, 400);
+    
+    std.debug.print("Table2 before union: size4={}, size6={}\n", .{union_table2.size4(), union_table2.size6()});
+    
+    // Union実行
+    std.debug.print("Executing union_table1.Union(&union_table2)...\n", .{});
+    try union_table1.Union(&union_table2);
+    
+    std.debug.print("Table1 after union: size4={}, size6={}\n", .{union_table1.size4(), union_table1.size6()});
+    
+    // 結果確認
+    if (union_table1.get(&pfx_10_0_0_0)) |val| {
+        std.debug.print("10.0.0.0/8 -> {} (should be 300, from table2)\n", .{val});
+    }
+    
+    if (union_table1.get(&pfx_192_168_1_0)) |val| {
+        std.debug.print("192.168.1.0/24 -> {} (should be 200, from table1)\n", .{val});
+    }
+    
+    if (union_table1.get(&pfx_172_16_0_0)) |val| {
+        std.debug.print("172.16.0.0/12 -> {} (should be 400, from table2)\n", .{val});
+    }
+    
+    std.debug.print("✅ Union test completed\n", .{});
+    std.debug.print("  Expected total size: 3 (10.0.0.0/8 merged + 192.168.1.0/24 + 172.16.0.0/12)\n", .{});
+    std.debug.print("  Actual total size: {}\n", .{union_table1.size4()});
+    
+    std.debug.print("\n", .{});
 }
 
 /// Simple insert benchmark using standard BART API only
