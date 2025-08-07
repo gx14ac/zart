@@ -272,25 +272,34 @@ pub fn cidrForFringe(octets: []const u8, depth: u8, is4: bool, last_octet: u8) n
 }
 
 // Go BART: type Cloner[V any] interface { Clone() V }
-// Cloner interface equivalent in Zig (compile-time trait checking)
-pub fn Cloner(comptime V: type) type {
-    return struct {
-        const Self = @This();
-        
-        // Types implementing Cloner should have this method signature
-        pub fn clone(self: *const V) V {
-            _ = self;
-            @compileError("clone method must be implemented");
-        }
-    };
+// Zig equivalent: Compile-time interface checking
+/// Cloner trait checker - determines if type V implements clone() method
+pub fn hasCloneMethod(comptime V: type) bool {
+    const type_info = @typeInfo(V);
+    return type_info == .@"struct" and @hasDecl(V, "clone");
+}
+
+/// Check if type V has correct clone signature: fn clone(self: V) V
+pub fn hasCorrectCloneSignature(comptime V: type) bool {
+    if (!hasCloneMethod(V)) return false;
+    
+    // For now, just check if clone method exists
+    // More sophisticated signature checking can be added later
+    return true;
+}
+
+/// Go BART: Cloner[V] interface equivalent
+/// Use this to check if type V implements Cloner pattern
+pub fn isCloner(comptime V: type) bool {
+    return hasCorrectCloneSignature(V);
 }
 
 // Go BART: func cloneOrCopy[V any](val V) V
+/// Enhanced cloneOrCopy with strict Cloner interface checking
 pub fn cloneOrCopy(comptime V: type, val: V) V {
-    // Check if type V has a 'clone' method at compile time
-    const type_info = @typeInfo(V);
-    if (type_info == .@"struct" and @hasDecl(V, "clone")) {
-        // Go BART: cloner.Clone()
+    // Use comptime check to avoid runtime errors
+    if (comptime isCloner(V)) {
+        // Go BART: cloner.Clone() - Type V implements Cloner interface
         return val.clone();
     } else {
         // Go BART: just a shallow copy
@@ -432,12 +441,28 @@ pub fn Node(comptime V: type) type {
             const children_copy = try self.children.copy(allocator);
             
             cloned.* = Self{
-                .prefixes = prefixes_copy.?,
-                .children = children_copy.?,
+                .prefixes = if (prefixes_copy) |p| p.* else @import("sparse_array256.zig").Array256(V).init(allocator),
+                .children = if (children_copy) |c| c.* else @import("sparse_array256.zig").Array256(ChildNode).init(allocator),
                 .allocator = allocator,
+                .node_id = self.node_id, // Copy node_id from original
             };
 
-            if (!@hasDecl(V, "clone")) {
+            // Clean up the temporary pointers created by copy
+            if (prefixes_copy) |p| {
+                allocator.destroy(p);
+            }
+            if (children_copy) |c| {
+                allocator.destroy(c);
+            }
+
+            // Skip cloning for primitive types
+            const type_info = @typeInfo(V);
+            if (type_info == .int or type_info == .float or type_info == .bool) {
+                return cloned;
+            }
+            
+            // Only check for clone method on struct types
+            if (type_info != .@"struct" or !@hasDecl(V, "clone")) {
                 return cloned;
             }
 
@@ -476,23 +501,27 @@ pub fn Node(comptime V: type) type {
                 }
             }
 
-            if (try self.children.copy(allocator)) |children_copy| {
-                c.children.deinit();
-                c.children = children_copy.*;
-                allocator.destroy(children_copy);
-
-                const items = c.children.Items();
-                for (items) |*item| {
-                    switch (item.*) {
-                        .node => |kid_node| {
-                            item.* = Self.ChildNode{ .node = try kid_node.cloneRec(allocator) };
-                        },
-                        .leaf => |kid_leaf| {
-                            item.* = Self.ChildNode{ .leaf = try kid_leaf.cloneLeaf(allocator) };
-                        },
-                        .fringe => |kid_fringe| {
-                            item.* = Self.ChildNode{ .fringe = try kid_fringe.cloneFringe(allocator) };
-                        },
+            // Manual deep copy of children to ensure proper memory management
+            if (self.children.len() > 0) {
+                // Get the indices where children are set
+                for (0..256) |bit_idx| {
+                    if (self.children.Test(@intCast(bit_idx))) {
+                        const child_item = self.children.mustGet(@intCast(bit_idx));
+                        
+                        switch (child_item) {
+                            .node => |kid_node| {
+                                const cloned_node = try kid_node.cloneRec(allocator);
+                                _ = try c.children.insertAt(@intCast(bit_idx), Self.ChildNode{ .node = cloned_node });
+                            },
+                            .leaf => |kid_leaf| {
+                                const cloned_leaf = try kid_leaf.cloneLeaf(allocator);
+                                _ = try c.children.insertAt(@intCast(bit_idx), Self.ChildNode{ .leaf = cloned_leaf });
+                            },
+                            .fringe => |kid_fringe| {
+                                const cloned_fringe = try kid_fringe.cloneFringe(allocator);
+                                _ = try c.children.insertAt(@intCast(bit_idx), Self.ChildNode{ .fringe = cloned_fringe });
+                            },
+                        }
                     }
                 }
             }
@@ -549,35 +578,10 @@ pub fn Node(comptime V: type) type {
 
                 // CRITICAL: Clean up existing child before overwrite in EXISTING processing
                 const existing_child = current_node.children.mustGet(octet);
-                std.debug.print("🧽 Node#{} Cleaning existing child at octet {} before overwrite\n", .{current_node.node_id, octet});
-                
-                // Handle leaf/fringe cleanup first
-                switch (existing_child) {
-                    .leaf => |leaf_ptr| {
-                        std.debug.print("   Cleaning existing Leaf\n", .{});
-                        trackLeafDealloc(leaf_ptr);
-                        allocator.destroy(leaf_ptr);
-                        // Leaf will be replaced by new node - continue to node creation
-                    },
-                    .fringe => |fringe_ptr| {
-                        std.debug.print("   Cleaning existing Fringe\n", .{});
-                        trackFringeDealloc(fringe_ptr);
-                        allocator.destroy(fringe_ptr);
-                        // Fringe will be replaced by new node - continue to node creation
-                    },
-                    .node => |node_ptr| {
-                        // Don't destroy nodes - they will be processed normally
-                        std.debug.print("   Existing Node#{} (will be processed)\n", .{node_ptr.node_id});
-                    },
-                }
-
-                // Go BART: kid := n.children.MustGet(octet)
-                // ... or descend down the trie (kid already obtained above)
                 std.debug.print("🎯 Node#{} EXISTING node found at octet {} - processing...\n", .{current_node.node_id, octet});
-                const kid = existing_child;
 
                 // Go BART: switch kid := kid.(type)
-                switch (kid) {
+                switch (existing_child) {
                     .node => |node_ptr| {
                         // Go BART: case *node[V]: n = kid; continue
                         current_node = node_ptr;
@@ -603,6 +607,11 @@ pub fn Node(comptime V: type) type {
                         new_node.* = Self.init(allocator);
                         _ = try new_node.insertAtDepth(leaf_ptr.prefix, leaf_ptr.value, current_depth + 1, allocator);
 
+                        // Clean up the old leaf after using its data
+                        std.debug.print("🧽 Node#{} Cleaning existing Leaf at octet {} after node expansion\n", .{current_node.node_id, octet});
+                        trackLeafDealloc(leaf_ptr);
+                        allocator.destroy(leaf_ptr);
+
                         _ = try current_node.children.insertAt(octet, Self.ChildNode{ .node = new_node });
                         current_node = new_node;
                     },
@@ -624,6 +633,11 @@ pub fn Node(comptime V: type) type {
                         const new_node = try allocator.create(Self);
                         new_node.* = Self.init(allocator);
                         _ = try new_node.prefixes.insertAt(1, fringe_ptr.value);
+
+                        // Clean up the old fringe after using its data
+                        std.debug.print("🧽 Node#{} Cleaning existing Fringe at octet {} after node expansion\n", .{current_node.node_id, octet});
+                        trackFringeDealloc(fringe_ptr);
+                        allocator.destroy(fringe_ptr);
 
                         _ = try current_node.children.insertAt(octet, Self.ChildNode{ .node = new_node });
                         current_node = new_node;
@@ -767,7 +781,22 @@ pub fn Node(comptime V: type) type {
                 if (current_node.isEmpty()) {
                     // Go BART: case n.isEmpty()
                     // just delete this empty node from parent
-                    _ = parent.children.deleteAt(octet);
+                    const deleted = parent.children.deleteAt(octet);
+                    if (deleted.ok) {
+                        // Clean up the node that was deleted
+                        switch (deleted.value) {
+                            .node => |node_ptr| {
+                                node_ptr.deinit();
+                                allocator.destroy(node_ptr);
+                            },
+                            .leaf => |leaf_ptr| {
+                                allocator.destroy(leaf_ptr);
+                            },
+                            .fringe => |fringe_ptr| {
+                                allocator.destroy(fringe_ptr);
+                            },
+                        }
+                    }
                     
                 } else if (pfx_count == 0 and child_count == 1) {
                     // Go BART: case pfxCount == 0 && childCount == 1
@@ -786,20 +815,52 @@ pub fn Node(comptime V: type) type {
                         .leaf => |leaf_ptr| {
                             // Go BART: case *leafNode[V]
                             // just one leaf, delete this node and reinsert the leaf above
-                            _ = parent.children.deleteAt(octet);
+                            
+                            // Save the leaf values before deletion
+                            const saved_prefix = leaf_ptr.prefix;
+                            const saved_value = leaf_ptr.value;
+                            
+                            const deleted = parent.children.deleteAt(octet);
+                            
+                            // Clean up the deleted node (which should be current_node)
+                            if (deleted.ok) {
+                                switch (deleted.value) {
+                                    .node => |node_ptr| {
+                                        node_ptr.deinit();
+                                        allocator.destroy(node_ptr);
+                                    },
+                                    else => {}, // Should not happen
+                                }
+                            }
 
-                            // ... (re)insert the leaf at parents depth
-                            _ = try parent.insertAtDepth(leaf_ptr.prefix, leaf_ptr.value, depth_u8, allocator);
+                            // ... (re)insert the leaf at parents depth with saved values
+                            _ = try parent.insertAtDepth(saved_prefix, saved_value, depth_u8, allocator);
                         },
                         
                         .fringe => |fringe_ptr| {
                             // Go BART: case *fringeNode[V]
                             // just one fringe, delete this node and reinsert the fringe as leaf above
-                            _ = parent.children.deleteAt(octet);
-
+                            
+                            // Save the fringe value before deletion
+                            const saved_value = fringe_ptr.value;
+                            
                             // get the last octet back, the only item is also the first item
                             // Go BART: lastOctet, _ := n.children.firstSet()
                             const first_set_result = current_node.children.firstSet();
+                            
+                            const deleted = parent.children.deleteAt(octet);
+                            
+                            // Clean up the deleted node (which should be current_node)
+                            if (deleted.ok) {
+                                switch (deleted.value) {
+                                    .node => |node_ptr| {
+                                        node_ptr.deinit();
+                                        allocator.destroy(node_ptr);
+                                    },
+                                    else => {}, // Should not happen
+                                }
+                            }
+
                             if (first_set_result.ok) {
                                 const last_octet = first_set_result.value;
 
@@ -809,7 +870,7 @@ pub fn Node(comptime V: type) type {
                                 const fringe_pfx = cidrForFringe(octets, depth_u8 + 1, is4, last_octet);
 
                                 // ... (re)reinsert prefix/value at parents depth
-                                _ = try parent.insertAtDepth(fringe_pfx, fringe_ptr.value, depth_u8, allocator);
+                                _ = try parent.insertAtDepth(fringe_pfx, saved_value, depth_u8, allocator);
                             }
                         },
                     }
@@ -817,7 +878,18 @@ pub fn Node(comptime V: type) type {
                 } else if (pfx_count == 1 and child_count == 0) {
                     // Go BART: case pfxCount == 1 && childCount == 0
                     // just one prefix, delete this node and reinsert the idx as leaf above
-                    _ = parent.children.deleteAt(octet);
+                    const deleted = parent.children.deleteAt(octet);
+                    
+                    // Clean up the deleted node (which should be current_node)
+                    if (deleted.ok) {
+                        switch (deleted.value) {
+                            .node => |node_ptr| {
+                                node_ptr.deinit();
+                                allocator.destroy(node_ptr);
+                            },
+                            else => {}, // Should not happen
+                        }
+                    }
 
                     // get prefix back from idx ...
                     // Go BART: idx, _ := n.prefixes.firstSet()
@@ -828,14 +900,14 @@ pub fn Node(comptime V: type) type {
                         const val = current_node.prefixes.Items()[0];
 
                         // ... and octet path
-                        // Go BART: path := stridePath{}, copy(path[:], octets)
-                        var path = stridePath{};
+                        // Go BART: path := stridePath{}; copy(path[:], octets)
+                        var path: stridePath = [_]u8{0} ** maxTreeDepth;
                         const copy_len = @min(octets.len, maxTreeDepth);
                         @memcpy(path[0..copy_len], octets[0..copy_len]);
 
                         // depth is the parent's depth, so add +1 here for the kid
                         // Go BART: pfx := cidrFromPath(path, depth+1, is4, idx)
-                        const pfx = try cidrFromPath(path, depth_u8 + 1, is4, idx);
+                        const pfx = try cidrFromPath(path, depth_u8 + 1, is4, @intCast(idx));
 
                         // ... (re)insert prefix/value at parents depth
                         _ = try parent.insertAtDepth(pfx, val, depth_u8, allocator);

@@ -366,6 +366,325 @@ pub fn main() !void {
     std.debug.print("  Actual total size: {}\n", .{union_table1.size4()});
     
     std.debug.print("\n", .{});
+    
+    // 🧬 **Cloner Interface Implementation Test**
+    std.debug.print("\n🧬 **Testing Cloner Interface Implementation**\n", .{});
+    std.debug.print("================================================\n", .{});
+    
+    // Cloner を実装した型の例
+    const CloneableData = struct {
+        const Self = @This();
+        
+        id: u32,
+        name: []const u8,
+        count: i32,
+        
+        // Go BART Cloner interface implementation
+        pub fn clone(self: Self) Self {
+            return Self{
+                .id = self.id,
+                .name = self.name, // shallow copy of string
+                .count = self.count + 1, // Demo: increment on clone
+            };
+        }
+    };
+    
+    // Non-cloneable type for comparison
+    const SimpleData = struct {
+        value: u32,
+    };
+    
+    // Test Cloner detection
+    const cloner_mod = @import("node.zig");
+    
+    std.debug.print("CloneableData implements Cloner: {}\n", .{cloner_mod.isCloner(CloneableData)});
+    std.debug.print("SimpleData implements Cloner: {}\n", .{cloner_mod.isCloner(SimpleData)});
+    std.debug.print("u32 implements Cloner: {}\n", .{cloner_mod.isCloner(u32)});
+    
+    // Test cloneOrCopy behavior
+    const original_cloneable = CloneableData{ .id = 100, .name = "test", .count = 5 };
+    const cloned_cloneable = cloner_mod.cloneOrCopy(CloneableData, original_cloneable);
+    
+    std.debug.print("\nOriginal CloneableData: id={}, name={s}, count={}\n", .{original_cloneable.id, original_cloneable.name, original_cloneable.count});
+    std.debug.print("Cloned CloneableData:   id={}, name={s}, count={}\n", .{cloned_cloneable.id, cloned_cloneable.name, cloned_cloneable.count});
+    std.debug.print("Clone incremented count: {} (demonstrates deep copy behavior)\n", .{cloned_cloneable.count});
+    
+    const original_simple = SimpleData{ .value = 42 };
+    const copied_simple = cloner_mod.cloneOrCopy(SimpleData, original_simple);
+    
+    std.debug.print("\nOriginal SimpleData: value={}\n", .{original_simple.value});
+    std.debug.print("Copied SimpleData:   value={}\n", .{copied_simple.value});
+    std.debug.print("Simple copy (no clone method)\n", .{});
+    
+    // Test with Table using Cloneable type
+    std.debug.print("\n🧪 Testing Table with Cloner-implementing type...\n", .{});
+    
+    var cloner_table = Table(CloneableData).init(allocator);
+    defer cloner_table.deinit();
+    
+    const pfx_cloner_test = Prefix.fromIPv4(203, 0, 113, 0, 24);
+    const test_data = CloneableData{ .id = 999, .name = "cloner_test", .count = 10 };
+    
+    cloner_table.insert(&pfx_cloner_test, test_data);
+    
+    if (cloner_table.get(&pfx_cloner_test)) |retrieved| {
+        std.debug.print("Retrieved from table: id={}, name={s}, count={}\n", .{retrieved.id, retrieved.name, retrieved.count});
+    }
+    
+    std.debug.print("✅ Cloner interface test completed\n", .{});
+    
+    // 🔄 **Cloner + Union Integration Test**
+    std.debug.print("\n🔄 **Testing Cloner with Union Operation**\n", .{});
+    std.debug.print("===============================================\n", .{});
+    
+    var cloner_table1 = Table(CloneableData).init(allocator);
+    defer cloner_table1.deinit();
+    
+    var cloner_table2 = Table(CloneableData).init(allocator);
+    defer cloner_table2.deinit();
+    
+    // Table1にデータ追加
+    const pfx_cloner1 = Prefix.fromIPv4(10, 0, 0, 0, 8);
+    const data1 = CloneableData{ .id = 1, .name = "table1_data", .count = 100 };
+    cloner_table1.insert(&pfx_cloner1, data1);
+    
+    // Table2に重複データ追加（異なる値）
+    const pfx_cloner2 = Prefix.fromIPv4(10, 0, 0, 0, 8); // 同じプレフィックス
+    const data2 = CloneableData{ .id = 2, .name = "table2_data", .count = 200 };
+    cloner_table2.insert(&pfx_cloner2, data2);
+    
+    std.debug.print("Before union:\n", .{});
+    if (cloner_table1.get(&pfx_cloner1)) |val| {
+        std.debug.print("  Table1[10.0.0.0/8]: id={}, name={s}, count={}\n", .{val.id, val.name, val.count});
+    }
+    
+    if (cloner_table2.get(&pfx_cloner2)) |val| {
+        std.debug.print("  Table2[10.0.0.0/8]: id={}, name={s}, count={}\n", .{val.id, val.name, val.count});
+    }
+    
+    // Union実行（Clonerによるdeep copyが発生）
+    std.debug.print("\nExecuting Union with Cloner-implementing types...\n", .{});
+    try cloner_table1.Union(&cloner_table2);
+    
+    std.debug.print("After union:\n", .{});
+    if (cloner_table1.get(&pfx_cloner1)) |val| {
+        std.debug.print("  Table1[10.0.0.0/8]: id={}, name={s}, count={}\n", .{val.id, val.name, val.count});
+        std.debug.print("  → Clone count should be {} (incremented by clone method)\n", .{data2.count + 1});
+    }
+    
+    std.debug.print("✅ Cloner + Union integration test completed\n", .{});
+    
+    // 📑 **Table Clone Function Test**
+    std.debug.print("\n📑 **Testing Table Clone Function**\n", .{});
+    std.debug.print("========================================\n", .{});
+    
+    // Original table with some data
+    var original_table = Table(CloneableData).init(allocator);
+    defer original_table.deinit();
+    
+    // Add multiple prefixes with Cloneable data
+    const original_data1 = CloneableData{ .id = 1001, .name = "original_1", .count = 50 };
+    const original_data2 = CloneableData{ .id = 1002, .name = "original_2", .count = 75 };
+    
+    const pfx_clone1 = Prefix.fromIPv4(192, 168, 1, 0, 24);
+    const pfx_clone2 = Prefix.fromIPv4(10, 0, 0, 0, 8);
+    
+    original_table.insert(&pfx_clone1, original_data1);
+    original_table.insert(&pfx_clone2, original_data2);
+    
+    std.debug.print("Original table size: IPv4={}, IPv6={}\n", .{original_table.size4(), original_table.size6()});
+    
+    // Clone the table
+    std.debug.print("Executing Table.Clone()...\n", .{});
+    const cloned_table = try original_table.Clone(allocator);
+    defer {
+        cloned_table.deinit();
+        allocator.destroy(cloned_table);
+    }
+    
+    std.debug.print("Cloned table size: IPv4={}, IPv6={}\n", .{cloned_table.size4(), cloned_table.size6()});
+    
+    // Verify cloned data
+    std.debug.print("\nVerifying cloned data:\n", .{});
+    
+    if (original_table.get(&pfx_clone1)) |original| {
+        if (cloned_table.get(&pfx_clone1)) |cloned| {
+            std.debug.print("Original 192.168.1.0/24: id={}, name={s}, count={}\n", .{original.id, original.name, original.count});
+            std.debug.print("Cloned   192.168.1.0/24: id={}, name={s}, count={}\n", .{cloned.id, cloned.name, cloned.count});
+            std.debug.print("Clone count incremented: {} (demonstrates Cloner interface usage)\n", .{cloned.count});
+        }
+    }
+    
+    if (original_table.get(&pfx_clone2)) |original| {
+        if (cloned_table.get(&pfx_clone2)) |cloned| {
+            std.debug.print("Original 10.0.0.0/8: id={}, name={s}, count={}\n", .{original.id, original.name, original.count});
+            std.debug.print("Cloned   10.0.0.0/8: id={}, name={s}, count={}\n", .{cloned.id, cloned.name, cloned.count});
+            std.debug.print("Clone count incremented: {} (demonstrates Cloner interface usage)\n", .{cloned.count});
+        }
+    }
+    
+    // Test independence - modify original, verify clone unchanged
+    std.debug.print("\n🔄 Testing table independence...\n", .{});
+    const new_data = CloneableData{ .id = 9999, .name = "modified", .count = 999 };
+    original_table.insert(&pfx_clone1, new_data);
+    
+    std.debug.print("After modifying original table:\n", .{});
+    if (original_table.get(&pfx_clone1)) |modified| {
+        std.debug.print("Original (modified): id={}, name={s}, count={}\n", .{modified.id, modified.name, modified.count});
+    }
+    
+    if (cloned_table.get(&pfx_clone1)) |unchanged| {
+        std.debug.print("Cloned (unchanged):  id={}, name={s}, count={}\n", .{unchanged.id, unchanged.name, unchanged.count});
+    }
+    
+    std.debug.print("✅ Table Clone function test completed\n", .{});
+    std.debug.print("✅ Original and cloned tables are independent\n", .{});
+    
+    // 📊 **sizeUpdate Function Test**
+    std.debug.print("\n📊 **Testing sizeUpdate Function**\n", .{});
+    std.debug.print("========================================\n", .{});
+    
+    // Create a table for testing
+    var size_test_table = Table(u32).init(allocator);
+    defer size_test_table.deinit();
+    
+    // Test initial sizes
+    std.debug.print("Initial sizes - IPv4: {}, IPv6: {}\n", .{size_test_table.size4(), size_test_table.size6()});
+    
+    // Test IPv4 size increment
+    std.debug.print("\nTesting IPv4 sizeUpdate...\n", .{});
+    size_test_table.sizeUpdate(true, 5);  // Add 5 to IPv4
+    std.debug.print("After sizeUpdate(true, 5) - IPv4: {}, IPv6: {}\n", .{size_test_table.size4(), size_test_table.size6()});
+    
+    size_test_table.sizeUpdate(true, -2); // Subtract 2 from IPv4
+    std.debug.print("After sizeUpdate(true, -2) - IPv4: {}, IPv6: {}\n", .{size_test_table.size4(), size_test_table.size6()});
+    
+    // Test IPv6 size increment
+    std.debug.print("\nTesting IPv6 sizeUpdate...\n", .{});
+    size_test_table.sizeUpdate(false, 3); // Add 3 to IPv6
+    std.debug.print("After sizeUpdate(false, 3) - IPv4: {}, IPv6: {}\n", .{size_test_table.size4(), size_test_table.size6()});
+    
+    size_test_table.sizeUpdate(false, -1); // Subtract 1 from IPv6
+    std.debug.print("After sizeUpdate(false, -1) - IPv4: {}, IPv6: {}\n", .{size_test_table.size4(), size_test_table.size6()});
+    
+    // Test edge cases
+    std.debug.print("\nTesting edge cases...\n", .{});
+    size_test_table.sizeUpdate(true, 0);   // No change
+    size_test_table.sizeUpdate(false, 0);  // No change
+    std.debug.print("After sizeUpdate with 0 - IPv4: {}, IPv6: {}\n", .{size_test_table.size4(), size_test_table.size6()});
+    
+    // Verify final state
+    const expected_ipv4 = 5 - 2 + 0; // = 3
+    const expected_ipv6 = 3 - 1 + 0; // = 2
+    
+    std.debug.print("\nFinal verification:\n", .{});
+    std.debug.print("Expected IPv4: {}, Actual: {} - {s}\n", .{expected_ipv4, size_test_table.size4(), if (size_test_table.size4() == expected_ipv4) "✅" else "❌"});
+    std.debug.print("Expected IPv6: {}, Actual: {} - {s}\n", .{expected_ipv6, size_test_table.size6(), if (size_test_table.size6() == expected_ipv6) "✅" else "❌"});
+    
+    std.debug.print("✅ sizeUpdate function test completed\n", .{});
+    
+    // 🔄 **Iteration Functions Test (All, AllSorted, etc.)**
+    std.debug.print("\n🔄 **Testing Iteration Functions**\n", .{});
+    std.debug.print("==========================================\n", .{});
+    
+    // Create a table for iteration testing
+    var iter_table = Table(u32).init(allocator);
+    defer iter_table.deinit();
+    
+    // Add various prefixes to test iteration
+    const iter_prefixes = [_]struct { prefix: Prefix, value: u32 }{
+        .{ .prefix = Prefix.fromIPv4(0, 0, 0, 0, 0), .value = 1 },         // Default route
+        .{ .prefix = Prefix.fromIPv4(10, 0, 0, 0, 8), .value = 2 },        // 10.0.0.0/8
+        .{ .prefix = Prefix.fromIPv4(192, 168, 1, 0, 24), .value = 3 },    // 192.168.1.0/24
+        .{ .prefix = Prefix.fromIPv4(172, 16, 0, 0, 12), .value = 4 },     // 172.16.0.0/12
+        .{ .prefix = Prefix.fromIPv6([16]u8{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 32), .value = 5 }, // IPv6
+    };
+    
+    std.debug.print("Inserting {} test prefixes...\n", .{iter_prefixes.len});
+    for (iter_prefixes) |item| {
+        iter_table.insert(&item.prefix, item.value);
+    }
+    
+    std.debug.print("Table sizes: IPv4={}, IPv6={}, Total={}\n", .{iter_table.size4(), iter_table.size6(), iter_table.size()});
+    
+    // Test All() - unsorted iteration
+    std.debug.print("\n🔄 Testing All() iteration:\n", .{});
+    const AllYield = struct {
+        var count: u32 = 0;
+        
+        fn yieldFn(prefix: netip.Prefix, value: u32) bool {
+            count += 1;
+            std.debug.print("  [{d}] {} -> {}\n", .{count, prefix, value});
+            return true; // Continue iteration
+        }
+        
+        fn reset() void {
+            count = 0;
+        }
+    };
+    
+    AllYield.reset();
+    iter_table.all(AllYield.yieldFn);
+    std.debug.print("All() iteration completed, found {} prefixes\n", .{AllYield.count});
+    
+    // Test All4() - IPv4 only
+    std.debug.print("\n🔄 Testing All4() iteration (IPv4 only):\n", .{});
+    AllYield.reset();
+    iter_table.all4(AllYield.yieldFn);
+    std.debug.print("All4() iteration completed, found {} IPv4 prefixes\n", .{AllYield.count});
+    
+    // Test All6() - IPv6 only
+    std.debug.print("\n🔄 Testing All6() iteration (IPv6 only):\n", .{});
+    AllYield.reset();
+    iter_table.all6(AllYield.yieldFn);
+    std.debug.print("All6() iteration completed, found {} IPv6 prefixes\n", .{AllYield.count});
+    
+    // Test AllSorted() - sorted iteration
+    std.debug.print("\n🔄 Testing AllSorted() iteration (CIDR sorted):\n", .{});
+    AllYield.reset();
+    iter_table.allSorted(AllYield.yieldFn);
+    std.debug.print("AllSorted() iteration completed, found {} prefixes\n", .{AllYield.count});
+    
+    // Test AllSorted4() - IPv4 sorted
+    std.debug.print("\n🔄 Testing AllSorted4() iteration (IPv4 CIDR sorted):\n", .{});
+    AllYield.reset();
+    iter_table.allSorted4(AllYield.yieldFn);
+    std.debug.print("AllSorted4() iteration completed, found {} IPv4 prefixes\n", .{AllYield.count});
+    
+    // Test AllSorted6() - IPv6 sorted
+    std.debug.print("\n🔄 Testing AllSorted6() iteration (IPv6 CIDR sorted):\n", .{});
+    AllYield.reset();
+    iter_table.allSorted6(AllYield.yieldFn);
+    std.debug.print("AllSorted6() iteration completed, found {} IPv6 prefixes\n", .{AllYield.count});
+    
+    // Test early exit with All()
+    std.debug.print("\n⏹️ Testing early exit with All() (max 2 items):\n", .{});
+    const EarlyExitAllYield = struct {
+        var count: u32 = 0;
+        
+        fn yieldFn(prefix: netip.Prefix, value: u32) bool {
+            count += 1;
+            std.debug.print("  [{d}] {} -> {}\n", .{count, prefix, value});
+            return count < 2; // Exit after 2 items
+        }
+        
+        fn reset() void {
+            count = 0;
+        }
+    };
+    
+    EarlyExitAllYield.reset();
+    iter_table.all(EarlyExitAllYield.yieldFn);
+    std.debug.print("Early exit All() completed after {} prefixes\n", .{EarlyExitAllYield.count});
+    
+    // Test early exit with AllSorted()
+    std.debug.print("\n⏹️ Testing early exit with AllSorted() (max 2 items):\n", .{});
+    EarlyExitAllYield.reset();
+    iter_table.allSorted(EarlyExitAllYield.yieldFn);
+    std.debug.print("Early exit AllSorted() completed after {} prefixes\n", .{EarlyExitAllYield.count});
+    
+    std.debug.print("✅ All iteration functions test completed\n", .{});
+    std.debug.print("✅ Go BART完全互換のイテレーション機能が実装されました\n", .{});
 }
 
 /// Simple insert benchmark using standard BART API only

@@ -140,6 +140,28 @@ pub fn Array256(comptime T: type) type {
             return self.items;
         }
 
+        /// FirstSet result type
+        pub const FirstSetResult = struct {
+            value: u8,
+            ok: bool,
+        };
+
+        /// FirstSet returns the first set bit index (Go BART compatible)
+        pub fn firstSet(self: *const Self) FirstSetResult {
+            if (self.len() == 0) {
+                return .{ .value = 0, .ok = false };
+            }
+
+            // Find first set bit in bitset
+            for (0..256) |i| {
+                if (self.testBit(@intCast(i))) {
+                    return .{ .value = @intCast(i), .ok = true };
+                }
+            }
+
+            return .{ .value = 0, .ok = false };
+        }
+
         /// Copy - Go BART compatible Copy method (Go BART: a.Copy())
         /// Returns a copy of the sparse array if input is non-null, otherwise returns null
         pub fn copy(self: ?*const Self, allocator: std.mem.Allocator) !?*Self {
@@ -182,11 +204,20 @@ pub fn Array256(comptime T: type) type {
             return false;
         }
 
+        /// Result type for DeleteAt (Go BART compatible)
+        pub const DeleteResult = struct {
+            value: T,
+            ok: bool,
+        };
+
         /// DeleteAt a value at i from the sparse array (Go BART: a.DeleteAt(i))
-        /// Returns value and true if existed, zeroes the tail.
-        pub fn deleteAt(self: *Self, i: u8) ?T {
+        /// Returns value and true if existed, zero value and false otherwise.
+        pub fn deleteAt(self: *Self, i: u8) DeleteResult {
+            var zero: T = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+
             if (self.len() == 0 or !self.testBit(i)) {
-                return null;
+                return .{ .value = zero, .ok = false };
             }
 
             const rank_idx = self.rank(i) - 1;
@@ -198,7 +229,7 @@ pub fn Array256(comptime T: type) type {
             // delete from bitset
             self.bitset.clear(i);
 
-            return value;
+            return .{ .value = value, .ok = true };
         }
 
         /// insertItem inserts the item at index i, shift the rest one pos right
