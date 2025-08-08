@@ -1159,6 +1159,20 @@ const GoldTable = struct {
         
         return result;
     }
+    
+    pub fn lookupPfx(self: *const Self, pfx: netip.Prefix) ?i32 {
+        var bestLen: i32 = -1;
+        var result: ?i32 = null;
+        
+        for (self.items.items) |item| {
+            if (item.pfx.overlaps(&pfx) and item.pfx.bits() <= pfx.bits() and item.pfx.bits() > bestLen) {
+                result = item.val;
+                bestLen = @intCast(item.pfx.bits());
+            }
+        }
+        
+        return result;
+    }
 };
 
 // Random number generator (simple XORShift)
@@ -1200,6 +1214,13 @@ fn randomAddr() netip.Addr {
         return randomIP4();
     }
     return randomIP6();
+}
+
+fn randomPrefix() netip.Prefix {
+    if (prng_next() % 2 == 0) {
+        return randomPrefix4();
+    }
+    return randomPrefix6();
 }
 
 fn randomPrefix4() netip.Prefix {
@@ -1384,4 +1405,164 @@ test "TestLookupCompare" {
     }
     
     std.debug.print("🎉 TestLookupCompare passed! V4 distinct routes: {}, V6 distinct routes: {}\n", .{v4_count, v6_count});
+}
+
+// Helper function to create non-canonical prefixes for testing
+fn createPrefix(ip_str: []const u8, bits: u8) netip.Prefix {
+    const addr = netip.Addr.mustParseAddr(ip_str);
+    return netip.Prefix{ .address = addr, .prefix_len = bits };
+}
+
+// Go BART: func TestLookupPrefixUnmasked(t *testing.T)
+test "TestLookupPrefixUnmasked" {
+    // Test that the pfx must not be masked on input for LookupPrefix
+    
+    var rt = Table(void).init(testing.allocator);
+    defer rt.deinit();
+    
+    const pfx = mpp("10.20.30.0/24");
+    rt.insert(&pfx, {});
+    
+    // Test cases with non-normalized prefixes
+    const TestCase = struct {
+        probe: netip.Prefix,
+        want_lpm: netip.Prefix,
+        want_ok: bool,
+    };
+    
+    const tests = [_]TestCase{
+        TestCase{
+            .probe = createPrefix("10.20.30.40", 0),
+            .want_lpm = netip.Prefix{ .address = netip.Addr{ .octets = std.mem.zeroes([16]u8) }, .prefix_len = 0 },
+            .want_ok = false,
+        },
+        TestCase{
+            .probe = createPrefix("10.20.30.40", 23),
+            .want_lpm = netip.Prefix{ .address = netip.Addr{ .octets = std.mem.zeroes([16]u8) }, .prefix_len = 0 },
+            .want_ok = false,
+        },
+        TestCase{
+            .probe = createPrefix("10.20.30.40", 24),
+            .want_lpm = mpp("10.20.30.0/24"),
+            .want_ok = true,
+        },
+        TestCase{
+            .probe = createPrefix("10.20.30.40", 25),
+            .want_lpm = mpp("10.20.30.0/24"),
+            .want_ok = true,
+        },
+        TestCase{
+            .probe = createPrefix("10.20.30.40", 32),
+            .want_lpm = mpp("10.20.30.0/24"),
+            .want_ok = true,
+        },
+    };
+    
+    for (tests) |tc| {
+        // Test LookupPrefix
+        const lookup_result = rt.lookupPrefix(&tc.probe);
+        if (lookup_result.ok != tc.want_ok) {
+            std.debug.print("LookupPrefix non canonical prefix ({any}), got: {}, want: {}\n", .{ tc.probe, lookup_result.ok, tc.want_ok });
+            try expect(false);
+        }
+        
+        // Test LookupPrefixLPM
+        const lpm_result = rt.lookupPrefixLPM(&tc.probe);
+        if (lpm_result.ok != tc.want_ok) {
+            std.debug.print("LookupPrefixLPM non canonical prefix ({any}), got: {}, want: {}\n", .{ tc.probe, lpm_result.ok, tc.want_ok });
+            try expect(false);
+        }
+        
+        // Compare LPM prefix if found
+        if (tc.want_ok) {
+            // Compare prefixes (addr and bits)
+            if (!std.mem.eql(u8, &lpm_result.lpm_prefix.addr().octets, &tc.want_lpm.addr().octets) or
+                lpm_result.lpm_prefix.bits() != tc.want_lpm.bits()) {
+                std.debug.print("LookupPrefixLPM non canonical prefix ({any}), got: {any}, want: {any}\n", .{ tc.probe, lpm_result.lpm_prefix, tc.want_lpm });
+                try expect(false);
+            }
+        }
+    }
+    
+    std.debug.print("🎉 TestLookupPrefixUnmasked passed!\n", .{});
+}
+
+// Go BART: func TestLookupPrefixCompare(t *testing.T)
+test "TestLookupPrefixCompare" {
+    // Create large route tables repeatedly, and compare Table's behavior to a naive and slow but correct implementation.
+    const pfx_count = 10_000;
+
+    const pfx_items = try randomPrefixes(testing.allocator, pfx_count);
+    defer testing.allocator.free(pfx_items);
+
+    var fast = Table(i32).init(testing.allocator);
+    defer fast.deinit();
+
+    var gold = GoldTable.init(testing.allocator);
+    defer gold.deinit();
+
+    // Insert all prefixes into both tables
+    try gold.insertMany(pfx_items);
+    for (pfx_items) |pfx_item| {
+        fast.insert(&pfx_item.pfx, pfx_item.val);
+    }
+
+    var seen_vals4 = std.AutoHashMap(i32, bool).init(testing.allocator);
+    defer seen_vals4.deinit();
+    
+    var seen_vals6 = std.AutoHashMap(i32, bool).init(testing.allocator);
+    defer seen_vals6.deinit();
+
+    // Perform 10,000 random prefix lookups
+    for (0..10_000) |_| {
+        const pfx = randomPrefix();
+
+        const gold_result = gold.lookupPfx(pfx);
+        const fast_result = fast.lookupPrefix(&pfx);
+
+        // Compare results - both should return the same value and ok status
+        if (gold_result == null and fast_result.ok) {
+            std.debug.print("❌ MISMATCH: LookupPrefix({any}) = ({}, {}), want (null, false)\n", .{ pfx, fast_result.value, fast_result.ok });
+            try expect(false); // Force failure
+        }
+        
+        if (gold_result != null and !fast_result.ok) {
+            std.debug.print("❌ MISMATCH: LookupPrefix({any}) = ({}, {}), want ({}, true)\n", .{ pfx, fast_result.value, fast_result.ok, gold_result.? });
+            try expect(false); // Force failure
+        }
+        
+        if (gold_result != null and fast_result.ok) {
+            if (gold_result.? != fast_result.value) {
+                std.debug.print("❌ VALUE MISMATCH: LookupPrefix({any}) = ({}, {}), want ({}, true)\n", .{ pfx, fast_result.value, fast_result.ok, gold_result.? });
+                try expect(false); // Force failure
+            }
+        }
+
+        // Track distinct values seen
+        if (fast_result.ok) {
+            if (!pfx.addr().is4()) {
+                try seen_vals6.put(fast_result.value, true);
+            } else {
+                try seen_vals4.put(fast_result.value, true);
+            }
+        }
+    }
+
+    // Empirically, 10k probes into 5k v4 prefixes and 5k v6 prefixes results in
+    // ~1k distinct values for v4 and ~300 for v6. This sanity check that we didn't
+    // just return a single route for everything should be very generous indeed.
+    const v4_count = seen_vals4.count();
+    const v6_count = seen_vals6.count();
+    
+    if (v4_count < 10) {
+        std.debug.print("saw {} distinct v4 route results, statistically expected ~1000\n", .{v4_count});
+        try expect(false);
+    }
+    
+    if (v6_count < 10) {
+        std.debug.print("saw {} distinct v6 route results, statistically expected ~300\n", .{v6_count});
+        try expect(false);
+    }
+    
+    std.debug.print("🎉 TestLookupPrefixCompare passed! V4 distinct routes: {}, V6 distinct routes: {}\n", .{v4_count, v6_count});
 }
