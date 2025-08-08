@@ -122,8 +122,8 @@ pub const BitSet256 = struct {
     }
 
     // 指定されたインデックス位置より前にある、セットされているビットの個数を数える（ランク操作）
-    pub fn rank(self: *const Self, idx: u8) u8 {
-        var rnk: u8 = 0;
+    pub fn rank(self: *const Self, idx: u8) u16 {
+        var rnk: u16 = 0;
         rnk += @popCount(self.data[0] & rankMask[idx][0]);
         rnk += @popCount(self.data[1] & rankMask[idx][1]);
         rnk += @popCount(self.data[2] & rankMask[idx][2]);

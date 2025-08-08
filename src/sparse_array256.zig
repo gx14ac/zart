@@ -50,15 +50,15 @@ pub fn Array256(comptime T: type) type {
             return self.bitset.testBitSet256(i);
         }
 
-        /// Get rank of bit i (Go BART: a.Rank(i))
-        pub fn rank(self: *const Self, i: u8) u8 {
-            return self.bitset.rank(i);
-        }
+            /// Get rank of bit i (Go BART: a.Rank(i))
+    pub fn rank(self: *const Self, i: u8) u16 {
+        return self.bitset.rank(i);
+    }
 
-        /// Rank - Go BART compatible version (Go BART: a.Rank(i))
-        pub fn Rank(self: *const Self, i: u8) u8 {
-            return self.bitset.rank(i);
-        }
+    /// Rank - Go BART compatible version (Go BART: a.Rank(i))
+    pub fn Rank(self: *const Self, i: u8) u16 {
+        return self.bitset.rank(i);
+    }
 
         /// Get the value at i from sparse array with optional return (convenience method)
         pub fn get(self: *const Self, i: u8) ?T {

@@ -2043,31 +2043,13 @@ test "unionRec fringe-fringe case" {
     // Create two nodes with fringe children at same address
     var node1 = TestNode.init(testing.allocator);
     defer {
-        // Clean up children manually
-        const items = node1.children.Items();
-        for (items) |*item| {
-            switch (item.*) {
-                .fringe => |fringe_node| {
-                    testing.allocator.destroy(fringe_node);
-                },
-                else => {},
-            }
-        }
+        // deinit() will handle all children cleanup automatically
         node1.deinit();
     }
     
     var node2 = TestNode.init(testing.allocator);
     defer {
-        // Clean up children manually
-        const items = node2.children.Items();
-        for (items) |*item| {
-            switch (item.*) {
-                .fringe => |fringe_node| {
-                    testing.allocator.destroy(fringe_node);
-                },
-                else => {},
-            }
-        }
+        // deinit() will handle all children cleanup automatically
         node2.deinit();
     }
     
@@ -2106,35 +2088,13 @@ test "unionRec complex children combinations" {
     // Create nodes with leaf children for NULL, leaf case
     var node1 = TestNode.init(testing.allocator);
     defer {
-        // Clean up children manually
-        const items = node1.children.Items();
-        for (items) |*item| {
-            switch (item.*) {
-                .leaf => |leaf_node| {
-                    testing.allocator.destroy(leaf_node);
-                },
-                .node => |child_node| {
-                    child_node.deinit();
-                    testing.allocator.destroy(child_node);
-                },
-                else => {},
-            }
-        }
+        // deinit() will handle all children cleanup automatically
         node1.deinit();
     }
     
     var node2 = TestNode.init(testing.allocator);
     defer {
-        // Clean up children manually
-        const items = node2.children.Items();
-        for (items) |*item| {
-            switch (item.*) {
-                .leaf => |leaf_node| {
-                    testing.allocator.destroy(leaf_node);
-                },
-                else => {},
-            }
-        }
+        // deinit() will handle all children cleanup automatically
         node2.deinit();
     }
     
@@ -2297,16 +2257,7 @@ test "eachSubnet with complex children" {
     // Create test node with children for more complex testing
     var node = TestNode.init(testing.allocator);
     defer {
-        // Clean up children manually
-        const items = node.children.Items();
-        for (items) |*item| {
-            switch (item.*) {
-                .leaf => |leaf_node| {
-                    testing.allocator.destroy(leaf_node);
-                },
-                else => {},
-            }
-        }
+        // deinit() will handle all children cleanup automatically
         node.deinit();
     }
     

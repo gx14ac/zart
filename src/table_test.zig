@@ -1099,3 +1099,190 @@ test "TestDeletePersist - path compressed purge" {
     }
     try checkNumNodes(tbl_ptr2, 0);
 }
+
+// Go BART Test Helper: goldTable - simple and slow route table for testing
+const GoldTableItem = struct {
+    pfx: netip.Prefix,
+    val: i32,
+};
+
+const GoldTable = struct {
+    const Self = @This();
+    
+    items: std.ArrayList(GoldTableItem),
+    allocator: std.mem.Allocator,
+    
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return Self{
+            .items = std.ArrayList(GoldTableItem).init(allocator),
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn deinit(self: *Self) void {
+        self.items.deinit();
+    }
+    
+    pub fn insertMany(self: *Self, items: []const GoldTableItem) !void {
+        try self.items.appendSlice(items);
+    }
+    
+    pub fn lookup(self: *const Self, addr: netip.Addr) ?i32 {
+        var bestLen: i32 = -1;
+        var result: ?i32 = null;
+        
+        for (self.items.items) |item| {
+            if (item.pfx.contains(&addr) and item.pfx.bits() > bestLen) {
+                result = item.val;
+                bestLen = @intCast(item.pfx.bits());
+            }
+        }
+        
+        return result;
+    }
+};
+
+// Random number generator (simple XORShift)
+var prng_state: u64 = 42;
+
+fn prng_next() u32 {
+    prng_state ^= prng_state << 13;
+    prng_state ^= prng_state >> 7;
+    prng_state ^= prng_state << 17;
+    return @truncate(prng_state);
+}
+
+fn randomU8() u8 {
+    return @truncate(prng_next());
+}
+
+fn randomU32() u32 {
+    return prng_next();
+}
+
+fn randomIP4() netip.Addr {
+    var b: [4]u8 = undefined;
+    for (&b) |*byte| {
+        byte.* = randomU8();
+    }
+    return netip.Addr.fromIPv4(b[0], b[1], b[2], b[3]);
+}
+
+fn randomIP6() netip.Addr {
+    var b: [16]u8 = undefined;
+    for (&b) |*byte| {
+        byte.* = randomU8();
+    }
+    return netip.Addr.fromIPv6(b);
+}
+
+fn randomAddr() netip.Addr {
+    if (prng_next() % 2 == 0) {
+        return randomIP4();
+    }
+    return randomIP6();
+}
+
+fn randomPrefix4() netip.Prefix {
+    const bits = (prng_next() % 32) + 1; // 1-32, skip default route
+    const a = randomU8();
+    const b = randomU8();
+    const c = randomU8();
+    const d = randomU8();
+    return netip.Prefix.fromIPv4(a, b, c, d, @intCast(bits)).masked();
+}
+
+fn randomPrefix6() netip.Prefix {
+    const bits = (prng_next() % 128) + 1; // 1-128, skip default route  
+    var octets: [16]u8 = undefined;
+    for (&octets) |*byte| {
+        byte.* = randomU8();
+    }
+    return netip.Prefix.fromIPv6(octets, @intCast(bits)).masked();
+}
+
+fn randomPrefixes(allocator: std.mem.Allocator, n: usize) ![]GoldTableItem {
+    const items = try allocator.alloc(GoldTableItem, n);
+    const pfx4_count = n / 2;
+    
+    // Generate IPv4 prefixes
+    for (0..pfx4_count) |i| {
+        items[i] = GoldTableItem{
+            .pfx = randomPrefix4(),
+            .val = @bitCast(randomU32()),
+        };
+    }
+    
+    // Generate IPv6 prefixes
+    for (pfx4_count..n) |i| {
+        items[i] = GoldTableItem{
+            .pfx = randomPrefix6(),
+            .val = @bitCast(randomU32()),
+        };
+    }
+    
+    return items;
+}
+
+// Go BART: func TestContainsCompare(t *testing.T)
+test "TestContainsCompare" {
+    const Table = @import("table.zig").Table;
+    
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    std.debug.print("\n🧪 **TestContainsCompare**\n", .{});
+    std.debug.print("==========================\n", .{});
+    
+    // Create large route tables repeatedly, and compare Table's behavior to a naive and slow but correct implementation.
+    const pfx_count = 10_000;
+    std.debug.print("🔄 Generating {} random prefixes...\n", .{pfx_count});
+    
+    const pfxs = try randomPrefixes(allocator, pfx_count);
+    defer allocator.free(pfxs);
+    
+    var gold = GoldTable.init(allocator);
+    defer gold.deinit();
+    try gold.insertMany(pfxs);
+    
+    var fast = Table(i32).init(allocator);
+    defer fast.deinit();
+    
+    std.debug.print("🏗️ Building Tables...\n", .{});
+    for (pfxs) |pfx_item| {
+        fast.insert(&pfx_item.pfx, pfx_item.val);
+    }
+    
+    std.debug.print("🔍 Comparing {} random lookups...\n", .{pfx_count});
+    
+    var success_count: usize = 0;
+    var total_tests: usize = 0;
+    
+    for (0..pfx_count) |_| {
+        const a = randomAddr();
+        
+        const gold_result = gold.lookup(a);
+        const fast_result = fast.contains(&a);
+        
+        const gold_ok = gold_result != null;
+        const fast_ok = fast_result;
+        
+        total_tests += 1;
+        
+        if (gold_ok == fast_ok) {
+            success_count += 1;
+        } else {
+            std.debug.print("❌ Contains mismatch for {}: fast={}, gold={}\n", .{a, fast_ok, gold_ok});
+            return error.ContainsMismatch;
+        }
+        
+        // Progress indicator
+        if (total_tests % 1000 == 0) {
+            std.debug.print("✅ {}/{} tests passed\n", .{success_count, total_tests});
+        }
+    }
+    
+    std.debug.print("🎉 All {}/{} Contains tests passed!\n", .{success_count, total_tests});
+    std.debug.print("📊 Table size: IPv4={}, IPv6={}\n", .{fast.size4(), fast.size6()});
+}
