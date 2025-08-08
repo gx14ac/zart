@@ -2,7 +2,10 @@
 // Go BART compatible test helpers and functions
 
 const std = @import("std");
+const testing = std.testing;
+const expect = testing.expect;
 const netip = @import("netip.zig");
+const Table = @import("table.zig").Table;
 
 // Go BART: var mpa = netip.MustParseAddr
 // Parse IP address from string and panic if invalid
@@ -74,7 +77,7 @@ test "Test MyInt Cloner interface" {
 // Go BART: func TestInvalid(t *testing.T)
 // Test invalid input handling for all table methods
 test "TestInvalid - Insert and Get" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -94,7 +97,7 @@ test "TestInvalid - Insert and Get" {
 }
 
 test "TestInvalid - Contains and Lookup" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -116,7 +119,7 @@ test "TestInvalid - Contains and Lookup" {
 }
 
 test "TestInvalid - Prefix Operations" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -185,7 +188,7 @@ fn checkRoutes(tbl: anytype, tests: []const TableTest) !void {
 
 // Go BART: func TestInsert(t *testing.T)
 test "TestInsert - IPv4 Basic Operations" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -274,7 +277,7 @@ test "Test netip.Prefix.masked()" {
 
 // Debug ZART routing problem  
 test "Debug ZART Routing Problem" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -308,7 +311,7 @@ test "Debug ZART Routing Problem" {
 
 // Go BART: func TestInsertPersist(t *testing.T)
 test "TestInsertPersist - IPv4 Basic Operations" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -433,7 +436,7 @@ test "TestInsertPersist - IPv4 Basic Operations" {
 
 // Go BART: func TestDelete(t *testing.T)
 test "TestDelete - table_is_empty" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -455,7 +458,7 @@ test "TestDelete - table_is_empty" {
 }
 
 test "TestDelete - prefix_in_root" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -486,7 +489,7 @@ test "TestDelete - prefix_in_root" {
 }
 
 test "TestDelete - prefix_in_leaf" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -517,7 +520,7 @@ test "TestDelete - prefix_in_leaf" {
 }
 
 test "TestDelete - intermediate_no_routes" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -551,7 +554,7 @@ test "TestDelete - intermediate_no_routes" {
 }
 
 test "TestDelete - intermediate_with_route" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -589,7 +592,7 @@ test "TestDelete - intermediate_with_route" {
 }
 
 test "TestDelete - intermediate_many_leaves" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -627,7 +630,7 @@ test "TestDelete - intermediate_many_leaves" {
 }
 
 test "TestDelete - nosuchprefix_missing_child" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -658,7 +661,7 @@ test "TestDelete - nosuchprefix_missing_child" {
 }
 
 test "TestDelete - intermediate_with_deleted_route" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -692,7 +695,7 @@ test "TestDelete - intermediate_with_deleted_route" {
 }
 
 test "TestDelete - default_route" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -718,7 +721,7 @@ test "TestDelete - default_route" {
 }
 
 test "TestDelete - path compressed purge" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -745,7 +748,7 @@ test "TestDelete - path compressed purge" {
 
 // Go BART: func TestDeletePersist(t *testing.T)
 test "TestDeletePersist - table_is_empty" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -771,7 +774,7 @@ test "TestDeletePersist - table_is_empty" {
 }
 
 test "TestDeletePersist - prefix_in_root" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -806,7 +809,7 @@ test "TestDeletePersist - prefix_in_root" {
 }
 
 test "TestDeletePersist - prefix_in_leaf" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -841,7 +844,7 @@ test "TestDeletePersist - prefix_in_leaf" {
 }
 
 test "TestDeletePersist - intermediate_no_routes" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -879,7 +882,7 @@ test "TestDeletePersist - intermediate_no_routes" {
 }
 
 test "TestDeletePersist - intermediate_with_route" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -921,7 +924,7 @@ test "TestDeletePersist - intermediate_with_route" {
 }
 
 test "TestDeletePersist - intermediate_many_leaves" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -963,7 +966,7 @@ test "TestDeletePersist - intermediate_many_leaves" {
 }
 
 test "TestDeletePersist - nosuchprefix_missing_child" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -998,7 +1001,7 @@ test "TestDeletePersist - nosuchprefix_missing_child" {
 }
 
 test "TestDeletePersist - intermediate_with_deleted_route" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -1036,7 +1039,7 @@ test "TestDeletePersist - intermediate_with_deleted_route" {
 }
 
 test "TestDeletePersist - default_route" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -1067,7 +1070,7 @@ test "TestDeletePersist - default_route" {
 }
 
 test "TestDeletePersist - path compressed purge" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -1124,7 +1127,23 @@ const GoldTable = struct {
     }
     
     pub fn insertMany(self: *Self, items: []const GoldTableItem) !void {
-        try self.items.appendSlice(items);
+        for (items) |new_item| {
+            // Check if prefix already exists and update it
+            var found = false;
+            for (self.items.items) |*existing_item| {
+                // Compare prefix equality (addr and bits)
+                if (std.mem.eql(u8, &new_item.pfx.addr().octets, &existing_item.pfx.addr().octets) and
+                    new_item.pfx.bits() == existing_item.pfx.bits()) {
+                    existing_item.val = new_item.val; // Update existing value
+                    found = true;
+                    break;
+                }
+            }
+            // If not found, add new item
+            if (!found) {
+                try self.items.append(new_item);
+            }
+        }
     }
     
     pub fn lookup(self: *const Self, addr: netip.Addr) ?i32 {
@@ -1226,7 +1245,7 @@ fn randomPrefixes(allocator: std.mem.Allocator, n: usize) ![]GoldTableItem {
 
 // Go BART: func TestContainsCompare(t *testing.T)
 test "TestContainsCompare" {
-    const Table = @import("table.zig").Table;
+
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -1285,4 +1304,84 @@ test "TestContainsCompare" {
     
     std.debug.print("🎉 All {}/{} Contains tests passed!\n", .{success_count, total_tests});
     std.debug.print("📊 Table size: IPv4={}, IPv6={}\n", .{fast.size4(), fast.size6()});
+}
+
+// Go BART: func TestLookupCompare(t *testing.T)
+test "TestLookupCompare" {
+    // Create large route tables repeatedly, and compare Table's behavior to a naive and slow but correct implementation.
+    const pfx_count = 10_000;
+
+    const pfx_items = try randomPrefixes(testing.allocator, pfx_count);
+    defer testing.allocator.free(pfx_items);
+
+    var fast = Table(i32).init(testing.allocator);
+    defer fast.deinit();
+
+    var gold = GoldTable.init(testing.allocator);
+    defer gold.deinit();
+
+    // Insert all prefixes into both tables
+    try gold.insertMany(pfx_items);
+    for (pfx_items) |pfx_item| {
+        fast.insert(&pfx_item.pfx, pfx_item.val);
+    }
+
+    var seen_vals4 = std.AutoHashMap(i32, bool).init(testing.allocator);
+    defer seen_vals4.deinit();
+    
+    var seen_vals6 = std.AutoHashMap(i32, bool).init(testing.allocator);
+    defer seen_vals6.deinit();
+
+    // Perform 10,000 random lookups
+    for (0..10_000) |_| {
+        const a = randomAddr();
+
+        const gold_result = gold.lookup(a);
+        const fast_result = fast.lookup(&a);
+
+        // Compare results - both should return the same value and ok status
+        if (gold_result == null and fast_result.ok) {
+            std.debug.print("❌ MISMATCH: Lookup({any}) = ({}, {}), want (null, false)\n", .{ a, fast_result.value, fast_result.ok });
+            try expect(false); // Force failure
+        }
+        
+        if (gold_result != null and !fast_result.ok) {
+            std.debug.print("❌ MISMATCH: Lookup({any}) = ({}, {}), want ({}, true)\n", .{ a, fast_result.value, fast_result.ok, gold_result.? });
+            try expect(false); // Force failure
+        }
+        
+        if (gold_result != null and fast_result.ok) {
+            if (gold_result.? != fast_result.value) {
+                std.debug.print("❌ VALUE MISMATCH: Lookup({any}) = ({}, {}), want ({}, true)\n", .{ a, fast_result.value, fast_result.ok, gold_result.? });
+                try expect(false); // Force failure
+            }
+        }
+
+        // Track distinct values seen
+        if (fast_result.ok) {
+            if (!a.is4()) {
+                try seen_vals6.put(fast_result.value, true);
+            } else {
+                try seen_vals4.put(fast_result.value, true);
+            }
+        }
+    }
+
+    // Empirically, 10k probes into 5k v4 prefixes and 5k v6 prefixes results in
+    // ~1k distinct values for v4 and ~300 for v6. This sanity check that we didn't
+    // just return a single route for everything should be very generous indeed.
+    const v4_count = seen_vals4.count();
+    const v6_count = seen_vals6.count();
+    
+    if (v4_count < 10) {
+        std.debug.print("saw {} distinct v4 route results, statistically expected ~1000\n", .{v4_count});
+        try expect(false);
+    }
+    
+    if (v6_count < 10) {
+        std.debug.print("saw {} distinct v6 route results, statistically expected ~300\n", .{v6_count});
+        try expect(false);
+    }
+    
+    std.debug.print("🎉 TestLookupCompare passed! V4 distinct routes: {}, V6 distinct routes: {}\n", .{v4_count, v6_count});
 }
