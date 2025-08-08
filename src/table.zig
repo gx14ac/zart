@@ -474,8 +474,32 @@ pub fn Table(comptime V: type) type {
                         continue;
                     };
 
-                    // calculate the lpmPfx from incoming ip and new mask
-                    const lpm_pfx = ip.prefix(pfx_len);
+                    // Reconstruct the actual LMP prefix from the matched index and depth
+                    // Get the octet and prefix len from the top_idx
+                    const idx_to_pfx_result = base_index.idxToPfx256(top_idx) catch {
+                        if (depth == 0) break;
+                        depth -= 1;
+                        continue;
+                    };
+                    
+                    // Reconstruct the actual prefix address
+                    var lpm_addr_octets = std.mem.zeroes([16]u8);
+                    if (current_depth < octets.len) {
+                        // Copy the octets up to current_depth from the original IP
+                        @memcpy(lpm_addr_octets[0..current_depth], octets[0..current_depth]);
+                        // Set the reconstructed octet at current_depth
+                        lpm_addr_octets[current_depth] = idx_to_pfx_result.octet;
+                    }
+                    
+                    const lpm_addr = if (ip.is4()) 
+                        netip.Addr.fromIPv4(lpm_addr_octets[0], lpm_addr_octets[1], lpm_addr_octets[2], lpm_addr_octets[3])
+                    else 
+                        netip.Addr.fromIPv6(lpm_addr_octets);
+                    
+                    const lpm_pfx = lpm_addr.prefix(pfx_len);
+                    
+
+                    
                     return .{ .lpm_prefix = lpm_pfx, .value = val, .ok = true };
                 }
 

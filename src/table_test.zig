@@ -1173,6 +1173,38 @@ const GoldTable = struct {
         
         return result;
     }
+    
+    // Go BART: func (t *goldTable[V]) lookupPfxLPM(pfx netip.Prefix) (lmp netip.Prefix, val V, ok bool)
+    pub const LookupPfxLPMResult = struct {
+        lmp_prefix: netip.Prefix,
+        value: i32,
+        ok: bool,
+    };
+    
+    pub fn lookupPfxLPM(self: *const Self, pfx: netip.Prefix) LookupPfxLPMResult {
+        var bestLen: i32 = -1;
+        var result_val: i32 = 0;
+        var result_lmp = netip.Prefix{ .address = netip.Addr{ .octets = std.mem.zeroes([16]u8) }, .prefix_len = 0 };
+        var found = false;
+        
+        for (self.items.items) |item| {
+            if (item.pfx.overlaps(&pfx) and item.pfx.bits() <= pfx.bits() and item.pfx.bits() > bestLen) {
+                result_val = item.val;
+                result_lmp = item.pfx;
+                found = true;
+                bestLen = @intCast(item.pfx.bits());
+
+            }
+        }
+        
+
+        
+        return LookupPfxLPMResult{
+            .lmp_prefix = result_lmp,
+            .value = result_val,
+            .ok = found,
+        };
+    }
 };
 
 // Random number generator (simple XORShift)
@@ -1566,3 +1598,95 @@ test "TestLookupPrefixCompare" {
     
     std.debug.print("🎉 TestLookupPrefixCompare passed! V4 distinct routes: {}, V6 distinct routes: {}\n", .{v4_count, v6_count});
 }
+
+// Go BART: func TestLookupPrefixLPMCompare(t *testing.T)
+test "TestLookupPrefixLPMCompare" {
+    // Create large route tables repeatedly, and compare Table's behavior to a naive and slow but correct implementation.
+    const pfx_count = 10_000;
+
+    const pfx_items = try randomPrefixes(testing.allocator, pfx_count);
+    defer testing.allocator.free(pfx_items);
+
+    var fast = Table(i32).init(testing.allocator);
+    defer fast.deinit();
+
+    var gold = GoldTable.init(testing.allocator);
+    defer gold.deinit();
+
+    // Insert all prefixes into both tables
+    try gold.insertMany(pfx_items);
+    for (pfx_items) |pfx_item| {
+        fast.insert(&pfx_item.pfx, pfx_item.val);
+    }
+
+    var seen_vals4 = std.AutoHashMap(i32, bool).init(testing.allocator);
+    defer seen_vals4.deinit();
+    
+    var seen_vals6 = std.AutoHashMap(i32, bool).init(testing.allocator);
+    defer seen_vals6.deinit();
+
+    // Perform 10,000 random prefix LPM lookups
+    for (0..10_000) |_| {
+        const pfx = randomPrefix();
+
+        const gold_result = gold.lookupPfxLPM(pfx);
+        const fast_result = fast.lookupPrefixLPM(&pfx);
+
+        // Compare value results - both should return the same value and ok status
+        if (gold_result.ok != fast_result.ok) {
+            std.debug.print("❌ OK MISMATCH: LookupPrefixLPM({any}) = ({}, {}), want ({}, {})\n", .{ pfx, fast_result.value, fast_result.ok, gold_result.value, gold_result.ok });
+            try expect(false); // Force failure
+        }
+        
+        if (gold_result.ok and fast_result.ok) {
+            if (gold_result.value != fast_result.value) {
+                std.debug.print("❌ VALUE MISMATCH: LookupPrefixLPM({any}) = ({}, {}), want ({}, {})\n", .{ pfx, fast_result.value, fast_result.ok, gold_result.value, gold_result.ok });
+                try expect(false); // Force failure
+            }
+        }
+
+        // Compare LMP prefix results
+        if (gold_result.ok != fast_result.ok) {
+            std.debug.print("❌ LMP OK MISMATCH: LookupPrefixLPM({any}) lmp = ({any}, {}), want ({any}, {})\n", .{ pfx, fast_result.lpm_prefix, fast_result.ok, gold_result.lmp_prefix, gold_result.ok });
+            try expect(false); // Force failure
+        }
+        
+        if (gold_result.ok and fast_result.ok) {
+            // Compare prefix addresses and bits
+            if (!std.mem.eql(u8, &gold_result.lmp_prefix.addr().octets, &fast_result.lpm_prefix.addr().octets) or
+                gold_result.lmp_prefix.bits() != fast_result.lpm_prefix.bits()) {
+                std.debug.print("❌ LMP PREFIX MISMATCH: LookupPrefixLPM({any}) lmp = ({any}, {}), want ({any}, {})\n", .{ pfx, fast_result.lpm_prefix, fast_result.ok, gold_result.lmp_prefix, gold_result.ok });
+                try expect(false); // Force failure
+            }
+        }
+
+        // Track distinct values seen
+        if (fast_result.ok) {
+            if (!pfx.addr().is4()) {
+                try seen_vals6.put(fast_result.value, true);
+            } else {
+                try seen_vals4.put(fast_result.value, true);
+            }
+        }
+    }
+
+    // Empirically, 10k probes into 5k v4 prefixes and 5k v6 prefixes results in
+    // ~1k distinct values for v4 and ~300 for v6. This sanity check that we didn't
+    // just return a single route for everything should be very generous indeed.
+    const v4_count = seen_vals4.count();
+    const v6_count = seen_vals6.count();
+    
+    if (v4_count < 10) {
+        std.debug.print("saw {} distinct v4 route results, statistically expected ~1000\n", .{v4_count});
+        try expect(false);
+    }
+    
+    if (v6_count < 10) {
+        std.debug.print("saw {} distinct v6 route results, statistically expected ~300\n", .{v6_count});
+        try expect(false);
+    }
+    
+    std.debug.print("🎉 TestLookupPrefixLPMCompare passed! V4 distinct routes: {}, V6 distinct routes: {}\n", .{v4_count, v6_count});
+}
+
+
