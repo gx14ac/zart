@@ -4,3 +4,5 @@
 *.csv
 zig-out/
 .cursor/
+art/
+bart/
