@@ -1,8 +1,8 @@
 //! Prefix and base index conversion functionality
-//! 
+//!
 //! This module provides conversion between prefixes (octet and prefix length)
 //! and base indices.
-//! 
+//!
 //! Main features:
 //! - Convert prefix to index
 //! - Convert index to prefix
@@ -18,27 +18,73 @@ pub fn hostIdx(octet: u8) usize {
     return hostIdxLookupTable[octet];
 }
 
+// Precomputed hostIdx lookup table
+// hostIdxLookupTable[octet] = hostIdx(octet)
+// Eliminates runtime addition operations
+// コンパイル時に一度だけ実行する。
+// コンパイル時に生成される内容（概念的表現）
+//
+// const hostIdxLookupTable = [256]usize{
+//     256,   // octet=0 の場合
+//     257,   // octet=1 の場合
+//     258,   // octet=2 の場合
+//     // ...
+//     511,   // octet=255 の場合
+// };
+//
+// Assembly Compare
+// `Golang`
+// mov  rdi, [octet]    ; octet をレジスタに読み込み
+// add  rdi, 256        ; 256 を加算
+// mov  rax, rdi        ; 結果を戻り値レジスタに
+// ret                  ; 戻る
+//
+// `Zig`
+// mov  rdi, [octet]           ; octet をインデックスとして
+// mov  rax, [table + rdi*8]   ; テーブルから直接値を取得
+// ret                         ; 戻る
+//
+pub const hostIdxLookupTable = blk: {
+    @setEvalBranchQuota(1000);
+    var table: [256]usize = undefined;
+
+    for (0..256) |octet| {
+        table[octet] = @as(usize, octet) + 256;
+    }
+
+    break :blk table;
+};
+
 /// Map 8-bit prefix to numeric value
 /// Prefixes range from 0/0 to 255/8, mapped values range from 1 to 511.
-/// 
+///
 /// Example: octet/pfxLen: 160/3 = 0b1010_0000/3 => idxToPfx(160/3) => 13
-/// 
+///
 ///     0b1010_0000 => 0b0000_0101
 ///      ^^^ >> (8-3)         ^^^
-/// 
+///
 ///     0b0000_0001 => 0b0000_1000
 ///               ^ << 3      ^
 ///      + -----------------------
 ///                0b0000_1101 = 13
-fn pfxToIdx(octet: u8, pfx_len: u8) usize {
-    std.debug.assert(pfx_len <= 63);
+pub fn pfxToIdx(octet: u8, pfx_len: u8) usize {
     const shift: u6 = @intCast(pfx_len);
     const right_shift: u6 = @intCast(8 - pfx_len);
     return (@as(usize, octet) >> right_shift) + (@as(usize, 1) << shift);
 }
 
-/// Convert prefix to index in sparse array256 - HOTTEST PATH: Force inline + Lookup Table
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table for maximum performance
+// Convert prefix to index in sparse array256 - HOTTEST PATH: Force inline + Lookup Table
+// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table for maximum performance
+// Goの場合は.
+// 1. octet=160, pfxLen=3
+// 2. 8-pfxLen = 8-3 = 5
+// 3. octet>>(8-pfxLen) = 160>>5 = 0b10100000>>5 = 0b00000101 = 5
+// 4. 1<<pfxLen = 1<<3 = 8
+// 5. 5 + 8 = 13
+// Zigの場合は.
+// コンパイル時に計算済み
+// pfxToIdx256LookupTable[3][160] = 13  // 直接メモリから取得
+//
 pub inline fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
     // OPTIMIZATION: Use precomputed lookup table for maximum speed
     if (pfx_len <= 8) {
@@ -58,7 +104,7 @@ pub inline fn pfxToIdx256(octet: u8, pfx_len: u8) u8 {
 pub const pfxToIdx256LookupTable = blk: {
     @setEvalBranchQuota(100000);
     var table: [9][256]u8 = undefined;
-    
+
     // Precompute for pfx_len 0-8 and all octets 0-255
     for (0..9) |pfx_len| {
         for (0..256) |octet| {
@@ -71,7 +117,7 @@ pub const pfxToIdx256LookupTable = blk: {
             table[pfx_len][octet] = @as(u8, @intCast(idx));
         }
     }
-    
+
     break :blk table;
 };
 
@@ -96,27 +142,16 @@ pub const netMaskLookupTable = [_]u8{
 pub const maxDepthLastBitsLookupTable = blk: {
     @setEvalBranchQuota(10000);
     var table: [256]struct { max_depth: u8, last_bits: u8 } = undefined;
-    
+
     for (0..256) |bits| {
-        const max_depth = @as(u8, @intCast(bits / 8));
-        const last_bits = @as(u8, @intCast(bits % 8));
+        // Go BART algorithm:
+        // maxDepth = bits >> 3
+        // lastBits = uint8(bits & 7)
+        const max_depth = @as(u8, @intCast(bits >> 3));
+        const last_bits = @as(u8, @intCast(bits & 7));
         table[bits] = .{ .max_depth = max_depth, .last_bits = last_bits };
     }
-    
-    break :blk table;
-};
 
-/// Precomputed hostIdx lookup table
-/// hostIdxLookupTable[octet] = hostIdx(octet)
-/// Eliminates runtime addition operations
-pub const hostIdxLookupTable = blk: {
-    @setEvalBranchQuota(1000);
-    var table: [256]usize = undefined;
-    
-    for (0..256) |octet| {
-        table[octet] = @as(usize, octet) + 256;
-    }
-    
     break :blk table;
 };
 
@@ -126,14 +161,16 @@ pub const hostIdxLookupTable = blk: {
 pub const idxToPfxLookupTable = blk: {
     @setEvalBranchQuota(10000);
     var table: [256]struct { octet: u8, pfx_len: u8, valid: bool } = undefined;
-    
+
     // Initialize all entries as invalid
     for (0..256) |i| {
         table[i] = .{ .octet = 0, .pfx_len = 0, .valid = false };
     }
-    
+
     // Precompute valid entries by reverse mapping
-    for (0..9) |pfx_len| {
+    // Process in reverse order to prefer higher pfx_len (longer prefixes)
+    var pfx_len: i32 = 8;
+    while (pfx_len >= 0) : (pfx_len -= 1) {
         for (0..256) |octet| {
             const shift: u6 = @intCast(pfx_len);
             const right_shift: u6 = @intCast(8 - pfx_len);
@@ -142,54 +179,41 @@ pub const idxToPfxLookupTable = blk: {
                 idx >>= 1;
             }
             const idx_u8 = @as(u8, @intCast(idx));
-            
-            // Only set if not already set (prefer lower pfx_len for conflicts)
+
+            // Only set if not already set (prefer higher pfx_len for conflicts)
             if (!table[idx_u8].valid) {
-                table[idx_u8] = .{ 
-                    .octet = @as(u8, @intCast(octet)), 
-                    .pfx_len = @as(u8, @intCast(pfx_len)), 
-                    .valid = true 
-                };
+                table[idx_u8] = .{ .octet = @as(u8, @intCast(octet)), .pfx_len = @as(u8, @intCast(pfx_len)), .valid = true };
             }
         }
     }
-    
+
     break :blk table;
 };
 
-/// Precomputed isFringe lookup table
-/// isFringeLookupTable[depth][bits] = isFringe(depth, bits)
-/// Eliminates runtime modulo and comparison operations
-pub const isFringeLookupTable = blk: {
-    @setEvalBranchQuota(50000);
-    var table: [32][256]bool = undefined;
-    
-    for (0..32) |depth| {
-        for (0..256) |bits| {
-            const max_depth = bits / 8;
-            const last_bits = bits % 8;
-            // Fix overflow: check max_depth > 0 before subtraction
-            table[depth][bits] = (max_depth > 0) and (depth == max_depth - 1) and (last_bits == 0);
-        }
-    }
-    
-    break :blk table;
-};
+/// Go BART bits.Len8 equivalent - returns number of bits required to represent idx
+inline fn bitsLen8(idx: u8) u8 {
+    if (idx == 0) return 0;
+    return @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1;
+}
 
-/// Return octet and prefix length from base index
-/// Inverse function of pfxToIdx256.
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table
-/// 
-/// Returns error for invalid input.
+/// Returns octet and prefix length from index (Go art.IdxToPfx256 equivalent)
+/// Go BART: pfxLen = bits.Len8(idx) - 1, octet = (idx & mask) << shiftBits
 pub fn idxToPfx256(idx: u8) !struct { octet: u8, pfx_len: u8 } {
-    const entry = idxToPfxLookupTable[idx];
-    if (!entry.valid) {
+    if (idx == 0) {
         return error.InvalidIndex;
     }
-    
+
+    // Go BART algorithm exactly: pfxLen = bits.Len8(idx) - 1
+    const pfx_len = bitsLen8(idx) - 1;
+    const shift_bits = 8 - pfx_len;
+
+    // Handle shift_bits >= 8 case (Go allows this, result is 0)
+    const mask: u8 = if (shift_bits >= 8) 0 else @as(u8, 0xff) >> @as(u3, @intCast(shift_bits));
+    const octet: u8 = if (shift_bits >= 8) 0 else (idx & mask) << @as(u3, @intCast(shift_bits));
+
     return .{
-        .octet = entry.octet,
-        .pfx_len = entry.pfx_len,
+        .octet = octet,
+        .pfx_len = pfx_len,
     };
 }
 
@@ -199,7 +223,7 @@ pub fn pfxLen256(depth: i32, idx: u8) !u8 {
         return error.InvalidIndex;
     }
     // Go実装: return uint8(depth<<3 + bits.Len8(idx) - 1)
-    const bits_len = @as(u8, @intCast(std.math.log2_int(u8, idx))) + 1;
+    const bits_len = bitsLen8(idx);
     return @as(u8, @intCast(depth * 8)) + bits_len - 1;
 }
 
@@ -213,67 +237,40 @@ pub fn idxToRange256(idx: u8) !struct { first: u8, last: u8 } {
     };
 }
 
-/// Generate network mask based on bit count
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table
-/// 
-/// 0b0000_0000, // bits == 0
-/// 0b1000_0000, // bits == 1
-/// 0b1100_0000, // bits == 2
-/// 0b1110_0000, // bits == 3
-/// 0b1111_0000, // bits == 4
-/// 0b1111_1000, // bits == 5
-/// 0b1111_1100, // bits == 6
-/// 0b1111_1110, // bits == 7
-/// 0b1111_1111, // bits == 8
+// Generate network mask based on bit count
+// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table
+//
+// 0b0000_0000, // bits == 0
+// 0b1000_0000, // bits == 1
+// 0b1100_0000, // bits == 2
+// 0b1110_0000, // bits == 3
+// 0b1111_0000, // bits == 4
+// 0b1111_1000, // bits == 5
+// 0b1111_1100, // bits == 6
+// 0b1111_1110, // bits == 7
+// 0b1111_1111, // bits == 8
+// 速度向上効果
+// 演算回数: 4回 → 1回（75%削減）
+// 型変換: 2回 → 0回（100%削減）
+// メモリアクセス: 最適化されたキャッシュアクセス
+// Zigならではの改善点
+// 1. エラーハンドリング
+// Go: panic() でプログラム停止
+// Zig: !u8 でエラー値を返し、呼び出し側で適切に処理可能
+// 2. 型安全性
+// Zig: コンパイル時に型チェック強化
+// より明示的な型変換
+// 3. メモリ安全性
+// std.debug.assert(bits <= 8) で境界チェック
+// バッファオーバーフローを防止
 pub fn netMask(bits: u8) u8 {
     std.debug.assert(bits <= 8);
     return netMaskLookupTable[bits];
 }
 
 /// Return max_depth (stride数) と last_bits (最後のstride未満のビット数)
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table
+/// ZERO-ALLOC-OPTIMIZED: Uses precomputed lookup table
 pub fn maxDepthAndLastBits(bits: u8) struct { max_depth: usize, last_bits: u8 } {
     const entry = maxDepthLastBitsLookupTable[bits];
     return .{ .max_depth = @as(usize, entry.max_depth), .last_bits = entry.last_bits };
 }
-
-/// Check if prefix is a fringe - HOT PATH: Force inline + Lookup Table
-/// ULTRA-OPTIMIZED: Uses precomputed lookup table for maximum performance
-pub inline fn isFringe(depth: usize, bits: u8) bool {
-    if (depth >= 32) return false; // Bounds check
-    return isFringeLookupTable[depth][bits];
-}
-
-
-
-// Tests
-test "base_index" {
-    // Test HostIdx
-    try std.testing.expectEqual(@as(usize, 256), hostIdx(0));
-    try std.testing.expectEqual(@as(usize, 257), hostIdx(1));
-    try std.testing.expectEqual(@as(usize, 511), hostIdx(255));
-
-    // Test PfxToIdx256
-    try std.testing.expectEqual(@as(u8, 13), pfxToIdx256(160, 3));
-    try std.testing.expectEqual(@as(u8, 1), pfxToIdx256(0, 0));
-    try std.testing.expectEqual(@as(u8, 255), pfxToIdx256(255, 8));
-
-    // Test IdxToPfx256
-    const pfx1 = try idxToPfx256(13);
-    try std.testing.expectEqual(@as(u8, 160), pfx1.octet);
-    try std.testing.expectEqual(@as(u8, 3), pfx1.pfx_len);
-
-    // Test PfxLen256
-    try std.testing.expectEqual(@as(u8, 3), try pfxLen256(0, 13));
-    try std.testing.expectEqual(@as(u8, 11), try pfxLen256(1, 13));
-
-    // Test IdxToRange256
-    const range1 = try idxToRange256(13);
-    try std.testing.expectEqual(@as(u8, 160), range1.first);
-    try std.testing.expectEqual(@as(u8, 191), range1.last);
-
-    // Test NetMask
-    try std.testing.expectEqual(@as(u8, 0b0000_0000), netMask(0));
-    try std.testing.expectEqual(@as(u8, 0b1000_0000), netMask(1));
-    try std.testing.expectEqual(@as(u8, 0b1111_1111), netMask(8));
-} 

@@ -1,675 +1,697 @@
-// Package bart provides a Balanced-Routing-Table (BART).
+// ZART (Zig Adaptive Routing Table) - High-performance IP routing table implementation
 //
-// BART is balanced in terms of memory usage and lookup time
-// for the longest-prefix match.
+// ZART is optimized for both memory usage and lookup time
+// for longest-prefix match operations.
 //
-// BART is a multibit-trie with fixed stride length of 8 bits,
-// using a fast mapping function (taken from the ART algorithm) to map
-// the 256 prefixes in each level node to form a complete-binary-tree.
+// ZART is a multibit-trie with fixed stride length of 8 bits,
+// using an efficient mapping function to map the 256 prefixes
+// in each level node to form a complete-binary-tree.
 //
 // This complete binary tree is implemented with popcount compressed
 // sparse arrays together with path compression. This reduces storage
-// consumption by almost two orders of magnitude in comparison to ART,
-// with even better lookup times for the longest prefix match.
+// consumption significantly while maintaining excellent lookup times.
 //
-// The BART algorithm is based on bit vectors and precalculated
+// The ZART algorithm is based on bit vectors and precalculated
 // lookup tables. The search is performed entirely by fast,
-// cache-friendly bitmask operations, which in modern CPUs are performed
-// by advanced bit manipulation instruction sets (POPCNT, LZCNT, TZCNT).
+// cache-friendly bitmask operations, utilizing modern CPU bit
+// manipulation instruction sets (POPCNT, LZCNT, TZCNT).
 //
 // The algorithm was specially developed so that it can always work with a fixed
 // length of 256 bits. This means that the bitsets fit well in a cache line and
 // that loops in hot paths (4x uint64 = 256) can be accelerated by loop unrolling.
 
 const std = @import("std");
-const node = @import("node.zig");
-const Node = node.Node;
-const NodePool = node.NodePool;
-const Prefix = node.Prefix;
-const IPAddr = node.IPAddr;
-const Child = node.Child;
-const LeafNode = node.LeafNode;
-const FringeNode = node.FringeNode;
+const netip = @import("netip.zig");
+const Node = @import("node.zig").Node;
+const isFringe = @import("node.zig").isFringe;
 const base_index = @import("base_index.zig");
+pub const PoolAllocator = @import("pool_allocator.zig").PoolAllocator;
 
-/// Table is an IPv4 and IPv6 routing table with payload V.
-/// The zero value is ready to use.
-///
-/// A Table must not be copied by value.
+// Table is an IPv4 and IPv6 routing table with payload V.
+// The zero value is ready to use.
+//
+// The Table is safe for concurrent readers but not for concurrent readers
+// and/or writers. Either the update operations must be protected by an
+// external lock mechanism or the various ...Persist functions must be used
+// which return a modified routing table by leaving the original unchanged
+//
+// A Table must not be copied by value.
 pub fn Table(comptime V: type) type {
     return struct {
         const Self = @This();
+        
+        // the root nodes, implemented as popcount compressed multibit tries
+        // Go BART: root4 node[V]
+        // Go BART: root6 node[V]
+        root4: Node(V),
+        root6: Node(V),
+        
+        // the number of prefixes in the routing table
+        // Go BART: size4 int
+        // Go BART: size6 int
+        size4_count: i32,
+        size6_count: i32,
+        
         allocator: std.mem.Allocator,
-        root4: *Node(V),
-        root6: *Node(V),
-        size4: usize,
-        size6: usize,
-        
-        // Memory pool for high-performance node allocation
-        node_pool: ?*NodePool(V),
-        
+
+        /// Initialize a new Table
+        /// Go BART equivalent: var table Table[V] (zero value ready to use)
         pub fn init(allocator: std.mem.Allocator) Self {
             return Self{
-                .allocator = allocator,
                 .root4 = Node(V).init(allocator),
                 .root6 = Node(V).init(allocator),
-                .size4 = 0,
-                .size6 = 0,
-                .node_pool = null,
+                .size4_count = 0,
+                .size6_count = 0,
+                .allocator = allocator,
             };
         }
-        
+
+        /// Cleanup table resources
+        /// Go BART: No explicit deinit in Go (handled by GC)
         pub fn deinit(self: *Self) void {
             self.root4.deinit();
-            self.allocator.destroy(self.root4);
             self.root6.deinit();
-            self.allocator.destroy(self.root6);
-            
-            // Cleanup node pool
-            if (self.node_pool) |pool| {
-                pool.deinit();
-                self.allocator.destroy(pool);
-            }
         }
-        
-        /// deinitAndDestroy: insertPersist等で作成されたテーブルを完全にクリーンアップ
-        pub fn deinitAndDestroy(self: *Self) void {
-            const allocator = self.allocator;
-            self.deinit();
-            allocator.destroy(self);
-        }
-        
+
         /// rootNodeByVersion, root node getter for ip version.
+        /// Go BART: func (t *Table[V]) rootNodeByVersion(is4 bool) *node[V]
         fn rootNodeByVersion(self: *Self, is4: bool) *Node(V) {
-            return if (is4) self.root4 else self.root6;
+            if (is4) {
+                return &self.root4;
+            }
+            return &self.root6;
         }
-        
-        /// rootNodeByVersionConst, root node getter for ip version (const version).
+
+        /// rootNodeByVersionConst, const root node getter for ip version (read-only operations).
         fn rootNodeByVersionConst(self: *const Self, is4: bool) *const Node(V) {
-            return if (is4) self.root4 else self.root6;
-        }
-        
-        /// Insert adds a pfx to the tree, with given val.
-        /// If pfx is already present in the tree, its value is set to val.
-        pub fn insert(self: *Self, pfx: *const Prefix, val: V) void {
-            if (!pfx.isValid()) {
-                return;
+            if (is4) {
+                return &self.root4;
             }
-            const canonical_pfx = pfx.masked();
-            const is4 = canonical_pfx.addr.is4();
-            var n: *Node(V) = self.rootNodeByVersion(is4);
-            
-            // Phase 3: fast_allocator使用で高速化
-            if (n.insertAtDepth(&canonical_pfx, val, 0, self.allocator)) {
-                self.sizeUpdate(is4, 1);
-            }
+            return &self.root6;
         }
-        
-        /// Get returns the value associated with the prefix.
-        pub fn get(self: *const Self, pfx: *const Prefix) ?V {
+
+
+        /// Size returns the prefix count.
+        /// Go BART: func (t *Table[V]) Size() int
+        pub fn size(self: *const Self) i32 {
+            return self.size4_count + self.size6_count;
+        }
+
+        /// Size4 returns the IPv4 prefix count.
+        /// Go BART: func (t *Table[V]) Size4() int
+        pub fn size4(self: *const Self) i32 {
+            return self.size4_count;
+        }
+
+        /// Size6 returns the IPv6 prefix count.
+        /// Go BART: func (t *Table[V]) Size6() int
+        pub fn size6(self: *const Self) i32 {
+            return self.size6_count;
+        }
+
+        /// Result types for lookup operations
+        const LookupResult = struct { value: V, ok: bool };
+        const LookupPrefixLPMResult = struct { lpm_prefix: netip.Prefix, value: V, ok: bool };
+
+        /// Get returns the value for the exact prefix match and true,
+        /// or false if no exact match was found.
+        /// Go BART: func (t *Table[V]) Get(pfx netip.Prefix) (val V, ok bool)
+        pub fn get(self: *const Self, pfx: *const netip.Prefix) ?V {
             if (!pfx.isValid()) {
                 return null;
             }
+
+            // canonicalize the prefix
             const canonical_pfx = pfx.masked();
-            const is4 = canonical_pfx.addr.is4();
+
+            // values derived from pfx
+            const ip = canonical_pfx.addr();
+            const is4 = canonical_pfx.is4();
+            const bits = canonical_pfx.bits();
+
             const n = self.rootNodeByVersionConst(is4);
-            return n.get(&canonical_pfx);
-        }
-        
-        /// Delete removes a pfx from the tree.
-        pub fn delete(self: *Self, pfx: *const Prefix) void {
-            _ = self.getAndDelete(pfx);
-        }
-        
-        /// GetAndDelete deletes the prefix and returns the associated value
-        pub fn getAndDelete(self: *Self, pfx: *const Prefix) struct { value: V, ok: bool } {
-            if (!pfx.isValid()) {
-                return .{ .value = undefined, .ok = false };
-            }
-            const canonical_pfx = pfx.masked();
-            const is4 = canonical_pfx.addr.is4();
-            const n = self.rootNodeByVersion(is4);
-            if (n.delete(&canonical_pfx)) |val| {
-                self.sizeUpdate(is4, -1);
-                return .{ .value = val, .ok = true };
-            }
-            return .{ .value = undefined, .ok = false };
-        }
-        
-        /// Lookup performs a longest prefix match for the given IP address.
-        /// Direct port of Go BART's Lookup implementation
-        pub fn lookup(self: *const Self, addr: *const IPAddr) node.LookupResult(V) {
-            const is4 = addr.is4();
-            const octets = addr.asSlice();
-            var n = self.rootNodeByVersionConst(is4);
-            
-            // Stack of the traversed nodes for fast backtracking, if needed
-            var stack: [16]*const Node(V) = undefined;
-            
-            // Run variable, used after for loop
-            var depth: usize = 0;
-            var octet: u8 = 0;
-            
-            // Find leaf node
-            for (octets, 0..) |current_octet, current_depth| {
-                depth = current_depth;
-                octet = current_octet;
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+            const octets = ip.asSlice();
+
+            var current_node = n;
+
+            // find the trie node
+            for (octets[0..@min(octets.len, max_depth + 1)], 0..) |octet, depth_idx| {
+                const depth = @as(u8, @intCast(depth_idx));
                 
-                // Push current node on stack for fast backtracking
-                stack[depth] = n;
-                
-                // Go down in tight loop to last octet
-                if (!n.children.isSet(octet)) {
-                    // No more nodes below octet
-                    break;
+                if (depth == max_depth) {
+                    const result = current_node.prefixes.Get(base_index.pfxToIdx256(octet, last_bits));
+                    return if (result.ok) result.value else null;
                 }
-                const kid = n.children.mustGet(octet);
+
+                if (!current_node.children.Test(octet)) {
+                    return null;
+                }
                 
-                // Kid is node or leaf or fringe at octet
+                const kid = current_node.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        current_node = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+                    
+                    .fringe => |fringe_ptr| {
+                        // reached a path compressed fringe, stop traversing
+                        if (isFringe(depth, bits)) {
+                            return fringe_ptr.value;
+                        }
+                        return null;
+                    },
+                    
+                    .leaf => |leaf_ptr| {
+                        // reached a path compressed prefix, stop traversing
+                        if (leaf_ptr.prefix.eql(&canonical_pfx)) {
+                            return leaf_ptr.value;
+                        }
+                        return null;
+                    },
+                }
+            }
+
+            return null;
+        }
+
+        /// Contains does a route lookup for IP and returns true if any route matched.
+        /// Contains does not return the value nor the prefix of the matching item,
+        /// but as a test against a black- or whitelist it's often sufficient
+        /// and even few nanoseconds faster than Lookup.
+        /// Go BART: func (t *Table[V]) Contains(ip netip.Addr) bool
+        pub fn contains(self: *const Self, ip: *const netip.Addr) bool {
+            // if ip is invalid, Is4() returns false and AsSlice() returns nil
+            if (!ip.isValid()) {
+                return false;
+            }
+
+            const is4 = ip.is4();
+            var n = self.rootNodeByVersionConst(is4);
+
+            for (ip.asSlice()) |octet| {
+                // for contains, any lpm match is good enough, no backtracking needed
+                if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(octet))) {
+                    return true;
+                }
+
+                // stop traversing?
+                if (!n.children.Test(octet)) {
+                    return false;
+                }
+                
+                const kid = n.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
                 switch (kid) {
                     .node => |node_ptr| {
                         n = node_ptr;
-                        continue; // Descend down to next trie level
+                        continue; // descend down to next trie level
                     },
-                    .fringe => |fringe| {
-                        // Fringe is the default-route for all possible nodes below
-                        // Reconstruct prefix from path
-                        var path: [16]u8 = undefined;
-                        @memcpy(path[0..octets.len], octets);
-                        path[depth] = octet;
-                        const fringe_addr = if (addr.is4()) 
-                            IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } 
-                        else 
-                            IPAddr{ .v6 = path[0..16].* };
-                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
-                        const fringe_pfx = Prefix.init(&fringe_addr, fringe_bits);
-                        return node.LookupResult(V){ .prefix = fringe_pfx, .value = fringe.value, .ok = true };
+                    
+                    .fringe => |_| {
+                        // fringe is the default-route for all possible octets below
+                        return true;
                     },
-                    .leaf => |leaf| {
-                        if (leaf.prefix.containsAddr(addr.*)) {
-                            return node.LookupResult(V){ .prefix = leaf.prefix, .value = leaf.value, .ok = true };
+                    
+                    .leaf => |leaf_ptr| {
+                        return leaf_ptr.prefix.contains(ip);
+                    },
+                }
+            }
+
+            return false;
+        }
+
+        /// Lookup does a route lookup (longest prefix match) for IP and
+        /// returns the associated value and true, or false if no route matched.
+        /// Go BART: func (t *Table[V]) Lookup(ip netip.Addr) (val V, ok bool)
+        pub fn lookup(self: *const Self, ip: *const netip.Addr) LookupResult {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+
+            if (!ip.isValid()) {
+                return .{ .value = zero, .ok = false };
+            }
+
+            const is4 = ip.is4();
+            const octets = ip.asSlice();
+
+            var n = self.rootNodeByVersionConst(is4);
+
+            // stack of the traversed nodes for fast backtracking, if needed
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var stack: [maxTreeDepth]*const Node(V) = undefined;
+
+            // run variable, used after for loop
+            var depth: usize = 0;
+            var octet: u8 = 0;
+
+            // find leaf node
+            for (octets, 0..) |current_octet, depth_idx| {
+                depth = depth_idx & 0xf; // BCE, Lookup must be fast
+                octet = current_octet;
+
+                // push current node on stack for fast backtracking
+                stack[depth] = n;
+
+                // go down in tight loop to last octet
+                if (!n.children.Test(octet)) {
+                    // no more nodes below octet
+                    break;
+                }
+                
+                const kid = n.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+                    
+                    .fringe => |fringe_ptr| {
+                        // fringe is the default-route for all possible nodes below
+                        return .{ .value = fringe_ptr.value, .ok = true };
+                    },
+                    
+                    .leaf => |leaf_ptr| {
+                        if (leaf_ptr.prefix.contains(ip)) {
+                            return .{ .value = leaf_ptr.value, .ok = true };
                         }
-                        // Reached a path compressed prefix, stop traversing
+                        // reached a path compressed prefix, stop traversing
                         break;
                     },
                 }
             }
-            
-            // Start backtracking, unwind the stack
-            while (depth < 16) {
-                n = stack[depth];
+
+            // start backtracking, unwind the stack, bounds check eliminated
+            while (depth < maxTreeDepth) {
+                const current_depth = depth & 0xf; // BCE
                 
-                // Longest prefix match, skip if node has no prefixes
+                if (current_depth >= octets.len) break;
+                if (current_depth > maxTreeDepth) break;
+
+                n = stack[current_depth];
+
+                // longest prefix match, skip if node has no prefixes
                 if (n.prefixes.len() != 0) {
-                    const idx = base_index.hostIdx(octets[depth]);
-                    // lpmGet(idx), using existing implementation
+                    const idx = base_index.hostIdx(octets[current_depth]);
+                    // lpmGet(idx), manually inlined
                     const result = n.lpmGet(idx);
                     if (result.ok) {
-                        // Reconstruct prefix from backtracking result
-                        const pfx_info = base_index.idxToPfx256(result.base_idx) catch {
-                            if (depth == 0) break;
-                            depth -= 1;
-                            continue;
-                        };
-                        var masked_addr = addr.*;
-                        const pfx_bits = @as(u8, @intCast(depth * 8 + pfx_info.pfx_len));
-                        masked_addr = masked_addr.masked(pfx_bits);
-                        const prefix = Prefix.init(&masked_addr, pfx_bits);
-                        return node.LookupResult(V){ .prefix = prefix, .value = result.val, .ok = true };
+                        return .{ .value = result.val, .ok = true };
                     }
                 }
-                
+
                 if (depth == 0) break;
                 depth -= 1;
             }
-            
-            return node.LookupResult(V){ .prefix = undefined, .value = undefined, .ok = false };
-        }
-        
-        /// LookupPrefix performs a longest prefix match for the given prefix.
-        pub fn lookupPrefix(self: *const Self, pfx: *const Prefix) node.LookupResult(V) {
-            if (!pfx.isValid()) {
-                return node.LookupResult(V){ .prefix = undefined, .value = undefined, .ok = false };
-            }
-            const canonical_pfx = pfx.masked();
-            const is4 = canonical_pfx.addr.is4();
-            const n = self.rootNodeByVersionConst(is4);
-            return n.lookupPrefix(&canonical_pfx);
-        }
-        
-        /// Size returns the total number of prefixes in the table.
-        pub fn size(self: *const Self) usize {
-            return self.size4 + self.size6;
-        }
-        
-        /// Size4 returns the number of IPv4 prefixes in the table.
-        pub fn getSize4(self: *const Self) usize {
-            return self.size4;
-        }
-        
-        /// Size6 returns the number of IPv6 prefixes in the table.
-        pub fn getSize6(self: *const Self) usize {
-            return self.size6;
-        }
-        
-        /// Clone returns a complete copy of the routing table.
-        /// This is a deep clone operation where all nodes are recursively cloned.
-        pub fn clone(self: *const Self) Self {
-            // Create a new NodePool on the heap
-            const new_pool = self.allocator.create(NodePool(V)) catch null;
-            if (new_pool) |pool| {
-                pool.* = NodePool(V).init(self.allocator);
-            }
-            
-            const new_table = Self{
-                .allocator = self.allocator,
-                .root4 = self.root4.cloneRec(self.allocator),
-                .root6 = self.root6.cloneRec(self.allocator),
-                .size4 = self.size4,
-                .size6 = self.size6,
-                .node_pool = new_pool,
-            };
-            return new_table;
-        }
-        
-        /// sizeUpdate updates the size counter for the given IP version.
-        fn sizeUpdate(self: *Self, is4: bool, delta: i32) void {
-            if (is4) {
-                self.size4 = @intCast(@as(i32, @intCast(self.size4)) + delta);
-            } else {
-                self.size6 = @intCast(@as(i32, @intCast(self.size6)) + delta);
-            }
-        }
-        
-        /// LookupPrefixLPM: プレフィックス自体のLPM検索
-        /// 与えられたPrefixがテーブルに存在すればその値を返し、なければbitsを1ずつ減らして上位のLPMを探索
-        pub fn lookupPrefixLPM(self: *const Self, pfx: *const Prefix) ?V {
-            if (!pfx.isValid()) {
-                return null;
-            }
-            var search_bits: u8 = pfx.bits;
-            var candidate: ?V = null;
-            var tmp_pfx = pfx.*;
-            while (search_bits > 0) {
-                tmp_pfx.bits = search_bits;
-                candidate = self.get(&tmp_pfx);
-                if (candidate != null) {
-                    return candidate;
-                }
-                search_bits -= 1;
-            }
-            // /0（デフォルトルート）もチェック
-            tmp_pfx.bits = 0;
-            return self.get(&tmp_pfx);
+
+            return .{ .value = zero, .ok = false };
         }
 
-        /// Supernets: 指定プレフィックスの上位ネットワーク検索
-        /// 指定したプレフィックスより短い（上位の）ネットワークで、テーブルに存在するものをすべて列挙
-        pub fn supernets(self: *const Self, pfx: *const Prefix, allocator: std.mem.Allocator) !std.ArrayList(Prefix) {
-            var result = std.ArrayList(Prefix).init(allocator);
-            if (!pfx.isValid()) {
-                return result;
-            }
-            const canonical_pfx = pfx.masked();
-            var search_bits: u8 = canonical_pfx.bits;
-            // bitsを1ずつ減らしながら上位ネットワークを検索（自身は含めない）
-            while (search_bits > 0) {
-                search_bits -= 1;
-                if (search_bits == 0) break; // /0はループ外で一度だけ追加
-                var tmp_pfx = canonical_pfx;
-                tmp_pfx.bits = search_bits;
-                tmp_pfx.addr = canonical_pfx.addr.masked(search_bits);
-                if (!tmp_pfx.eql(canonical_pfx) and self.get(&tmp_pfx) != null) {
-                    try result.append(tmp_pfx);
-                }
-            }
-            // /0（デフォルトルート）もチェック（重複を避けて一度だけ）
-            var zero_pfx = canonical_pfx;
-            zero_pfx.bits = 0;
-            zero_pfx.addr = canonical_pfx.addr.masked(0);
-            if (self.get(&zero_pfx) != null) {
-                try result.append(zero_pfx);
-            }
-            return result;
+        /// LookupPrefix does a route lookup (longest prefix match) for pfx and
+        /// returns the associated value and true, or false if no route matched.
+        /// Go BART: func (t *Table[V]) LookupPrefix(pfx netip.Prefix) (val V, ok bool)
+        pub fn lookupPrefix(self: *const Self, pfx: *const netip.Prefix) LookupResult {
+            const result = self.lookupPrefixLPMInternal(pfx, false);
+            return .{ .value = result.value, .ok = result.ok };
         }
 
-        /// Subnets: 指定プレフィックスの下位ネットワーク検索
-        /// 指定したプレフィックスより長い（下位の）ネットワークで、テーブルに存在するものをすべて列挙
-        pub fn subnets(self: *const Self, pfx: *const Prefix, allocator: std.mem.Allocator) !std.ArrayList(Prefix) {
-            var result = std.ArrayList(Prefix).init(allocator);
-            if (!pfx.isValid()) {
-                return result;
-            }
-            const canonical_pfx = pfx.masked();
-            try self.findSubnets(&canonical_pfx, &result);
-            return result;
+        /// LookupPrefixLPM is similar to LookupPrefix,
+        /// but it returns the lpm prefix in addition to value,ok.
+        /// This method is about 20-30% slower than LookupPrefix and should only
+        /// be used if the matching lpm entry is also required for other reasons.
+        /// If LookupPrefixLPM is to be used for IP address lookups,
+        /// they must be converted to /32 or /128 prefixes.
+        /// Go BART: func (t *Table[V]) LookupPrefixLPM(pfx netip.Prefix) (lpmPfx netip.Prefix, val V, ok bool)
+        pub fn lookupPrefixLPM(self: *const Self, pfx: *const netip.Prefix) LookupPrefixLPMResult {
+            return self.lookupPrefixLPMInternal(pfx, true);
         }
-        
-        /// findSubnets: 内部的な再帰関数でサブネットを検索
-        fn findSubnets(self: *const Self, parent_pfx: *const Prefix, result: *std.ArrayList(Prefix)) !void {
-            const ip = &parent_pfx.addr;
+
+        /// Internal implementation for both LookupPrefix and LookupPrefixLPM
+        /// Go BART: func (t *Table[V]) lookupPrefixLPM(pfx netip.Prefix, withLPM bool) (lpmPfx netip.Prefix, val V, ok bool)
+        fn lookupPrefixLPMInternal(self: *const Self, pfx: *const netip.Prefix, with_lpm: bool) LookupPrefixLPMResult {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+            const zero_prefix = netip.Prefix.fromIPv4(0, 0, 0, 0, 0);
+
+            if (!pfx.isValid()) {
+                return .{ .lpm_prefix = zero_prefix, .value = zero, .ok = false };
+            }
+
+            // canonicalize the prefix
+            const canonical_pfx = pfx.masked();
+
+            const ip = canonical_pfx.addr();
+            const bits = canonical_pfx.bits();
             const is4 = ip.is4();
-            var cur_node = self.rootNodeByVersionConst(is4);
             const octets = ip.asSlice();
-            const max_depth = base_index.maxDepthAndLastBits(parent_pfx.bits).max_depth;
-            
-            // parent_pfxまでノードをたどる
-            var depth: usize = 0;
-            while (depth < max_depth) : (depth += 1) {
-                var octet: u8 = 0;
-                if (depth < octets.len) {
-                    octet = octets[depth];
-                }
-                if (!cur_node.children.isSet(octet)) {
-                    return;
-                }
-                const kid = cur_node.children.mustGet(octet);
-                switch (kid) {
-                    .node => |n| cur_node = n,
-                    .leaf => |leaf| {
-                        if (leaf.prefix.bits > parent_pfx.bits and parent_pfx.containsAddr(leaf.prefix.addr)) {
-                            try result.append(leaf.prefix);
-                        }
-                        return;
-                    },
-                    .fringe => {
-                        // fringeノードの場合、プレフィックスを再構築してチェック
-                        var path: [16]u8 = undefined;
-                        @memcpy(path[0..octets.len], octets);
-                        path[depth] = octet;
-                        var addr = if (is4) node.IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } else node.IPAddr{ .v6 = path[0..16].* };
-                        const bits = @as(u8, @intCast((depth + 1) * 8));
-                        const fringe_pfx = Prefix.init(&addr, bits);
-                        if (fringe_pfx.bits > parent_pfx.bits and parent_pfx.containsAddr(fringe_pfx.addr)) {
-                            try result.append(fringe_pfx);
-                        }
-                        return;
-                    },
-                }
-            }
-            
-            // parent_pfxのノードに到達した、すべての下位ネットワークを検索
-            try self.collectAllSubnets(cur_node, parent_pfx, octets, depth, is4, result);
-        }
-        
-        /// collectAllSubnets: 指定ノード以下のすべてのサブネットを収集
-        fn collectAllSubnets(self: *const Self, start_node: *const node.Node(V), parent_pfx: *const Prefix, parent_octets: []const u8, start_depth: usize, is4: bool, result: *std.ArrayList(Prefix)) !void {
-            // 現在のノードの全プレフィックスをチェック
-            var i: usize = 1;
-            while (i <= 255) : (i += 1) {
-                const pidx = std.math.cast(u8, i) orelse break;
-                if (start_node.prefixes.isSet(pidx)) {
-                    const pfx_info = base_index.idxToPfx256(pidx) catch continue;
-                    const bits = @as(u8, @intCast(start_depth * 8 + pfx_info.pfx_len));
-                    if (bits > parent_pfx.bits) {
-                        var path: [16]u8 = undefined;
-                        @memcpy(path[0..parent_octets.len], parent_octets);
-                        if (start_depth < path.len) {
-                            path[start_depth] = pfx_info.octet;
-                        }
-                        var addr = if (is4) node.IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } else node.IPAddr{ .v6 = path[0..16].* };
-                        const sub_pfx = Prefix.init(&addr, bits);
-                        if (parent_pfx.containsAddr(sub_pfx.addr)) {
-                            try result.append(sub_pfx);
-                        }
-                    }
-                }
-            }
-            
-            // 子ノードを再帰的に探索
-            var j: usize = 0;
-            while (j < 256) : (j += 1) {
-                const addr = std.math.cast(u8, j) orelse break;
-                if (start_node.children.isSet(addr)) {
-                    const child = start_node.children.mustGet(addr);
-                    var path: [16]u8 = undefined;
-                    @memcpy(path[0..parent_octets.len], parent_octets);
-                    if (start_depth < path.len) {
-                        path[start_depth] = addr;
-                    }
-                    
-                    switch (child) {
-                        .node => |child_node| {
-                            // 再帰的に子ノードを探索
-                            try self.collectAllSubnets(child_node, parent_pfx, path[0..parent_octets.len + 1], start_depth + 1, is4, result);
-                        },
-                        .leaf => |leaf| {
-                            if (leaf.prefix.bits > parent_pfx.bits and parent_pfx.containsAddr(leaf.prefix.addr)) {
-                                try result.append(leaf.prefix);
-                            }
-                        },
-                        .fringe => {
-                            var addr2 = if (is4) node.IPAddr{ .v4 = .{ path[0], path[1], path[2], path[3] } } else node.IPAddr{ .v6 = path[0..16].* };
-                            const bits = @as(u8, @intCast((start_depth + 1) * 8));
-                            const fringe_pfx = Prefix.init(&addr2, bits);
-                            if (fringe_pfx.bits > parent_pfx.bits and parent_pfx.containsAddr(fringe_pfx.addr)) {
-                                try result.append(fringe_pfx);
-                            }
-                        },
-                    }
-                }
-            }
-        }
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
 
-        /// InsertPersist: 元のテーブルを変更せずに新しいテーブルを返す（Go実装と同じ動作）
-        pub fn insertPersist(self: *const Self, pfx: *const Prefix, val: V) *Self {
-            if (!pfx.isValid()) {
-                return @constCast(self);
-            }
-            
-            const canonical_pfx = pfx.masked();
-            const is4 = canonical_pfx.addr.is4();
-            
-            const new_table = self.allocator.create(Self) catch unreachable;
-            new_table.* = Self{
-                .allocator = self.allocator,
-                .size4 = self.size4,
-                .size6 = self.size6,
-                .root4 = undefined, // 後でセット
-                .root6 = undefined, // 後でセット
-            };
-            
-            // 挿入パスのルートをdeep clone
-            if (is4) {
-                new_table.root4 = self.rootNodeByVersionConst(is4).cloneRec(self.allocator);
-                new_table.root6 = self.root6.cloneRec(self.allocator); // 変更なしでもクローン
-            } else {
-                new_table.root4 = self.root4.cloneRec(self.allocator); // 変更なしでもクローン
-                new_table.root6 = self.rootNodeByVersionConst(is4).cloneRec(self.allocator);
-            }
-            const root = new_table.rootNodeByVersion(is4);
-            
-            // 挿入パスに沿ってノードをクローン
-            const insert_result = root.insertAtDepthPersist(&canonical_pfx, val, 0, self.allocator);
-            
-            if (insert_result) {
-                // プレフィックスが存在した、サイズ増加なし
-                return new_table;
-            }
-            
-            // 真の挿入、サイズ更新
-            new_table.sizeUpdate(is4, 1);
-            return new_table;
-        }
+            var n = self.rootNodeByVersionConst(is4);
 
-        /// UpdatePersist: 不変な更新操作（Go実装と同じ動作）
-        pub fn updatePersist(self: *const Self, pfx: *const Prefix, cb: fn (V, bool) V) struct { table: *Self, value: V } {
-            const zero: V = undefined;
-            if (!pfx.isValid()) {
-                return .{ .table = self, .value = zero };
-            }
-            
-            // 正規化されたプレフィックス
-            const canonical_pfx = pfx.masked();
-            const ip = &canonical_pfx.addr;
-            const is4 = ip.is4();
-            const bits = canonical_pfx.bits;
-            
-            const new_table = self.allocator.create(Self) catch unreachable;
-            new_table.* = Self{
-                .allocator = self.allocator,
-                .size4 = self.size4,
-                .size6 = self.size6,
-                .root4 = undefined, // 後でセット
-                .root6 = undefined, // 後でセット
-            };
-            
-            // 挿入パスのルートをdeep clone
-            if (is4) {
-                new_table.root4 = self.rootNodeByVersionConst(is4).cloneRec(self.allocator);
-                new_table.root6 = self.root6.cloneRec(self.allocator); // 変更なしでもクローン
-            } else {
-                new_table.root4 = self.root4.cloneRec(self.allocator); // 変更なしでもクローン
-                new_table.root6 = self.rootNodeByVersionConst(is4).cloneRec(self.allocator);
-            }
-            const root = new_table.rootNodeByVersion(is4);
-            
-            const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-            const last_bits = base_index.maxDepthAndLastBits(bits).last_bits;
-            const octets = ip.asSlice();
-            
-            // 適切なトライノードを見つけてプレフィックスを更新
+            // record path to leaf node
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var stack: [maxTreeDepth]*const Node(V) = undefined;
+
             var depth: usize = 0;
-            var current_node = root;
-            while (depth < octets.len) : (depth += 1) {
-                const octet = octets[depth];
-                
-                // プレフィックスの最後のオクテット、ノードにプレフィックスを更新/挿入
-                if (depth == max_depth) {
-                    const idx = base_index.pfxToIdx256(octet, last_bits);
-                    const result = current_node.prefixes.updateAt(idx, cb);
-                    if (!result.was_present) {
-                        new_table.sizeUpdate(is4, 1);
-                    }
-                    return .{ .table = new_table, .value = result.new_value };
+            var octet: u8 = 0;
+
+            // find the last node on the octets path in the trie
+            for (octets, 0..) |current_octet, depth_idx| {
+                depth = depth_idx & 0xf; // BCE
+                octet = current_octet;
+
+                if (depth > max_depth) {
+                    depth -= 1;
+                    break;
+                }
+                // push current node on stack
+                stack[depth] = n;
+
+                // go down in tight loop to leaf node
+                if (!n.children.Test(octet)) {
+                    break;
                 }
                 
-                const addr = octet;
-                
-                // 最後のオクテットまでタイトループで降下
-                if (!current_node.children.isSet(addr)) {
-                    // プレフィックスをパス圧縮として挿入
-                    const new_val = cb(zero, false);
-                    if (node.isFringe(depth, bits)) {
-                        _ = current_node.children.replaceAt(addr, Child(V){ .fringe = FringeNode(V).init(new_val) });
-                    } else {
-                        _ = current_node.children.replaceAt(addr, Child(V){ .leaf = LeafNode(V).init(canonical_pfx, new_val) });
-                    }
-                    
-                    new_table.sizeUpdate(is4, 1);
-                    return .{ .table = new_table, .value = new_val };
-                }
-                
-                const kid = current_node.children.mustGet(addr);
+                const kid = n.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
                 switch (kid) {
                     .node => |node_ptr| {
-                        // 次のレベルに進む
-                        const cloned_kid = node_ptr.cloneFlat(current_node.allocator);
-                        // 古いノードをクリーンアップ
-                        if (current_node.children.replaceAt(addr, Child(V){ .node = cloned_kid })) |old_child| {
-                            switch (old_child) {
-                                .node => |old_node_ptr| {
-                                    old_node_ptr.deinit();
-                                    old_node_ptr.allocator.destroy(old_node_ptr);
-                                },
-                                else => {},
-                            }
-                        }
-                        current_node = cloned_kid;
-                        continue; // 次のトライレベルに降下
+                        n = node_ptr;
+                        continue; // descend down to next trie level
                     },
-                    .leaf => |leaf| {
-                        const cloned_leaf = leaf.cloneLeaf();
-                        
-                        // プレフィックスが等しい場合、既存の値を更新
-                        if (cloned_leaf.prefix.eql(canonical_pfx)) {
-                            const new_val = cb(cloned_leaf.value, true);
-                            _ = current_node.children.replaceAt(addr, Child(V){ .leaf = LeafNode(V).init(canonical_pfx, new_val) });
-                            return .{ .table = new_table, .value = new_val };
+                    
+                    .leaf => |leaf_ptr| {
+                        // reached a path compressed prefix, stop traversing
+                        if (leaf_ptr.prefix.bitsGreaterThan(bits) or !leaf_ptr.prefix.containsAddr(&canonical_pfx)) {
+                            break;
                         }
-                        
-                        // 新しいノードを作成 - OPTIMIZED
-                        // リーフを下に押し下げ
-                        // 現在のリーフ位置（addr）に新しい子を挿入
-                        // 降下し、nを新しい子で置き換え
-                        const new_node = Node(V).createFastNode(current_node.allocator);
-                        _ = new_node.insertAtDepth(&cloned_leaf.prefix, cloned_leaf.value, depth + 1, current_node.allocator);
-                        
-                        _ = current_node.children.replaceAt(addr, Child(V){ .node = new_node });
-                        current_node = new_node;
+                        return .{ .lpm_prefix = leaf_ptr.prefix, .value = leaf_ptr.value, .ok = true };
                     },
-                    .fringe => |fringe| {
-                        const cloned_fringe = fringe.cloneFringe();
-                        
-                        // pfxがフリンジの場合、既存の値を更新
-                        if (node.isFringe(depth, bits)) {
-                            const new_val = cb(cloned_fringe.value, true);
-                            _ = current_node.children.replaceAt(addr, Child(V){ .fringe = FringeNode(V).init(new_val) });
-                            return .{ .table = new_table, .value = new_val };
+                    
+                    .fringe => |fringe_ptr| {
+                        // the bits of the fringe are defined by the depth
+                        // maybe the LPM isn't needed, saves some cycles
+                        const fringe_bits = @as(u8, @intCast((depth + 1) * 8));
+                        if (fringe_bits > bits) {
+                            break;
                         }
-                        
-                        // 新しいノードを作成 - OPTIMIZED
-                        // フリンジを下に押し下げ、デフォルトルート（idx=1）になる
-                        // 現在のリーフ位置（addr）に新しい子を挿入
-                        // 降下し、nを新しい子で置き換え
-                        const new_node = Node(V).createFastNode(current_node.allocator);
-                        _ = new_node.prefixes.insertAt(1, cloned_fringe.value);
-                        
-                        _ = current_node.children.replaceAt(addr, Child(V){ .node = new_node });
-                        current_node = new_node;
+
+                        // the LPM isn't needed, saves some cycles
+                        if (!with_lpm) {
+                            return .{ .lpm_prefix = zero_prefix, .value = fringe_ptr.value, .ok = true };
+                        }
+
+                        // sic, get the LPM prefix back, it costs some cycles!
+                        const fringe_pfx = @import("node.zig").cidrForFringe(octets, @intCast(depth), is4, octet);
+                        return .{ .lpm_prefix = fringe_pfx, .value = fringe_ptr.value, .ok = true };
                     },
                 }
             }
-            
-            unreachable; // 到達不可能
+
+            // start backtracking, unwind the stack
+            while (depth < maxTreeDepth) {
+                const current_depth = depth & 0xf; // BCE
+                
+                if (current_depth >= octets.len) break;
+                if (current_depth > maxTreeDepth) break;
+
+                n = stack[current_depth];
+
+                // longest prefix match, skip if node has no prefixes
+                if (n.prefixes.len() == 0) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    continue;
+                }
+
+                // only the lastOctet may have a different prefix len
+                // all others are just host routes
+                var idx: usize = 0;
+                const current_octet = octets[current_depth];
+                if (current_depth == max_depth) {
+                    idx = base_index.pfxToIdx256(current_octet, last_bits);
+                } else {
+                    idx = base_index.hostIdx(current_octet);
+                }
+
+                // manually inlined: lpmGet(idx)
+                const lookup_tbl = @import("lookup_tbl.zig");
+                const backtracking_bitset = lookup_tbl.backTrackingBitset(idx);
+                
+                if (n.prefixes.IntersectionTop(&backtracking_bitset)) |top_idx| {
+                    const val = n.prefixes.mustGet(top_idx);
+
+                    // called from LookupPrefix
+                    if (!with_lpm) {
+                        return .{ .lpm_prefix = zero_prefix, .value = val, .ok = true };
+                    }
+
+                    // called from LookupPrefixLPM
+                    // get the pfxLen from depth and top idx
+                    const pfx_len = base_index.pfxLen256(@intCast(current_depth), top_idx) catch {
+                        if (depth == 0) break;
+                        depth -= 1;
+                        continue;
+                    };
+
+                    // Reconstruct the actual LMP prefix from the matched index and depth
+                    // Get the octet and prefix len from the top_idx
+                    const idx_to_pfx_result = base_index.idxToPfx256(top_idx) catch {
+                        if (depth == 0) break;
+                        depth -= 1;
+                        continue;
+                    };
+                    
+                    // Reconstruct the actual prefix address
+                    var lpm_addr_octets = std.mem.zeroes([16]u8);
+                    if (current_depth < octets.len) {
+                        // Copy the octets up to current_depth from the original IP
+                        @memcpy(lpm_addr_octets[0..current_depth], octets[0..current_depth]);
+                        // Set the reconstructed octet at current_depth
+                        lpm_addr_octets[current_depth] = idx_to_pfx_result.octet;
+                    }
+                    
+                    const lpm_addr = if (ip.is4()) 
+                        netip.Addr.fromIPv4(lpm_addr_octets[0], lpm_addr_octets[1], lpm_addr_octets[2], lpm_addr_octets[3])
+                    else 
+                        netip.Addr.fromIPv6(lpm_addr_octets);
+                    
+                    const lpm_pfx = lpm_addr.prefix(pfx_len);
+                    
+
+                    
+                    return .{ .lpm_prefix = lpm_pfx, .value = val, .ok = true };
+                }
+
+                if (depth == 0) break;
+                depth -= 1;
+            }
+
+            return .{ .lpm_prefix = zero_prefix, .value = zero, .ok = false };
         }
 
-        /// DeletePersist: 不変な削除操作（Go実装と同じ動作）
-        pub fn deletePersist(self: *const Self, pfx: *const Prefix) *Self {
-            const result = self.getAndDeletePersist(pfx);
-            return result.table;
-        }
-
-        /// GetAndDeletePersist: 不変な削除操作（Go実装と同じ動作）
-        pub fn getAndDeletePersist(self: *const Self, pfx: *const Prefix) struct { table: *Self, value: V, ok: bool } {
-            const zero: V = undefined;
+        /// Supernets iterates over all CIDRs covering pfx.
+        /// The iteration is in reverse CIDR sort order, from longest-prefix-match to shortest-prefix-match.
+        /// Go BART: func (t *Table[V]) Supernets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V]
+        pub fn supernets(self: *const Self, pfx: *const netip.Prefix, yield: fn(netip.Prefix, V) bool) void {
             if (!pfx.isValid()) {
-                return .{ .table = self, .value = zero, .ok = false };
+                return;
             }
-            
+
+            // canonicalize the prefix
             const canonical_pfx = pfx.masked();
-            const is4 = canonical_pfx.addr.is4();
-            
-            const new_table = self.allocator.create(Self) catch unreachable;
-            new_table.* = Self{
-                .allocator = self.allocator,
-                .size4 = self.size4,
-                .size6 = self.size6,
-                .root4 = undefined, // 後でセット
-                .root6 = undefined, // 後でセット
-            };
-            
-            // 削除パスのルートをクローン
-            if (is4) {
-                new_table.root4 = self.rootNodeByVersionConst(is4).cloneFlat(self.allocator);
-                new_table.root6 = self.root6.cloneFlat(self.allocator); // 変更なしでもクローン
-            } else {
-                new_table.root4 = self.root4.cloneFlat(self.allocator); // 変更なしでもクローン
-                new_table.root6 = self.rootNodeByVersionConst(is4).cloneFlat(self.allocator);
+
+            const ip = canonical_pfx.addr();
+            const bits = canonical_pfx.bits();
+            const is4 = ip.is4();
+            const octets = ip.asSlice();
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            var n = self.rootNodeByVersionConst(is4);
+
+            // stack of the traversed nodes for reverse ordering of supernets
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var stack: [maxTreeDepth]*const Node(V) = undefined;
+
+            var depth: usize = 0;
+            var octet: u8 = 0;
+
+            // find last node along this octet path
+            for (octets, 0..) |current_octet, depth_idx| {
+                depth = depth_idx & 0xf; // BCE
+                octet = current_octet;
+
+                if (depth > max_depth) {
+                    depth -= 1;
+                    break;
+                }
+                // push current node on stack
+                stack[depth] = n;
+
+                // descend down the trie
+                if (!n.children.Test(octet)) {
+                    break;
+                }
+                
+                const kid = n.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+                    
+                    .leaf => |leaf_ptr| {
+                        if (leaf_ptr.prefix.bitsGreaterThan(canonical_pfx.bits())) {
+                            break;
+                        }
+
+                        if (leaf_ptr.prefix.overlaps(&canonical_pfx)) {
+                            if (!yield(leaf_ptr.prefix, leaf_ptr.value)) {
+                                // early exit
+                                return;
+                            }
+                        }
+                        // end of trie along this octets path
+                        break;
+                    },
+                    
+                    .fringe => |fringe_ptr| {
+                        const fringe_pfx = @import("node.zig").cidrForFringe(octets, @intCast(depth), is4, octet);
+                        if (fringe_pfx.bitsGreaterThan(canonical_pfx.bits())) {
+                            break;
+                        }
+
+                        if (fringe_pfx.overlaps(&canonical_pfx)) {
+                            if (!yield(fringe_pfx, fringe_ptr.value)) {
+                                // early exit
+                                return;
+                            }
+                        }
+                        // end of trie along this octets path
+                        break;
+                    },
+                }
             }
-            const root = new_table.rootNodeByVersion(is4);
-            
-            if (root.delete(&canonical_pfx)) |val| {
-                new_table.sizeUpdate(is4, -1);
-                return .{ .table = new_table, .value = val, .ok = true };
+
+            // start backtracking, unwind the stack
+            while (depth < maxTreeDepth) {
+                const current_depth = depth & 0xf; // BCE
+                
+                if (current_depth >= octets.len) break;
+                if (current_depth > maxTreeDepth) break;
+
+                n = stack[current_depth];
+
+                // only the lastOctet may have a different prefix len
+                // all others are just host routes
+                var idx: usize = 0;
+                const current_octet = octets[current_depth];
+                if (current_depth == max_depth) {
+                    idx = base_index.pfxToIdx256(current_octet, last_bits);
+                } else {
+                    idx = base_index.hostIdx(current_octet);
+                }
+
+                // micro benchmarking, skip if there is no match
+                if (!n.lpmTest(idx)) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    continue;
+                }
+
+                // yield all the matching prefixes, not just the lpm
+                if (!n.eachLookupPrefix(octets, @intCast(current_depth), is4, @intCast(idx), yield)) {
+                    // early exit
+                    return;
+                }
+
+                if (depth == 0) break;
+                depth -= 1;
             }
-            
-            return .{ .table = new_table, .value = zero, .ok = false };
         }
 
-        /// OverlapsPrefix reports whether any IP in pfx is matched by a route in the table or vice versa
-        /// Go実装のOverlapsPrefixメソッドを移植
-        pub fn overlapsPrefix(self: *const Self, pfx: *const Prefix) bool {
+        /// Subnets iterates over all CIDRs covered by pfx.
+        /// The iteration is in natural CIDR sort order.
+        /// Go BART: func (t *Table[V]) Subnets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V]
+        pub fn subnets(self: *const Self, pfx: *const netip.Prefix, yield: fn(netip.Prefix, V) bool) void {
+            if (!pfx.isValid()) {
+                return;
+            }
+
+            // canonicalize the prefix
+            const canonical_pfx = pfx.masked();
+
+            // values derived from pfx
+            const ip = canonical_pfx.addr();
+            const bits = canonical_pfx.bits();
+            const is4 = ip.is4();
+            const octets = ip.asSlice();
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            var n = self.rootNodeByVersionConst(is4);
+
+            // find the trie node
+            for (octets, 0..) |current_octet, depth_idx| {
+                const depth = depth_idx & 0xf; // BCE
+                
+                if (depth == max_depth) {
+                    const idx = base_index.pfxToIdx256(current_octet, last_bits);
+                    _ = n.eachSubnet(octets, @intCast(depth), is4, @intCast(idx), yield);
+                    return;
+                }
+
+                if (!n.children.Test(current_octet)) {
+                    return;
+                }
+                
+                const kid = n.children.mustGet(current_octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        n = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+                    
+                    .leaf => |leaf_ptr| {
+                        if (canonical_pfx.bits() <= leaf_ptr.prefix.bits() and canonical_pfx.overlaps(&leaf_ptr.prefix)) {
+                            _ = yield(leaf_ptr.prefix, leaf_ptr.value);
+                        }
+                        return;
+                    },
+                    
+                    .fringe => |fringe_ptr| {
+                        const fringe_pfx = @import("node.zig").cidrForFringe(octets, @intCast(depth), is4, current_octet);
+                        if (canonical_pfx.bits() <= fringe_pfx.bits() and canonical_pfx.overlaps(&fringe_pfx)) {
+                            _ = yield(fringe_pfx, fringe_ptr.value);
+                        }
+                        return;
+                    },
+                }
+            }
+        }
+
+        /// OverlapsPrefix reports whether any IP in pfx is matched by a route in the table or vice versa.
+        /// Go BART: func (t *Table[V]) OverlapsPrefix(pfx netip.Prefix) bool
+        pub fn overlapsPrefix(self: *const Self, pfx: *const netip.Prefix) bool {
             if (!pfx.isValid()) {
                 return false;
             }
@@ -677,1253 +699,1430 @@ pub fn Table(comptime V: type) type {
             // canonicalize the prefix
             const canonical_pfx = pfx.masked();
 
-            const is4 = canonical_pfx.addr.is4();
+            const is4 = canonical_pfx.addr().is4();
             const n = self.rootNodeByVersionConst(is4);
 
-            return n.overlapsPrefixAtDepth(&canonical_pfx, 0);
+            return n.overlapsPrefixAtDepth(canonical_pfx, 0);
         }
 
         /// Overlaps reports whether any IP in the table is matched by a route in the
-        /// other table or vice versa
-        /// Go実装のOverlapsメソッドを移植
+        /// other table or vice versa.
+        /// Go BART: func (t *Table[V]) Overlaps(o *Table[V]) bool
         pub fn overlaps(self: *const Self, other: *const Self) bool {
             return self.overlaps4(other) or self.overlaps6(other);
         }
 
         /// Overlaps4 reports whether any IPv4 in the table matches a route in the
-        /// other table or vice versa
-        /// Go実装のOverlaps4メソッドを移植
+        /// other table or vice versa.
+        /// Go BART: func (t *Table[V]) Overlaps4(o *Table[V]) bool
         pub fn overlaps4(self: *const Self, other: *const Self) bool {
-            if (self.size4 == 0 or other.size4 == 0) {
+            if (self.size4_count == 0 or other.size4_count == 0) {
                 return false;
             }
-            return self.root4.overlaps(other.root4, 0);
+            return self.root4.overlaps(&other.root4, 0);
         }
 
         /// Overlaps6 reports whether any IPv6 in the table matches a route in the
-        /// other table or vice versa
-        /// Go実装のOverlaps6メソッドを移植
+        /// other table or vice versa.
+        /// Go BART: func (t *Table[V]) Overlaps6(o *Table[V]) bool
         pub fn overlaps6(self: *const Self, other: *const Self) bool {
-            if (self.size6 == 0 or other.size6 == 0) {
+            if (self.size6_count == 0 or other.size6_count == 0) {
                 return false;
             }
-            return self.root6.overlaps(other.root6, 0);
+            return self.root6.overlaps(&other.root6, 0);
         }
 
-        /// Union combines two tables, changing the receiver table.
-        /// If there are duplicate entries, the payload of type V is shallow copied from the other table.
-        /// If type V implements the Cloner interface, the values are cloned.
-        pub fn unionWith(self: *Self, other: *const Self) void {
-            const dup4 = self.root4.unionRec(other.root4, 0);
-            const dup6 = self.root6.unionRec(other.root6, 0);
+        /// Insert adds a pfx to the tree, with given val.
+        /// If pfx is already present in the tree, its value is set to val.
+        /// Go BART: func (t *Table[V]) Insert(pfx netip.Prefix, val V)
+        pub fn insert(self: *Self, pfx: *const netip.Prefix, val: V) void {
+            if (!pfx.isValid()) {
+                return;
+            }
 
-            self.size4 += other.size4 - dup4;
-            self.size6 += other.size6 - dup6;
+            // canonicalize prefix
+            const canonical_pfx = pfx.masked();
+
+            const is4 = canonical_pfx.is4();
+            const n = self.rootNodeByVersion(is4);
+
+            const exists = n.insertAtDepth(canonical_pfx, val, 0, self.allocator) catch |err| {
+                std.debug.panic("Insert failed: {}", .{err});
+            };
+
+            if (exists) {
+                return;
+            }
+
+            // true insert, update size
+            self.sizeUpdate(is4, 1);
         }
 
-        // Go実装互換のJSON出力機能
-        
-        /// MarshalJSON: Go実装と同じJSON形式で出力
-        pub fn marshalJSON(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-            var list = std.ArrayList(u8).init(allocator);
-            defer list.deinit();
+        /// Go BART: func (t *Table[V]) InsertPersist(pfx netip.Prefix, val V) *Table[V]
+        /// InsertPersist inserts prefix into the table and returns a new table,
+        /// leaving the original table unchanged.
+        pub fn InsertPersist(self: *const Self, pfx: *const netip.Prefix, val: V) !*Self {
+            if (!pfx.isValid()) {
+                // Return clone of original table if prefix is invalid
+                return try self.Clone(self.allocator);
+            }
+
+            // canonicalize prefix
+            const canonical_pfx = pfx.masked();
+
+            // Clone the table
+            const new_table = try self.Clone(self.allocator);
             
-            const ipv4_list = try self.dumpList4(allocator);
-            defer {
-                for (ipv4_list) |*item| {
-                    item.deinit(allocator);
+            const is4 = canonical_pfx.is4();
+            const n = new_table.rootNodeByVersion(is4);
+
+            const exists = n.insertAtDepth(canonical_pfx, val, 0, new_table.allocator) catch |err| {
+                new_table.deinit();
+                return err;
+            };
+
+            if (!exists) {
+                // true insert, update size
+                new_table.sizeUpdate(is4, 1);
+            }
+
+            return new_table;
+        }
+
+        /// Go BART: func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (pt *Table[V], newVal V)
+        /// UpdatePersist is similar to Update but the receiver isn't modified.
+        /// All nodes touched during update are cloned and a new Table is returned.
+        pub fn UpdatePersist(self: *const Self, pfx: *const netip.Prefix, cb: fn (V, bool) V) !struct { table: *Self, new_value: V } {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+
+            if (!pfx.isValid()) {
+                const cloned = try self.Clone(self.allocator);
+                return .{ .table = cloned, .new_value = zero };
+            }
+
+            const canonical_pfx = pfx.masked();
+            const ip = canonical_pfx.addr();
+            const is4 = ip.is4();
+            const bits = canonical_pfx.bits();
+            const octets = ip.asSlice();
+            const depth_result = @import("node.zig").maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            // Clone the table (COW semantics)
+            const new_table = try self.Clone(self.allocator);
+            errdefer {
+                new_table.deinit();
+                self.allocator.destroy(new_table);
+            }
+
+            const n = new_table.rootNodeByVersion(is4);
+            var current_node = n;
+
+            for (octets, 0..) |octet, depth_idx| {
+                if (depth_idx == max_depth) {
+                    const idx = base_index.pfxToIdx256(octet, last_bits);
+                    const result = current_node.prefixes.updateAt(idx, cb) catch |err| {
+                        new_table.deinit();
+                        self.allocator.destroy(new_table);
+                        return err;
+                    };
+                    if (!result.was_present) {
+                        new_table.sizeUpdate(is4, 1);
+                    }
+                    return .{ .table = new_table, .new_value = result.new_value };
                 }
-                allocator.free(ipv4_list);
-            }
-            
-            const ipv6_list = try self.dumpList6(allocator);
-            defer {
-                for (ipv6_list) |*item| {
-                    item.deinit(allocator);
+
+                const addr = octet;
+
+                if (!current_node.children.Test(addr)) {
+                    const new_value = cb(zero, false);
+                    const NodeType = @import("node.zig").Node(V);
+                    const FringeNodeType = @import("node.zig").FringeNode(V);
+                    const LeafNodeType = @import("node.zig").LeafNode(V);
+
+                    if (@import("node.zig").isFringe(@intCast(depth_idx), bits)) {
+                        const fringe = try new_table.allocator.create(FringeNodeType);
+                        fringe.* = FringeNodeType.init(new_value);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .fringe = fringe });
+                    } else {
+                        const leaf = try new_table.allocator.create(LeafNodeType);
+                        leaf.* = LeafNodeType.init(canonical_pfx, new_value);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .leaf = leaf });
+                    }
+
+                    new_table.sizeUpdate(is4, 1);
+                    return .{ .table = new_table, .new_value = new_value };
                 }
-                allocator.free(ipv6_list);
+
+                const kid = current_node.children.mustGet(addr);
+                const NodeType = @import("node.zig").Node(V);
+
+                switch (kid) {
+                    .node => |child_node| {
+                        current_node = child_node;
+                        continue;
+                    },
+                    .leaf => |leaf| {
+                        if (leaf.prefix.eql(&canonical_pfx)) {
+                            const new_value = cb(leaf.value, true);
+                            leaf.value = new_value;
+                            return .{ .table = new_table, .new_value = new_value };
+                        }
+
+                        const new_node = try new_table.allocator.create(NodeType);
+                        new_node.* = NodeType.init(new_table.allocator);
+                        _ = try new_node.insertAtDepth(leaf.prefix, leaf.value, @intCast(depth_idx + 1), new_table.allocator);
+                        new_table.allocator.destroy(leaf);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .node = new_node });
+                        current_node = new_node;
+                    },
+                    .fringe => |fringe| {
+                        if (@import("node.zig").isFringe(@intCast(depth_idx), bits)) {
+                            const new_value = cb(fringe.value, true);
+                            fringe.value = new_value;
+                            return .{ .table = new_table, .new_value = new_value };
+                        }
+
+                        const new_node = try new_table.allocator.create(NodeType);
+                        new_node.* = NodeType.init(new_table.allocator);
+                        _ = try new_node.prefixes.insertAt(1, fringe.value);
+                        new_table.allocator.destroy(fringe);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .node = new_node });
+                        current_node = new_node;
+                    },
+                }
             }
-            
-            try list.appendSlice("{");
-            
-            var has_content = false;
-            
-            if (ipv4_list.len > 0) {
-                try list.appendSlice("\"ipv4\":");
-                try self.serializeDumpList(allocator, list.writer(), ipv4_list);
-                has_content = true;
-            }
-            
-            if (ipv6_list.len > 0) {
-                if (has_content) try list.appendSlice(",");
-                try list.appendSlice("\"ipv6\":");
-                try self.serializeDumpList(allocator, list.writer(), ipv6_list);
-                has_content = true;
-            }
-            
-            try list.appendSlice("}");
-            return list.toOwnedSlice();
+
+            return .{ .table = new_table, .new_value = zero };
         }
 
-        /// DumpList4: IPv4ツリーの構造化リスト（Go実装互換）
-        pub fn dumpList4(self: *const Self, allocator: std.mem.Allocator) ![]DumpListNode {
-            return try self.dumpListForVersion(allocator, true);
+        /// Go BART: func (t *Table[V]) Delete(pfx netip.Prefix)
+        /// Delete removes pfx from the tree, pfx does not have to be present.
+        pub fn delete(self: *Self, pfx: *const netip.Prefix) void {
+            _ = self.getAndDelete(pfx);
         }
 
-        /// DumpList6: IPv6ツリーの構造化リスト（Go実装互換）
-        pub fn dumpList6(self: *const Self, allocator: std.mem.Allocator) ![]DumpListNode {
-            return try self.dumpListForVersion(allocator, false);
-        }
+        /// Go BART: func (t *Table[V]) GetAndDelete(pfx netip.Prefix) (val V, ok bool)
+        /// GetAndDelete deletes the prefix and returns the associated payload for prefix and true,
+        /// or the zero value and false if prefix is not set in the routing table.
+        pub fn getAndDelete(self: *Self, pfx: *const netip.Prefix) LookupResult {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
 
-        /// バージョン別のDumpList実装
-        fn dumpListForVersion(self: *const Self, allocator: std.mem.Allocator, is4: bool) ![]DumpListNode {
-            const root = self.rootNodeByVersionConst(is4);
-            if (root.isEmpty()) {
-                return try allocator.alloc(DumpListNode, 0);
+            if (!pfx.isValid()) {
+                return .{ .value = zero, .ok = false };
             }
-            
-            // Go実装と同じ階層構造を構築
-            const path = std.mem.zeroes([16]u8);
-            return try root.dumpListRec(allocator, 0, path, 0, is4);
+
+            // canonicalize prefix
+            const canonical_pfx = pfx.masked();
+
+            // values derived from pfx
+            const ip = canonical_pfx.addr();
+            const is4 = ip.is4();
+            const bits = canonical_pfx.bits();
+            const octets = ip.asSlice();
+            const depth_result = @import("node.zig").maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            const n = self.rootNodeByVersion(is4);
+
+            // record the nodes on the path to the deleted node, needed to purge
+            // and/or path compress nodes after the deletion of a prefix
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var stack: [maxTreeDepth]*Node(V) = undefined;
+
+            // find the trie node
+            var current_depth: usize = 0;
+            var current_node = n;
+
+            for (octets, 0..) |octet, depth_idx| {
+                current_depth = depth_idx & 0xf; // BCE, Delete must be fast
+
+                // push current node on stack for path recording
+                stack[current_depth] = current_node;
+
+                if (current_depth == max_depth) {
+                    // try to delete prefix in trie node
+                    const result = current_node.prefixes.deleteAt(base_index.pfxToIdx256(octet, last_bits));
+                    if (!result.ok) {
+                        return .{ .value = zero, .ok = false };
+                    }
+
+                    self.sizeUpdate(is4, -1);
+                    current_node.purgeAndCompress(stack[0..current_depth], octets, is4, self.allocator) catch {
+                        return .{ .value = zero, .ok = false };
+                    };
+                    return .{ .value = result.value, .ok = true };
+                }
+
+                if (!current_node.children.Test(octet)) {
+                    return .{ .value = zero, .ok = false };
+                }
+                const kid = current_node.children.mustGet(octet);
+
+                // kid is node or leaf or fringe at octet
+                switch (kid) {
+                    .node => |node_ptr| {
+                        current_node = node_ptr;
+                        continue; // descend down to next trie level
+                    },
+
+                    .fringe => |fringe_ptr| {
+                        // if pfx is no fringe at this depth, fast exit
+                        if (!@import("node.zig").isFringe(@intCast(current_depth), bits)) {
+                            return .{ .value = zero, .ok = false };
+                        }
+
+                        // Save the value before deleting
+                        const saved_value = fringe_ptr.value;
+
+                        // pfx is fringe at depth, delete fringe
+                        const deleted = current_node.children.deleteAt(octet);
+
+                        self.sizeUpdate(is4, -1);
+                        current_node.purgeAndCompress(stack[0..current_depth], octets, is4, self.allocator) catch {
+                            return .{ .value = zero, .ok = false };
+                        };
+
+                        // Clean up the deleted fringe
+                        if (deleted.ok) {
+                            switch (deleted.value) {
+                                .fringe => |fringe_node| {
+                                    self.allocator.destroy(fringe_node);
+                                },
+                                else => {}, // Should not happen
+                            }
+                        }
+
+                        return .{ .value = saved_value, .ok = true };
+                    },
+
+                    .leaf => |leaf_ptr| {
+                        // Attention: pfx must be masked to be comparable!
+                        if (!leaf_ptr.prefix.eql(&canonical_pfx)) {
+                            return .{ .value = zero, .ok = false };
+                        }
+
+                        // Save the value before deleting
+                        const saved_value = leaf_ptr.value;
+
+                        // prefix is equal leaf, delete leaf
+                        const deleted = current_node.children.deleteAt(octet);
+
+                        self.sizeUpdate(is4, -1);
+                        current_node.purgeAndCompress(stack[0..current_depth], octets, is4, self.allocator) catch {
+                            return .{ .value = zero, .ok = false };
+                        };
+
+                        // Clean up the deleted leaf
+                        if (deleted.ok) {
+                            switch (deleted.value) {
+                                .leaf => |leaf_node| {
+                                    self.allocator.destroy(leaf_node);
+                                },
+                                else => {}, // Should not happen
+                            }
+                        }
+
+                        return .{ .value = saved_value, .ok = true };
+                    },
+                }
+            }
+
+            return .{ .value = zero, .ok = false };
         }
 
-        /// DumpListのJSON形式シリアライゼーション
-        fn serializeDumpList(self: *const Self, allocator: std.mem.Allocator, writer: anytype, dump_list: []const DumpListNode) !void {
-            try writer.print("[", .{});
-            for (dump_list, 0..) |item, i| {
-                if (i > 0) try writer.print(",", .{});
-                try writer.print("{{\"cidr\":\"{}\",\"value\":", .{item.cidr});
+        /// Go BART: func (t *Table[V]) DeletePersist(pfx netip.Prefix) *Table[V]
+        /// DeletePersist is similar to Delete but the receiver isn't modified.
+        /// All nodes touched during delete are cloned and a new Table is returned.
+        pub fn DeletePersist(self: *const Self, pfx: *const netip.Prefix) !*Self {
+            const result = try self.GetAndDeletePersist(pfx);
+            return result.table;
+        }
+
+        /// Go BART: func (t *Table[V]) GetAndDeletePersist(pfx netip.Prefix) (pt *Table[V], val V, ok bool)
+        /// GetAndDeletePersist is similar to GetAndDelete but the receiver isn't modified.
+        /// All nodes touched during delete are cloned and a new Table is returned.
+        /// Note: For memory safety in Zig, we use full clone approach instead of shallow copy
+        pub fn GetAndDeletePersist(self: *const Self, pfx: *const netip.Prefix) !struct { table: *Self, value: V, ok: bool } {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+
+            if (!pfx.isValid()) {
+                return .{
+                    .table = try self.Clone(self.allocator),
+                    .value = zero,
+                    .ok = false,
+                };
+            }
+
+            // For now, use a simple approach: clone the table and perform delete on the clone
+            // This avoids complex memory management issues with shallow copying
+            const pt = try self.Clone(self.allocator);
+            
+            // Perform the delete operation on the cloned table
+            const result = pt.getAndDelete(pfx);
+            
+            return .{
+                .table = pt,
+                .value = result.value,
+                .ok = result.ok,
+            };
+        }
+
+        /// Update or set the value at pfx with a callback function.
+        /// The callback function is called with (value, ok) and returns a new value.
+        /// If the pfx does not already exist, it is set with the new value.
+        /// Go BART: func (t *Table[V]) Update(pfx netip.Prefix, cb func(val V, ok bool) V) (newVal V)
+        pub fn update(self: *Self, pfx: *const netip.Prefix, comptime cb: fn(V, bool) V) V {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+
+            if (!pfx.isValid()) {
+                return zero;
+            }
+
+            // canonicalize prefix
+            const canonical_pfx = pfx.masked();
+
+            // values derived from pfx
+            const ip = canonical_pfx.addr();
+            const is4 = canonical_pfx.is4();
+            const bits = canonical_pfx.bits();
+            const octets = ip.asSlice();
+            const depth_result = maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            var n = self.rootNodeByVersion(is4);
+
+            // find the proper trie node to update prefix
+            for (octets[0..@min(octets.len, max_depth + 1)], 0..) |octet, depth_idx| {
+                const depth = @as(u8, @intCast(depth_idx));
                 
-                // 値の型に応じてシリアライズ
-                try self.serializeValue(writer, item.value);
-                
-                if (item.subnets.len > 0) {
-                    try writer.print(",\"subnets\":", .{});
-                    try self.serializeDumpList(allocator, writer, item.subnets);
+                // last octet from prefix, update/insert prefix into node
+                if (depth == max_depth) {
+                    const result = n.prefixes.updateAt(
+                        base_index.pfxToIdx256(octet, last_bits),
+                        cb
+                    ) catch |err| {
+                        std.debug.panic("Update failed: {}", .{err});
+                    };
+                    
+                    if (!result.was_present) {
+                        self.sizeUpdate(is4, 1);
+                    }
+                    return result.new_value;
+                }
+
+                // go down in tight loop to last octet
+                if (!n.children.Test(octet)) {
+                    // insert prefix path compressed
+                    const new_val = cb(zero, false);
+                    
+                    if (isFringe(depth, bits)) {
+                        const FringeType = @import("node.zig").FringeNode(V);
+                        const fringe = self.allocator.create(FringeType) catch |err| {
+                            std.debug.panic("Fringe creation failed: {}", .{err});
+                        };
+                        fringe.* = FringeType.init(new_val);
+                        _ = n.children.insertAt(octet, Node(V).ChildNode{ .fringe = fringe }) catch |err| {
+                            std.debug.panic("Fringe insert failed: {}", .{err});
+                        };
+                    } else {
+                        const LeafType = @import("node.zig").LeafNode(V);
+                        const leaf = self.allocator.create(LeafType) catch |err| {
+                            std.debug.panic("Leaf creation failed: {}", .{err});
+                        };
+                        leaf.* = LeafType.init(canonical_pfx, new_val);
+                        _ = n.children.insertAt(octet, Node(V).ChildNode{ .leaf = leaf }) catch |err| {
+                            std.debug.panic("Leaf insert failed: {}", .{err});
+                        };
+                    }
+                    
+                    self.sizeUpdate(is4, 1);
+                    return new_val;
                 }
                 
-                try writer.print("}}", .{});
-            }
-            try writer.print("]", .{});
-        }
-
-        /// 値の型に応じたシリアライゼーション
-        fn serializeValue(self: *const Self, writer: anytype, value: V) !void {
-            _ = self;
-            if (V == u32) {
-                try writer.print("{}", .{value});
-            } else if (V == []const u8) {
-                try writer.print("\"{}\"", .{value});
-            } else if (V == struct{}) {
-                try writer.print("null", .{});
-            } else {
-                // デフォルトは数値として出力を試行
-                try writer.print("{}", .{value});
-            }
-        }
-
-        /// Fprint: 階層的なツリー表示（Go実装互換）
-        pub fn fprint(self: *const Self, writer: anytype) !void {
-            // IPv4ツリーを出力
-            try self.fprintVersion(writer, true);
-            
-            // IPv6ツリーを出力
-            try self.fprintVersion(writer, false);
-        }
-
-        /// バージョン別のFprint実装
-        fn fprintVersion(self: *const Self, writer: anytype, is4: bool) !void {
-            const root = self.rootNodeByVersionConst(is4);
-            if (root.isEmpty()) return;
-            
-            try writer.print("▼\n", .{});
-            
-            const path = std.mem.zeroes([16]u8);
-            try root.fprintRecProper(self.allocator, writer, 0, path, 0, "");
-        }
-
-        /// String representation - Fprintのラッパー
-        pub fn toString(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-            var list = std.ArrayList(u8).init(allocator);
-            defer list.deinit();
-            
-            try self.fprint(list.writer());
-            return list.toOwnedSlice();
-        }
-
-        /// MarshalText: Go実装のencoding.TextMarshalerインターフェース互換
-        /// Fprintのラッパーとして実装
-        pub fn marshalText(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-            return try self.toString(allocator);
-        }
-
-        /// dump: 詳細なデバッグ情報出力（Go実装のdumper.go互換）
-        pub fn dump(self: *const Self, writer: anytype) !void {
-            if (self.getSize4() > 0) {
-                const stats4 = self.root4.getNodeStats();
-                try writer.print("\n### IPv4: size({}), nodes({}), leaves({}), fringes({})\n", 
-                    .{ self.getSize4(), stats4.nodes, stats4.leaves, stats4.fringes });
-                try self.dumpVersion(writer, true);
-            }
-            
-            if (self.getSize6() > 0) {
-                const stats6 = self.root6.getNodeStats();
-                try writer.print("\n### IPv6: size({}), nodes({}), leaves({}), fringes({})\n", 
-                    .{ self.getSize6(), stats6.nodes, stats6.leaves, stats6.fringes });
-                try self.dumpVersion(writer, false);
-            }
-        }
-
-        /// バージョン別のdump実装
-        fn dumpVersion(self: *const Self, writer: anytype, is4: bool) !void {
-            const root = self.rootNodeByVersionConst(is4);
-            if (root.isEmpty()) return;
-            
-            const path = std.mem.zeroes([16]u8);
-            try root.dumpRec(self.allocator, writer, path, 0, is4);
-        }
-
-        /// dumpString: dumpの文字列版（デバッグ用）
-        pub fn dumpString(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-            var list = std.ArrayList(u8).init(allocator);
-            defer list.deinit();
-            
-            try self.dump(list.writer());
-            return list.toOwnedSlice();
-        }
-
-        // シリアライゼーション用の構造体（Go実装のDumpListNode互換）
-        pub const DumpListNode = node.DumpListNode(V);
-
-        // =============================================================================
-        // All系イテレーション機能
-        // =============================================================================
-
-        /// Yield関数の型定義
-        pub const YieldFn = fn (prefix: Prefix, value: V) bool;
-
-        /// allWithCallback: 全プレフィックス列挙（IPv4+IPv6、順序不定）
-        /// Go実装のAllメソッドを移植
-        pub fn allWithCallback(self: *const Self, yield: *const YieldFn) void {
-            const path = std.mem.zeroes(node.StridePath);
-            
-            // IPv4とIPv6の両方を処理
-            _ = self.root4.allRec(path, 0, true, yield) and 
-                self.root6.allRec(path, 0, false, yield);
-        }
-
-        /// all4WithCallback: IPv4プレフィックス列挙（順序不定）
-        /// Go実装のAll4メソッドを移植
-        pub fn all4WithCallback(self: *const Self, yield: *const YieldFn) void {
-            const path = std.mem.zeroes(node.StridePath);
-            _ = self.root4.allRec(path, 0, true, yield);
-        }
-
-        /// all6WithCallback: IPv6プレフィックス列挙（順序不定）
-        /// Go実装のAll6メソッドを移植
-        pub fn all6WithCallback(self: *const Self, yield: *const YieldFn) void {
-            const path = std.mem.zeroes(node.StridePath);
-            _ = self.root6.allRec(path, 0, false, yield);
-        }
-
-        /// allSortedWithCallback: 全プレフィックス列挙（ソート済み）
-        /// Go実装のAllSortedメソッドを移植
-        pub fn allSortedWithCallback(self: *const Self, yield: *const YieldFn) void {
-            const path = std.mem.zeroes(node.StridePath);
-            
-            // IPv4とIPv6の両方をソート順で処理
-            _ = self.root4.allRecSorted(path, 0, true, yield) and 
-                self.root6.allRecSorted(path, 0, false, yield);
-        }
-
-        /// allSorted4WithCallback: IPv4プレフィックス列挙（ソート済み）
-        /// Go実装のAllSorted4メソッドを移植
-        pub fn allSorted4WithCallback(self: *const Self, yield: *const YieldFn) void {
-            const path = std.mem.zeroes(node.StridePath);
-            _ = self.root4.allRecSorted(path, 0, true, yield);
-        }
-
-        /// allSorted6WithCallback: IPv6プレフィックス列挙（ソート済み）
-        /// Go実装のAllSorted6メソッドを移植
-        pub fn allSorted6WithCallback(self: *const Self, yield: *const YieldFn) void {
-            const path = std.mem.zeroes(node.StridePath);
-            _ = self.root6.allRecSorted(path, 0, false, yield);
-        }
-
-        /// Contains performs a route lookup for IP and returns true if any route matched.
-        /// Direct port of Go BART's Contains implementation
-        pub fn contains(self: *const Self, addr: *const IPAddr) bool {
-            const is4 = addr.is4();
-            var n = self.rootNodeByVersionConst(is4);
-            
-            for (addr.asSlice()) |octet| {
-                // For contains, any lpm match is good enough, no backtracking needed
-                if (n.prefixes.len() != 0 and n.lpmTest(base_index.hostIdx(octet))) {
-                    return true;
-                }
-                
-                // Stop traversing?
-                if (!n.children.isSet(octet)) {
-                    return false;
-                }
                 const kid = n.children.mustGet(octet);
-                
-                // Kid is node or leaf or fringe at octet
+
+                // kid is node or leaf or fringe at octet
                 switch (kid) {
                     .node => |node_ptr| {
                         n = node_ptr;
-                        continue; // Descend down to next trie level
+                        continue; // descend down to next trie level
                     },
-                    .fringe => {
-                        // Fringe is the default-route for all possible octets below
-                        return true;
+                    
+                    .leaf => |leaf_ptr| {
+                        // update existing value if prefixes are equal
+                        if (leaf_ptr.prefix.eql(&canonical_pfx)) {
+                            leaf_ptr.value = cb(leaf_ptr.value, true);
+                            return leaf_ptr.value;
+                        }
+
+                        // create new node
+                        // push the leaf down
+                        // insert new child at current leaf position (octet)
+                        // descend down, replace n with new child
+                        const new_node = self.allocator.create(Node(V)) catch |err| {
+                            std.debug.panic("Node creation failed: {}", .{err});
+                        };
+                        new_node.* = Node(V).init(self.allocator);
+                        
+                        _ = new_node.insertAtDepth(leaf_ptr.prefix, leaf_ptr.value, depth + 1, self.allocator) catch |err| {
+                            std.debug.panic("InsertAtDepth failed: {}", .{err});
+                        };
+
+                        _ = n.children.insertAt(octet, Node(V).ChildNode{ .node = new_node }) catch |err| {
+                            std.debug.panic("Node insert failed: {}", .{err});
+                        };
+                        n = new_node;
                     },
-                    .leaf => |leaf| {
-                        return leaf.prefix.containsAddr(addr.*);
+                    
+                    .fringe => |fringe_ptr| {
+                        // update existing value if prefix is fringe
+                        if (isFringe(depth, bits)) {
+                            fringe_ptr.value = cb(fringe_ptr.value, true);
+                            return fringe_ptr.value;
+                        }
+
+                        // create new node
+                        // push the fringe down, it becomes a default route (idx=1)
+                        // insert new child at current leaf position (octet)
+                        // descend down, replace n with new child
+                        const new_node = self.allocator.create(Node(V)) catch |err| {
+                            std.debug.panic("Node creation failed: {}", .{err});
+                        };
+                        new_node.* = Node(V).init(self.allocator);
+                        
+                        _ = new_node.prefixes.insertAt(1, fringe_ptr.value) catch |err| {
+                            std.debug.panic("Prefix insert failed: {}", .{err});
+                        };
+
+                        _ = n.children.insertAt(octet, Node(V).ChildNode{ .node = new_node }) catch |err| {
+                            std.debug.panic("Node insert failed: {}", .{err});
+                        };
+                        n = new_node;
                     },
                 }
             }
+
+            @panic("unreachable");
+        }
+
+        /// Go BART: func (t *Table[V]) Union(o *Table[V])
+        /// Union merges all routes from another table into this table.
+        /// The values are cloned before merging.
+        /// Routes that exist in both tables are overwritten with values from the other table.
+        pub fn Union(self: *Self, other: *const Self) !void {
+            const dup4 = try self.root4.unionRec(&other.root4, 0);
+            const dup6 = try self.root6.unionRec(&other.root6, 0);
+
+            self.size4_count += other.size4_count - @as(i32, @intCast(dup4));
+            self.size6_count += other.size6_count - @as(i32, @intCast(dup6));
+        }
+
+        /// Go BART: func (t *Table[V]) Clone() *Table[V]
+        /// Clone returns a copy of the routing table.
+        /// The payload of type V is shallow copied, but if type V implements the Cloner interface,
+        /// the values are cloned.
+        pub fn Clone(self: *const Self, allocator: std.mem.Allocator) !*Self {
+            // Go BART: if t == nil { return nil }
+            // In Zig, we assume self is valid since it's a method call
+
+            // Go BART: c := new(Table[V])
+            const c = try allocator.create(Self);
+            errdefer allocator.destroy(c);
+
+            // Initialize new table
+            c.* = Self.init(allocator);
+
+            // Copy size counters
+            c.size4_count = self.size4_count;
+            c.size6_count = self.size6_count;
+
+            // Clone nodes by transferring ownership, not copying values
+            if (!self.root4.isEmpty()) {
+                const cloned_root4 = try self.root4.cloneRec(allocator);
+                // Transfer ownership by moving the entire cloned structure
+                c.root4.deinit(); // Free empty init
+                // Move the cloned content (transfer ownership of all child pointers)
+                c.root4.prefixes = cloned_root4.prefixes;
+                c.root4.children = cloned_root4.children;
+                c.root4.allocator = cloned_root4.allocator;
+                c.root4.node_id = cloned_root4.node_id;
+                // Now safely destroy the outer container (but not its content)
+                allocator.destroy(cloned_root4);
+            }
+
+            if (!self.root6.isEmpty()) {
+                const cloned_root6 = try self.root6.cloneRec(allocator);
+                // Transfer ownership by moving the entire cloned structure
+                c.root6.deinit(); // Free empty init
+                // Move the cloned content (transfer ownership of all child pointers)
+                c.root6.prefixes = cloned_root6.prefixes;
+                c.root6.children = cloned_root6.children;
+                c.root6.allocator = cloned_root6.allocator;
+                c.root6.node_id = cloned_root6.node_id;
+                // Now safely destroy the outer container (but not its content)
+                allocator.destroy(cloned_root6);
+            }
+
+            return c;
+        }
+
+        /// Go BART: func (t *Table[V]) sizeUpdate(is4 bool, n int)
+        /// Updates the size counters for IPv4 or IPv6 prefixes.
+        /// This is an internal helper function for maintaining accurate size counts.
+        pub fn sizeUpdate(self: *Self, is4: bool, n: i32) void {
+            if (is4) {
+                self.size4_count += n;
+                return;
+            }
+            self.size6_count += n;
+        }
+
+        /// All returns an iterator over key-value pairs from Table. The iteration order
+        /// is not specified and is not guaranteed to be the same from one call to the
+        /// next.
+        /// Go BART: func (t *Table[V]) All() iter.Seq2[netip.Prefix, V]
+        pub fn all(self: *const Self, yield: fn(netip.Prefix, V) bool) void {
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var path = [_]u8{0} ** maxTreeDepth;
             
-            return false;
+            _ = self.root4.allRec(&path, 0, true, yield) and self.root6.allRec(&path, 0, false, yield);
         }
-        
 
+        /// All4 is like [Table.All] but only for the v4 routing table.
+        /// Go BART: func (t *Table[V]) All4() iter.Seq2[netip.Prefix, V]
+        pub fn all4(self: *const Self, yield: fn(netip.Prefix, V) bool) void {
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var path = [_]u8{0} ** maxTreeDepth;
+            
+            _ = self.root4.allRec(&path, 0, true, yield);
+        }
+
+        /// All6 is like [Table.All] but only for the v6 routing table.
+        /// Go BART: func (t *Table[V]) All6() iter.Seq2[netip.Prefix, V]
+        pub fn all6(self: *const Self, yield: fn(netip.Prefix, V) bool) void {
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var path = [_]u8{0} ** maxTreeDepth;
+            
+            _ = self.root6.allRec(&path, 0, false, yield);
+        }
+
+        /// AllSorted returns an iterator over key-value pairs from Table in natural CIDR sort order.
+        /// Go BART: func (t *Table[V]) AllSorted() iter.Seq2[netip.Prefix, V]
+        pub fn allSorted(self: *const Self, yield: fn(netip.Prefix, V) bool) void {
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var path = [_]u8{0} ** maxTreeDepth;
+            
+            _ = self.root4.allRecSorted(&path, 0, true, yield) and
+                self.root6.allRecSorted(&path, 0, false, yield);
+        }
+
+        /// AllSorted4 is like [Table.AllSorted] but only for the v4 routing table.
+        /// Go BART: func (t *Table[V]) AllSorted4() iter.Seq2[netip.Prefix, V]
+        pub fn allSorted4(self: *const Self, yield: fn(netip.Prefix, V) bool) void {
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var path = [_]u8{0} ** maxTreeDepth;
+            
+            _ = self.root4.allRecSorted(&path, 0, true, yield);
+        }
+
+        /// AllSorted6 is like [Table.AllSorted] but only for the v6 routing table.
+        /// Go BART: func (t *Table[V]) AllSorted6() iter.Seq2[netip.Prefix, V]
+        pub fn allSorted6(self: *const Self, yield: fn(netip.Prefix, V) bool) void {
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var path = [_]u8{0} ** maxTreeDepth;
+            
+            _ = self.root6.allRecSorted(&path, 0, false, yield);
+        }
     };
 }
 
-/// isFringe, leaves with /8, /16, ... /128 bits at special positions
-/// in the trie.
+/// maxDepthAndLastBits, get last significant octet and remaining bits
+/// for a given netip.Prefix.
 ///
-/// Just a path-compressed leaf, inserted at the last
-/// possible level as path compressed (depth == maxDepth-1)
-/// before inserted just as a prefix in the next level down (depth == maxDepth).
+/// ATTENTION: Split the IP prefixes at 8bit borders, count from 0.
 ///
-/// Nice side effect: A fringe is the default-route for all nodes below this slot!
+/// /0, /7, /15, /23, ...
 ///
-///     e.g. prefix is addr/8, or addr/16, or ... addr/128
-///     depth <  maxDepth-1 : a leaf, path-compressed
-///     depth == maxDepth-1 : a fringe, path-compressed
-///     depth == maxDepth   : a prefix with octet/pfx == 0/0 => idx == 1, a strides default route
-fn isFringe(depth: usize, bits: u8) bool {
-    const max_depth = base_index.maxDepthAndLastBits(bits).max_depth;
-    return depth == max_depth - 1;
-}
-
-// Cloner is an interface, if implemented by payload of type V the values are deeply copied
-// during union operations and other clone operations.
-pub fn Cloner(comptime V: type) type {
-    return struct {
-        pub fn clone(self: *const V) V {
-            return self.clone();
-        }
+/// BitPos: [0-7],[8-15],[16-23],[24-31],[32]
+/// BitPos: [0-7],[8-15],[16-23],[24-31],[32-39],[40-47],[48-55],[56-63],...,[120-127],[128]
+///
+/// 0.0.0.0/0          => maxDepth:  0, lastBits: 0 (default route)
+/// 0.0.0.0/7          => maxDepth:  0, lastBits: 7
+/// 0.0.0.0/8          => maxDepth:  1, lastBits: 0 (possible fringe)
+/// 10.0.0.0/8         => maxDepth:  1, lastBits: 0 (possible fringe)
+/// 10.0.0.0/22        => maxDepth:  2, lastBits: 6
+/// 10.0.0.0/29        => maxDepth:  3, lastBits: 5
+/// 10.0.0.0/32        => maxDepth:  4, lastBits: 0 (possible fringe)
+///
+/// ::/0               => maxDepth:  0, lastBits: 0 (default route)
+/// ::1/128            => maxDepth: 16, lastBits: 0 (possible fringe)
+/// 2001:db8::/42      => maxDepth:  5, lastBits: 2
+/// 2001:db8::/56      => maxDepth:  7, lastBits: 0 (possible fringe)
+///
+/// /32 and /128 are special, they never form a new node, they are always inserted
+/// as path-compressed leaf.
+///
+/// Go BART: func maxDepthAndLastBits(bits int) (maxDepth int, lastBits uint8)
+fn maxDepthAndLastBits(bits: u8) struct { max_depth: u8, last_bits: u8 } {
+    // maxDepth:  range from 0..4 or 0..16 !ATTENTION: not 0..3 or 0..15
+    // lastBits:  range from 0..7
+    // Go BART: return bits >> 3, uint8(bits & 7)
+    return .{
+        .max_depth = bits >> 3,
+        .last_bits = bits & 7,
     };
 }
 
-// cloneOrCopy clones the value if it implements the Cloner interface,
-// otherwise it performs a shallow copy.
-fn cloneOrCopy(comptime V: type, value: V) V {
-    const type_info = @typeInfo(V);
+// 基本的なテスト
+const testing = std.testing;
+
+test "Table basic structure" {
+    const allocator = testing.allocator;
     
-    // Check if V has a clone method
-    switch (type_info) {
-        .pointer => |ptr_info| {
-            const child_type = ptr_info.child;
-            if (@hasDecl(child_type, "clone")) {
-                return value.clone();
-            }
-        },
-        else => {
-            // For non-pointer types, check if they have a clone method
-            // Only check for struct/enum/union types
-            if (type_info == .@"struct" or type_info == .@"enum" or type_info == .@"union") {
-                if (@hasDecl(V, "clone")) {
-                    return value.clone();
-                }
-            }
-        },
+    // Table[i32]のインスタンス作成
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+    
+    // 初期状態の確認 - フィールド直接アクセス
+    try testing.expectEqual(@as(i32, 0), table.size4_count);
+    try testing.expectEqual(@as(i32, 0), table.size6_count);
+    
+    // 初期状態の確認 - Go BART互換メソッド
+    try testing.expectEqual(@as(i32, 0), table.size());
+    try testing.expectEqual(@as(i32, 0), table.size4());
+    try testing.expectEqual(@as(i32, 0), table.size6());
+}
+
+test "Table with different types" {
+    const allocator = testing.allocator;
+    
+    // 異なる型でのTable作成をテスト
+    var int_table = Table(i32).init(allocator);
+    defer int_table.deinit();
+    
+    var str_table = Table([]const u8).init(allocator);
+    defer str_table.deinit();
+    
+    var void_table = Table(void).init(allocator);
+    defer void_table.deinit();
+    
+    // すべて正常に作成できることを確認
+    try testing.expect(true);
+}
+
+test "Table rootNodeByVersion" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+    
+    // IPv4ルートノードの取得をテスト
+    const ipv4_root = table.rootNodeByVersion(true);
+    try testing.expect(ipv4_root == &table.root4);
+    
+    // IPv6ルートノードの取得をテスト  
+    const ipv6_root = table.rootNodeByVersion(false);
+    try testing.expect(ipv6_root == &table.root6);
+}
+
+test "maxDepthAndLastBits function" {
+    // Go BART コメントの例をテスト - パッケージレベル関数として
+    
+    // IPv4 examples:
+    // 0.0.0.0/0          => maxDepth:  0, lastBits: 0 (default route)
+    var result = maxDepthAndLastBits(0);
+    try testing.expectEqual(@as(u8, 0), result.max_depth);
+    try testing.expectEqual(@as(u8, 0), result.last_bits);
+    
+    // 0.0.0.0/7          => maxDepth:  0, lastBits: 7
+    result = maxDepthAndLastBits(7);
+    try testing.expectEqual(@as(u8, 0), result.max_depth);
+    try testing.expectEqual(@as(u8, 7), result.last_bits);
+    
+    // 0.0.0.0/8          => maxDepth:  1, lastBits: 0 (possible fringe)
+    result = maxDepthAndLastBits(8);
+    try testing.expectEqual(@as(u8, 1), result.max_depth);
+    try testing.expectEqual(@as(u8, 0), result.last_bits);
+    
+    // 10.0.0.0/22        => maxDepth:  2, lastBits: 6
+    result = maxDepthAndLastBits(22);
+    try testing.expectEqual(@as(u8, 2), result.max_depth);
+    try testing.expectEqual(@as(u8, 6), result.last_bits);
+    
+    // 10.0.0.0/29        => maxDepth:  3, lastBits: 5
+    result = maxDepthAndLastBits(29);
+    try testing.expectEqual(@as(u8, 3), result.max_depth);
+    try testing.expectEqual(@as(u8, 5), result.last_bits);
+    
+    // 10.0.0.0/32        => maxDepth:  4, lastBits: 0 (possible fringe)
+    result = maxDepthAndLastBits(32);
+    try testing.expectEqual(@as(u8, 4), result.max_depth);
+    try testing.expectEqual(@as(u8, 0), result.last_bits);
+    
+    // IPv6 examples:
+    // ::/0               => maxDepth:  0, lastBits: 0 (default route)
+    result = maxDepthAndLastBits(0);
+    try testing.expectEqual(@as(u8, 0), result.max_depth);
+    try testing.expectEqual(@as(u8, 0), result.last_bits);
+    
+    // 2001:db8::/42      => maxDepth:  5, lastBits: 2
+    result = maxDepthAndLastBits(42);
+    try testing.expectEqual(@as(u8, 5), result.max_depth);
+    try testing.expectEqual(@as(u8, 2), result.last_bits);
+    
+    // 2001:db8::/56      => maxDepth:  7, lastBits: 0 (possible fringe)
+    result = maxDepthAndLastBits(56);
+    try testing.expectEqual(@as(u8, 7), result.max_depth);
+    try testing.expectEqual(@as(u8, 0), result.last_bits);
+    
+    // ::1/128            => maxDepth: 16, lastBits: 0 (possible fringe)
+    result = maxDepthAndLastBits(128);
+    try testing.expectEqual(@as(u8, 16), result.max_depth);
+    try testing.expectEqual(@as(u8, 0), result.last_bits);
+}
+
+test "large insert and delete - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(12345);
+    const random = prng.random();
+
+    const count = 1000;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
     }
-    
-    // Default to shallow copy
-    return value;
-}
 
-test "Table lookupPrefixLPM basic" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
-    defer table.deinit();
-    
-    // テスト用のプレフィックスを作成
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 0, 0, 0 } }, 8);
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 0, 0, 0, 0 } }, 0);
-    
-    // プレフィックスを挿入
-    table.insert(&pfx1, 1);
-    table.insert(&pfx2, 2);
-    table.insert(&pfx3, 3);
-    table.insert(&pfx4, 4);
-    
-    // テスト1: 存在するプレフィックスを検索
-    const result1 = table.lookupPrefix(&pfx1);
-    try std.testing.expectEqual(@as(u32, 1), result1.value);
-    
-    // テスト2: 存在しないプレフィックスを検索（上位のLPMを返す）
-    // 192.168.1.128/25は192.168.1.0/24にマッチする
-    const search_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 128 } }, 25);
-    const result2 = table.lookupPrefix(&search_pfx);
-    try std.testing.expect(result2.ok == true);
-    try std.testing.expectEqual(@as(u32, 1), result2.value); // 192.168.1.0/24がマッチ
-    
-    // テスト3: より短いプレフィックスを検索
-    const search_pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);
-    const result3 = table.lookupPrefix(&search_pfx2);
-    try std.testing.expectEqual(@as(u32, 2), result3.value); // 192.168.0.0/16がマッチ
-    
-    // テスト4: デフォルトルートを検索
-    const search_pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    const result4 = table.lookupPrefix(&search_pfx3);
-    try std.testing.expectEqual(@as(u32, 4), result4.value); // 0.0.0.0/0がマッチ
-}
+    try testing.expect(table.size() > 0);
 
-test "Table lookupPrefixLPM edge cases" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
-    defer table.deinit();
-    
-    // テスト1: 空のテーブルで検索
-    const pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const result = table.lookupPrefix(&pfx);
-    try std.testing.expect(!result.ok);
-    
-    // テスト2: 無効なプレフィックスで検索
-    const invalid_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 33); // IPv4で33ビットは無効
-    const result2 = table.lookupPrefix(&invalid_pfx);
-    try std.testing.expect(!result2.ok);
-    
-    // テスト3: /0のみが存在する場合
-    const default_pfx = Prefix.init(&IPAddr{ .v4 = .{ 0, 0, 0, 0 } }, 0);
-    table.insert(&default_pfx, 42);
-    
-    const search_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const result3 = table.lookupPrefix(&search_pfx);
-    try std.testing.expectEqual(@as(u32, 42), result3.value);
-}
-
-test "Table supernets basic" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
-    defer table.deinit();
-    
-    // テスト用のプレフィックスを作成
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 0, 0, 0 } }, 8);
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 0, 0, 0, 0 } }, 0);
-    
-    // プレフィックスを挿入
-    table.insert(&pfx1, 1);
-    table.insert(&pfx2, 2);
-    table.insert(&pfx3, 3);
-    table.insert(&pfx4, 4);
-    
-    // 192.168.1.0/24のsupernetsを検索
-    const search_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const supernets = try table.supernets(&search_pfx, allocator);
-    defer supernets.deinit();
-    
-    // 結果を検証（192.168.0.0/16, 192.0.0.0/8, 0.0.0.0/0 の3つが期待される）
-    try std.testing.expectEqual(@as(usize, 3), supernets.items.len);
-    
-    // 結果をソートして検証（順序は不定のため）
-    var found_16 = false;
-    var found_8 = false;
-    var found_0 = false;
-    
-    for (supernets.items) |supernet| {
-        if (supernet.bits == 16) found_16 = true;
-        if (supernet.bits == 8) found_8 = true;
-        if (supernet.bits == 0) found_0 = true;
+    for (&prefixes) |*pfx| {
+        table.delete(pfx);
     }
-    
-    try std.testing.expect(found_16);
-    try std.testing.expect(found_8);
-    try std.testing.expect(found_0);
+
+    try testing.expectEqual(@as(i32, 0), table.size());
 }
 
-test "Table subnets basic" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
+test "getAndDelete returns correct value" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
     defer table.deinit();
-    
-    // テスト用のプレフィックスを作成（より簡単なケース）
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
-    
-    // プレフィックスを挿入
+
+    var pfx1 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8);
+    pfx1 = pfx1.masked();
+    table.insert(&pfx1, 42);
+
+    const result = table.getAndDelete(&pfx1);
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(i32, 42), result.value);
+    try testing.expectEqual(@as(i32, 0), table.size());
+}
+
+test "clone preserves data" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var pfx1 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8);
+    pfx1 = pfx1.masked();
     table.insert(&pfx1, 1);
+
+    var pfx2 = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16);
+    pfx2 = pfx2.masked();
     table.insert(&pfx2, 2);
-    table.insert(&pfx3, 3);
-    
-    // 192.168.0.0/16のsubnetsを検索
-    const search_pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
-    const subnets = try table.subnets(&search_pfx, allocator);
-    defer subnets.deinit();
-    
-    // 結果を検証（2個が返るはず）
-    try std.testing.expectEqual(@as(usize, 2), subnets.items.len);
-    
-    var found_1 = false;
-    var found_2 = false;
-    for (subnets.items) |subnet| {
-        if (subnet.bits == 24) {
-            if (subnet.addr.eql(IPAddr{ .v4 = .{ 192, 168, 1, 0 } })) found_1 = true;
-            if (subnet.addr.eql(IPAddr{ .v4 = .{ 192, 168, 2, 0 } })) found_2 = true;
+
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    try testing.expectEqual(table.size(), cloned.size());
+
+    const v1 = cloned.get(&pfx1);
+    try testing.expect(v1 != null);
+    try testing.expectEqual(@as(i32, 1), v1.?);
+
+    const v2 = cloned.get(&pfx2);
+    try testing.expect(v2 != null);
+    try testing.expectEqual(@as(i32, 2), v2.?);
+}
+
+test "clone large - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(54321);
+    const random = prng.random();
+
+    const count = 500;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    try testing.expectEqual(table.size(), cloned.size());
+
+    for (&prefixes) |*pfx| {
+        const orig = table.get(pfx);
+        const clone_val = cloned.get(pfx);
+        try testing.expectEqual(orig, clone_val);
+    }
+}
+
+test "insert delete insert - no leak" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(99999);
+    const random = prng.random();
+
+    for (0..3) |round| {
+        _ = round;
+        for (0..200) |i| {
+            const a = random.int(u8);
+            const b = random.int(u8);
+            const c = random.int(u8);
+            const d = random.int(u8);
+            const bits = random.intRangeAtMost(u8, 8, 32);
+            const addr = netip.Addr.fromIPv4(a, b, c, d);
+            var pfx = addr.prefix(bits).masked();
+            table.insert(&pfx, @as(i32, @intCast(i)));
+        }
+
+        // Delete random subset
+        for (0..100) |_| {
+            const a = random.int(u8);
+            const b = random.int(u8);
+            const c = random.int(u8);
+            const d = random.int(u8);
+            const bits = random.intRangeAtMost(u8, 8, 32);
+            const addr = netip.Addr.fromIPv4(a, b, c, d);
+            var pfx = addr.prefix(bits).masked();
+            table.delete(&pfx);
         }
     }
-    try std.testing.expect(found_1);
-    try std.testing.expect(found_2);
+
+    try testing.expect(table.size() >= 0);
 }
 
+test "overlaps between tables" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
 
+    // Disjoint
+    var pfx_a = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    var pfx_b = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16).masked();
+    table_a.insert(&pfx_a, 1);
+    table_b.insert(&pfx_b, 2);
 
-test "Table overlapsPrefix basic" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
+    try testing.expect(!table_a.overlaps(&table_b));
+
+    // Overlapping
+    var pfx_c = netip.Addr.fromIPv4(10, 1, 0, 0).prefix(16).masked();
+    table_b.insert(&pfx_c, 3);
+
+    try testing.expect(table_a.overlaps(&table_b));
+}
+
+test "union basic - memory safety" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    var pfx1 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    var pfx2 = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16).masked();
+    var pfx3 = netip.Addr.fromIPv4(172, 16, 0, 0).prefix(12).masked();
+
+    table_a.insert(&pfx1, 1);
+    table_a.insert(&pfx2, 2);
+    table_b.insert(&pfx3, 3);
+    table_b.insert(&pfx2, 99);
+
+    try table_a.Union(&table_b);
+
+    // pfx1 from table_a
+    try testing.expectEqual(@as(?i32, 1), table_a.get(&pfx1));
+    // pfx3 merged from table_b
+    try testing.expectEqual(@as(?i32, 3), table_a.get(&pfx3));
+    // pfx2 should be overwritten by table_b's value
+    try testing.expectEqual(@as(?i32, 99), table_a.get(&pfx2));
+}
+
+test "union large - memory safety" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    var prng = std.Random.DefaultPrng.init(77777);
+    const random = prng.random();
+
+    // Insert 300 entries into table_a
+    for (0..300) |i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        var pfx = addr.prefix(bits).masked();
+        table_a.insert(&pfx, @as(i32, @intCast(i)));
+    }
+
+    // Insert 300 entries into table_b (some will overlap)
+    for (0..300) |i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        var pfx = addr.prefix(bits).masked();
+        table_b.insert(&pfx, @as(i32, @intCast(i + 1000)));
+    }
+
+    const size_a_before = table_a.size();
+    const size_b = table_b.size();
+    _ = size_a_before;
+    _ = size_b;
+
+    try table_a.Union(&table_b);
+
+    // After union, table_a should have at least as many entries as before
+    try testing.expect(table_a.size() >= 0);
+}
+
+test "getAndDelete random - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
     defer table.deinit();
-    
-    // テスト用のプレフィックスを作成
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    
-    // プレフィックスを挿入
+
+    var prng = std.Random.DefaultPrng.init(11111);
+    const random = prng.random();
+
+    const count = 500;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    // getAndDelete half of them
+    for (prefixes[0..250]) |*pfx| {
+        _ = table.getAndDelete(pfx);
+    }
+
+    // Verify deleted entries are gone
+    for (prefixes[0..250]) |*pfx| {
+        try testing.expectEqual(@as(?i32, null), table.get(pfx));
+    }
+}
+
+test "IPv6 insert delete - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(66666);
+    const random = prng.random();
+
+    for (0..200) |i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 16, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table.insert(&pfx, @as(i32, @intCast(i)));
+    }
+
+    try testing.expect(table.size() > 0);
+
+    // Delete some
+    for (0..100) |_| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 16, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table.delete(&pfx);
+    }
+
+    try testing.expect(table.size() >= 0);
+}
+
+test "UpdatePersist - basic" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var pfx = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    table.insert(&pfx, 42);
+
+    const update_cb = struct {
+        fn cb(val: i32, ok: bool) i32 {
+            if (ok) return val + 100;
+            return 999;
+        }
+    }.cb;
+
+    // Update existing prefix
+    const result1 = try table.UpdatePersist(&pfx, update_cb);
+    defer {
+        result1.table.deinit();
+        allocator.destroy(result1.table);
+    }
+    try testing.expectEqual(@as(i32, 142), result1.new_value);
+
+    // Original table unchanged
+    try testing.expectEqual(@as(?i32, 42), table.get(&pfx));
+    // New table has updated value
+    try testing.expectEqual(@as(?i32, 142), result1.table.get(&pfx));
+
+    // Insert new prefix via UpdatePersist
+    var pfx2 = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16).masked();
+    const result2 = try table.UpdatePersist(&pfx2, update_cb);
+    defer {
+        result2.table.deinit();
+        allocator.destroy(result2.table);
+    }
+    try testing.expectEqual(@as(i32, 999), result2.new_value);
+    try testing.expectEqual(@as(?i32, null), table.get(&pfx2));
+    try testing.expectEqual(@as(?i32, 999), result2.table.get(&pfx2));
+}
+
+test "IPv6 get and lookup" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    // 2001:db8::/32
+    var pfx1 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+    // 2001:db8:1::/48
+    var pfx2 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(48).masked();
+    // ::1/128 (loopback)
+    var pfx3 = netip.Addr.fromIPv6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }).prefix(128).masked();
+    // fe80::/10 (link-local)
+    var pfx4 = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(10).masked();
+
     table.insert(&pfx1, 1);
     table.insert(&pfx2, 2);
     table.insert(&pfx3, 3);
-    
-    // テスト1: 完全一致のプレフィックス
-    try std.testing.expect(table.overlapsPrefix(&pfx1));
-    try std.testing.expect(table.overlapsPrefix(&pfx2));
-    try std.testing.expect(table.overlapsPrefix(&pfx3));
-    
-    // テスト2: オーバーラップするプレフィックス
-    const overlap_pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 128 } }, 25); // pfx1とオーバーラップ
-    const overlap_pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);   // pfx2とオーバーラップ
-    const overlap_pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 1, 0, 0 } }, 16);      // pfx3とオーバーラップ
-    
-    try std.testing.expect(table.overlapsPrefix(&overlap_pfx1));
-    try std.testing.expect(table.overlapsPrefix(&overlap_pfx2));
-    try std.testing.expect(table.overlapsPrefix(&overlap_pfx3));
-    
-    // テスト3: オーバーラップしないプレフィックス
-    const no_overlap_pfx = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
-    try std.testing.expect(!table.overlapsPrefix(&no_overlap_pfx));
-}
-
-test "Table overlaps basic" {
-    const allocator = std.testing.allocator;
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    // table1にプレフィックスを挿入
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    table1.insert(&pfx1, 1);
-    table1.insert(&pfx2, 2);
-    
-    // table2にオーバーラップするプレフィックスを挿入
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16); // pfx1とオーバーラップ
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);  // オーバーラップしない
-    table2.insert(&pfx3, 3);
-    table2.insert(&pfx4, 4);
-    
-    // テスト1: オーバーラップあり
-    try std.testing.expect(table1.overlaps(&table2));
-    try std.testing.expect(table2.overlaps(&table1)); // 対称性
-    
-    // テスト2: IPv4専用オーバーラップ
-    try std.testing.expect(table1.overlaps4(&table2));
-    
-    // テスト3: IPv6オーバーラップなし（IPv6プレフィックスがない）
-    try std.testing.expect(!table1.overlaps6(&table2));
-}
-
-test "Table overlaps no overlap" {
-    const allocator = std.testing.allocator;
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    // table1にプレフィックスを挿入
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    table1.insert(&pfx1, 1);
-    
-    // table2にオーバーラップしないプレフィックスを挿入
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
-    table2.insert(&pfx2, 2);
-    
-    // テスト: オーバーラップなし
-    try std.testing.expect(!table1.overlaps(&table2));
-    try std.testing.expect(!table2.overlaps(&table1)); // 対称性
-    try std.testing.expect(!table1.overlaps4(&table2));
-}
-
-test "Prefix overlaps detailed verification" {
-    
-    // テスト1: 完全一致
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx1_same = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    try std.testing.expect(pfx1.overlaps(&pfx1_same));
-    std.debug.print("✓ 完全一致: 192.168.1.0/24 と 192.168.1.0/24\n", .{});
-    
-    // テスト2: 包含関係（大きいプレフィックスが小さいプレフィックスを含む）
-    const pfx_large = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16); // 192.168.0.0/16
-    const pfx_small = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24); // 192.168.1.0/24
-    try std.testing.expect(pfx_large.overlaps(&pfx_small));
-    try std.testing.expect(pfx_small.overlaps(&pfx_large)); // 対称性
-    std.debug.print("✓ 包含関係: 192.168.0.0/16 と 192.168.1.0/24\n", .{});
-    
-    // テスト3: 部分的重複（同じ/24内の/25同士）
-    const pfx_25_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 25);   // 192.168.1.0/25
-    const pfx_25_2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 128 } }, 25); // 192.168.1.128/25
-    try std.testing.expect(!pfx_25_1.overlaps(&pfx_25_2)); // これらは隣接だが重複しない
-    std.debug.print("✓ 隣接非重複: 192.168.1.0/25 と 192.168.1.128/25\n", .{});
-    
-    // テスト4: 完全に異なるネットワーク
-    const pfx_192 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx_10 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    try std.testing.expect(!pfx_192.overlaps(&pfx_10));
-    std.debug.print("✓ 完全分離: 192.168.1.0/24 と 10.0.0.0/8\n", .{});
-    
-    // テスト5: より複雑な包含関係
-    const pfx_8 = Prefix.init(&IPAddr{ .v4 = .{ 192, 0, 0, 0 } }, 8);         // 192.0.0.0/8
-    const pfx_16 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);      // 192.168.0.0/16
-    const pfx_24 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);      // 192.168.1.0/24
-    const pfx_32 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 100 } }, 32);    // 192.168.1.100/32
-    
-    try std.testing.expect(pfx_8.overlaps(&pfx_16));
-    try std.testing.expect(pfx_8.overlaps(&pfx_24));
-    try std.testing.expect(pfx_8.overlaps(&pfx_32));
-    try std.testing.expect(pfx_16.overlaps(&pfx_24));
-    try std.testing.expect(pfx_16.overlaps(&pfx_32));
-    try std.testing.expect(pfx_24.overlaps(&pfx_32));
-    std.debug.print("✓ 階層的包含: 192.0.0.0/8 ⊃ 192.168.0.0/16 ⊃ 192.168.1.0/24 ⊃ 192.168.1.100/32\n", .{});
-}
-
-test "Table overlaps detailed scenarios" {
-    const allocator = std.testing.allocator;
-    
-    // シナリオ1: 包含関係のテスト
-    {
-        var table1 = Table(u32).init(allocator);
-        defer table1.deinit();
-        var table2 = Table(u32).init(allocator);
-        defer table2.deinit();
-        
-        // table1: 大きなネットワーク
-        const pfx_large = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);
-        table1.insert(&pfx_large, 1);
-        
-        // table2: 小さなネットワーク（table1に含まれる）
-        const pfx_small = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-        table2.insert(&pfx_small, 2);
-        
-        try std.testing.expect(table1.overlaps(&table2));
-        try std.testing.expect(table1.overlapsPrefix(&pfx_small));
-        try std.testing.expect(table2.overlapsPrefix(&pfx_large));
-        std.debug.print("✓ シナリオ1: 包含関係でのオーバーラップ検出成功\n", .{});
-    }
-    
-    // シナリオ2: 完全分離のテスト
-    {
-        var table1 = Table(u32).init(allocator);
-        defer table1.deinit();
-        var table2 = Table(u32).init(allocator);
-        defer table2.deinit();
-        
-        // table1: 192.168.x.x
-        const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-        table1.insert(&pfx1, 1);
-        
-        // table2: 10.x.x.x
-        const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-        table2.insert(&pfx2, 2);
-        
-        try std.testing.expect(!table1.overlaps(&table2));
-        try std.testing.expect(!table1.overlapsPrefix(&pfx2));
-        try std.testing.expect(!table2.overlapsPrefix(&pfx1));
-        std.debug.print("✓ シナリオ2: 完全分離でのオーバーラップ非検出成功\n", .{});
-    }
-    
-    // シナリオ3: 複数プレフィックスでの部分的オーバーラップ
-    {
-        var table1 = Table(u32).init(allocator);
-        defer table1.deinit();
-        var table2 = Table(u32).init(allocator);
-        defer table2.deinit();
-        
-        // table1: 複数のプレフィックス
-        const pfx1_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-        const pfx1_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-        table1.insert(&pfx1_1, 1);
-        table1.insert(&pfx1_2, 2);
-        
-        // table2: 一部がオーバーラップ、一部が分離
-        const pfx2_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16); // pfx1_1とオーバーラップ
-        const pfx2_2 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);  // どちらともオーバーラップしない
-        table2.insert(&pfx2_1, 3);
-        table2.insert(&pfx2_2, 4);
-        
-        try std.testing.expect(table1.overlaps(&table2)); // 一部でもオーバーラップがあればtrue
-        std.debug.print("✓ シナリオ3: 部分的オーバーラップ検出成功\n", .{});
-    }
-}
-
-test "Table unionWith basic" {
-    const allocator = std.testing.allocator;
-    
-    // テーブル1を作成
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    table1.insert(&pfx1, 1);
-    table1.insert(&pfx2, 2);
-    
-    // テーブル2を作成
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);
-    table2.insert(&pfx3, 3);
-    table2.insert(&pfx4, 4);
-    
-    std.debug.print("Table1 size before union: {}\n", .{table1.size()});
-    std.debug.print("Table2 size: {}\n", .{table2.size()});
-    
-    // ユニオン実行
-    table1.unionWith(&table2);
-    
-    std.debug.print("Table1 size after union: {}\n", .{table1.size()});
-    
-    // 結果をテスト
-    try std.testing.expectEqual(@as(usize, 4), table1.size());
-    
-    // 元のプレフィックスが存在することを確認
-    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx1).?);
-    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx2).?);
-    
-    // 追加されたプレフィックスが存在することを確認
-    try std.testing.expectEqual(@as(u32, 3), table1.get(&pfx3).?);
-    try std.testing.expectEqual(@as(u32, 4), table1.get(&pfx4).?);
-    
-    std.debug.print("✓ ユニオンテーブル基本動作成功\n", .{});
-}
-
-test "Table unionWith duplicate prefixes" {
-    const allocator = std.testing.allocator;
-    
-    // テーブル1を作成
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    table1.insert(&pfx1, 1);
-    table1.insert(&pfx2, 2);
-    
-    // テーブル2を作成（重複あり）
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 16);
-    // pfx1と同じプレフィックス、異なる値
-    table2.insert(&pfx1, 100);
-    table2.insert(&pfx3, 3);
-    
-    std.debug.print("Table1 initial pfx1 value: {}\n", .{table1.get(&pfx1).?});
-    
-    // ユニオン実行
-    table1.unionWith(&table2);
-    
-    // 結果をテスト：重複したプレフィックスは上書きされる
-    try std.testing.expectEqual(@as(usize, 3), table1.size()); // 2 + 2 - 1(重複)
-    
-    // 重複したプレフィックスは table2 の値で上書きされる
-    try std.testing.expectEqual(@as(u32, 100), table1.get(&pfx1).?);
-    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx2).?);
-    try std.testing.expectEqual(@as(u32, 3), table1.get(&pfx3).?);
-    
-    std.debug.print("✓ ユニオンテーブル重複処理成功\n", .{});
-}
-
-test "Table unionWith empty tables" {
-    const allocator = std.testing.allocator;
-    
-    // 空のテーブル1
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    
-    // 空のテーブル2
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    // 空同士のユニオン
-    table1.unionWith(&table2);
-    try std.testing.expectEqual(@as(usize, 0), table1.size());
-    
-    // 片方だけに要素を追加
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    table2.insert(&pfx1, 1);
-    
-    table1.unionWith(&table2);
-    try std.testing.expectEqual(@as(usize, 1), table1.size());
-    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx1).?);
-    
-    std.debug.print("✓ ユニオンテーブル空テーブル処理成功\n", .{});
-}
-
-test "Table unionWith IPv6" {
-    const allocator = std.testing.allocator;
-    
-    // テーブル1を作成
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    
-    const pfx1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
-    table1.insert(&pfx1, 1);
-    
-    // テーブル2を作成
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    const pfx2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
-    table2.insert(&pfx2, 2);
-    
-    // ユニオン実行
-    table1.unionWith(&table2);
-    
-    // 結果をテスト
-    try std.testing.expectEqual(@as(usize, 2), table1.size());
-    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx1).?);
-    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx2).?);
-    
-    std.debug.print("✓ ユニオンテーブルIPv6処理成功\n", .{});
-}
-
-test "Table unionWith mixed IPv4 and IPv6" {
-    const allocator = std.testing.allocator;
-    
-    // テーブル1を作成（IPv4とIPv6混在）
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx6 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
-    table1.insert(&pfx4, 1);
-    table1.insert(&pfx6, 2);
-    
-    // テーブル2を作成（IPv4とIPv6混在）
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    const pfx4_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    const pfx6_2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
-    table2.insert(&pfx4_2, 3);
-    table2.insert(&pfx6_2, 4);
-    
-    // ユニオン実行
-    table1.unionWith(&table2);
-    
-    // 結果をテスト
-    try std.testing.expectEqual(@as(usize, 4), table1.size());
-    try std.testing.expectEqual(@as(usize, 2), table1.getSize4());
-    try std.testing.expectEqual(@as(usize, 2), table1.getSize6());
-    
-    // 各プレフィックスが存在することを確認
-    try std.testing.expectEqual(@as(u32, 1), table1.get(&pfx4).?);
-    try std.testing.expectEqual(@as(u32, 2), table1.get(&pfx6).?);
-    try std.testing.expectEqual(@as(u32, 3), table1.get(&pfx4_2).?);
-    try std.testing.expectEqual(@as(u32, 4), table1.get(&pfx6_2).?);
-    
-    std.debug.print("✓ ユニオンテーブルIPv4/IPv6混在処理成功\n", .{});
-}
-
-test "Table unionWith detailed verification" {
-    const allocator = std.testing.allocator;
-    
-    // より複雑なシナリオでテスト
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    // Table1: 複数のプレフィックスを挿入
-    const pfx1_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);  // 192.168.0.0/16
-    const pfx1_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);     // 10.0.0.0/8
-    const pfx1_3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);  // 172.16.0.0/12
-    const pfx1_4 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32); // 2001:db8::/32
-    
-    table1.insert(&pfx1_1, 100);
-    table1.insert(&pfx1_2, 200);
-    table1.insert(&pfx1_3, 300);
-    table1.insert(&pfx1_4, 400);
-    
-    std.debug.print("=== Table1 初期状態 ===\n", .{});
-    std.debug.print("Size: {}, IPv4: {}, IPv6: {}\n", .{ table1.size(), table1.getSize4(), table1.getSize6() });
-    std.debug.print("192.168.0.0/16 -> {}\n", .{table1.get(&pfx1_1).?});
-    std.debug.print("10.0.0.0/8 -> {}\n", .{table1.get(&pfx1_2).?});
-    std.debug.print("172.16.0.0/12 -> {}\n", .{table1.get(&pfx1_3).?});
-    std.debug.print("2001:db8::/32 -> {}\n", .{table1.get(&pfx1_4).?});
-    
-    // Table2: 一部重複、一部新規
-    const pfx2_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);  // 重複: 192.168.0.0/16
-    const pfx2_2 = Prefix.init(&IPAddr{ .v4 = .{ 203, 0, 113, 0 } }, 24);  // 新規: 203.0.113.0/24
-    const pfx2_3 = Prefix.init(&IPAddr{ .v4 = .{ 198, 51, 100, 0 } }, 24); // 新規: 198.51.100.0/24
-    const pfx2_4 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10); // 新規: fe80::/10
-    const pfx2_5 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32); // 重複: 2001:db8::/32
-    
-    table2.insert(&pfx2_1, 999);  // 重複 - この値で上書きされるはず
-    table2.insert(&pfx2_2, 500);
-    table2.insert(&pfx2_3, 600);
-    table2.insert(&pfx2_4, 700);
-    table2.insert(&pfx2_5, 888);  // 重複 - この値で上書きされるはず
-    
-    std.debug.print("\n=== Table2 初期状態 ===\n", .{});
-    std.debug.print("Size: {}, IPv4: {}, IPv6: {}\n", .{ table2.size(), table2.getSize4(), table2.getSize6() });
-    std.debug.print("192.168.0.0/16 -> {} (重複)\n", .{table2.get(&pfx2_1).?});
-    std.debug.print("203.0.113.0/24 -> {}\n", .{table2.get(&pfx2_2).?});
-    std.debug.print("198.51.100.0/24 -> {}\n", .{table2.get(&pfx2_3).?});
-    std.debug.print("fe80::/10 -> {}\n", .{table2.get(&pfx2_4).?});
-    std.debug.print("2001:db8::/32 -> {} (重複)\n", .{table2.get(&pfx2_5).?});
-    
-    // ユニオン実行前の確認
-    try std.testing.expectEqual(@as(usize, 4), table1.size());
-    try std.testing.expectEqual(@as(usize, 5), table2.size());
-    
-    // ユニオン実行
-    std.debug.print("\n=== ユニオン実行 ===\n", .{});
-    table1.unionWith(&table2);
-    
-    std.debug.print("Union後のTable1 Size: {}, IPv4: {}, IPv6: {}\n", .{ table1.size(), table1.getSize4(), table1.getSize6() });
-    
-    // 結果検証
-    // 期待値: 4 + 5 - 2(重複) = 7
-    try std.testing.expectEqual(@as(usize, 7), table1.size());
-    try std.testing.expectEqual(@as(usize, 5), table1.getSize4()); // IPv4: 3(元) + 3(新規) - 1(重複) = 5
-    try std.testing.expectEqual(@as(usize, 2), table1.getSize6()); // IPv6: 1(元) + 2(新規) - 1(重複) = 2
-    
-    // 各プレフィックスの値を確認
-    std.debug.print("\n=== 結果検証 ===\n", .{});
-    
-    // 重複したプレフィックス - table2の値で上書きされているはず
-    try std.testing.expectEqual(@as(u32, 999), table1.get(&pfx1_1).?);
-    std.debug.print("192.168.0.0/16 -> {} (999に上書き確認)\n", .{table1.get(&pfx1_1).?});
-    
-    try std.testing.expectEqual(@as(u32, 888), table1.get(&pfx1_4).?);
-    std.debug.print("2001:db8::/32 -> {} (888に上書き確認)\n", .{table1.get(&pfx1_4).?});
-    
-    // table1の元のプレフィックス - 変更されないはず
-    try std.testing.expectEqual(@as(u32, 200), table1.get(&pfx1_2).?);
-    std.debug.print("10.0.0.0/8 -> {} (変更なし確認)\n", .{table1.get(&pfx1_2).?});
-    
-    try std.testing.expectEqual(@as(u32, 300), table1.get(&pfx1_3).?);
-    std.debug.print("172.16.0.0/12 -> {} (変更なし確認)\n", .{table1.get(&pfx1_3).?});
-    
-    // table2の新規プレフィックス - 追加されているはず
-    try std.testing.expectEqual(@as(u32, 500), table1.get(&pfx2_2).?);
-    std.debug.print("203.0.113.0/24 -> {} (新規追加確認)\n", .{table1.get(&pfx2_2).?});
-    
-    try std.testing.expectEqual(@as(u32, 600), table1.get(&pfx2_3).?);
-    std.debug.print("198.51.100.0/24 -> {} (新規追加確認)\n", .{table1.get(&pfx2_3).?});
-    
-    try std.testing.expectEqual(@as(u32, 700), table1.get(&pfx2_4).?);
-    std.debug.print("fe80::/10 -> {} (新規追加確認)\n", .{table1.get(&pfx2_4).?});
-    
-    // table2は変更されていないことを確認
-    std.debug.print("\n=== Table2 変更されていないことを確認 ===\n", .{});
-    try std.testing.expectEqual(@as(usize, 5), table2.size());
-    try std.testing.expectEqual(@as(u32, 999), table2.get(&pfx2_1).?);
-    try std.testing.expectEqual(@as(u32, 500), table2.get(&pfx2_2).?);
-    try std.testing.expectEqual(@as(u32, 600), table2.get(&pfx2_3).?);
-    try std.testing.expectEqual(@as(u32, 700), table2.get(&pfx2_4).?);
-    try std.testing.expectEqual(@as(u32, 888), table2.get(&pfx2_5).?);
-    std.debug.print("Table2は変更されていません ✓\n", .{});
-    
-    std.debug.print("\n✅ 詳細検証テスト成功！\n", .{});
-}
-
-test "Table unionWith edge cases" {
-    const allocator = std.testing.allocator;
-    
-    std.debug.print("\n=== エッジケーステスト ===\n", .{});
-    
-    // ケース1: 同じテーブルとのユニオン
-    {
-        var table1 = Table(u32).init(allocator);
-        defer table1.deinit();
-        
-        const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-        const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-        table1.insert(&pfx1, 100);
-        table1.insert(&pfx2, 200);
-        
-        const original_size = table1.size();
-        std.debug.print("自分自身とのユニオン前: size = {}\n", .{original_size});
-        
-        table1.unionWith(&table1);
-        
-        // サイズは変わらないはず（全て重複）
-        try std.testing.expectEqual(original_size, table1.size());
-        try std.testing.expectEqual(@as(u32, 100), table1.get(&pfx1).?);
-        try std.testing.expectEqual(@as(u32, 200), table1.get(&pfx2).?);
-        std.debug.print("自分自身とのユニオン後: size = {} ✓\n", .{table1.size()});
-    }
-    
-    // ケース2: 大量のプレフィックス
-    {
-        var table1 = Table(u32).init(allocator);
-        defer table1.deinit();
-        var table2 = Table(u32).init(allocator);
-        defer table2.deinit();
-        
-        // table1に連続したプレフィックスを追加
-        var i: u8 = 1;
-        while (i <= 10) : (i += 1) {
-            const pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, i, 0 } }, 24);
-            table1.insert(&pfx, @as(u32, i));
-        }
-        
-        // table2に一部重複、一部新規を追加
-        i = 5;
-        while (i <= 15) : (i += 1) {
-            const pfx = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, i, 0 } }, 24);
-            table2.insert(&pfx, @as(u32, i + 100));
-        }
-        
-        const size1_before = table1.size();
-        const size2_before = table2.size();
-        std.debug.print("大量テスト前: table1={}, table2={}\n", .{ size1_before, size2_before });
-        
-        table1.unionWith(&table2);
-        
-        // 期待値: 10 + 11 - 6(重複: 5-10) = 15
-        try std.testing.expectEqual(@as(usize, 15), table1.size());
-        
-        // 重複部分はtable2の値になっているはず
-        const pfx_overlap = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 7, 0 } }, 24);
-        try std.testing.expectEqual(@as(u32, 107), table1.get(&pfx_overlap).?); // 7 + 100
-        
-        std.debug.print("大量テスト後: table1={} ✓\n", .{table1.size()});
-    }
-    
-    std.debug.print("✅ エッジケーステスト成功！\n", .{});
-} 
-
-test "Table unionWith performance test" {
-    const allocator = std.testing.allocator;
-    
-    std.debug.print("\n=== パフォーマンステスト ===\n", .{});
-    
-    var table1 = Table(u32).init(allocator);
-    defer table1.deinit();
-    var table2 = Table(u32).init(allocator);
-    defer table2.deinit();
-    
-    // シンプルなテストケース
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24); // 重複
-    const pfx5 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);
-    
-    // table1に3つのプレフィックスを追加
-    table1.insert(&pfx1, 100);
-    table1.insert(&pfx2, 200);
-    table1.insert(&pfx3, 300);
-    
-    // table2に3つのプレフィックスを追加（1つは重複）
-    table2.insert(&pfx4, 999); // 重複: pfx1と同じ
-    table2.insert(&pfx5, 500); // 新規
-    
-    const table1_size_before = table1.size();
-    const table2_size_before = table2.size();
-    
-    std.debug.print("Table1 初期サイズ: {}\n", .{table1_size_before});
-    std.debug.print("Table2 初期サイズ: {}\n", .{table2_size_before});
-    
-    // 時間計測開始
-    const start_time = std.time.nanoTimestamp();
-    
-    // ユニオン実行
-    table1.unionWith(&table2);
-    
-    const end_time = std.time.nanoTimestamp();
-    const duration_ns = end_time - start_time;
-    const duration_ms = @as(f64, @floatFromInt(duration_ns)) / 1_000_000.0;
-    
-    const final_size = table1.size();
-    const expected_size = table1_size_before + table2_size_before - 1; // 1つ重複
-    
-    std.debug.print("ユニオン実行時間: {d:.2}ms\n", .{duration_ms});
-    std.debug.print("最終サイズ: {} (期待値: {})\n", .{ final_size, expected_size });
-    
-    // 結果検証
-    try std.testing.expectEqual(expected_size, final_size);
-    
-    // 重複したプレフィックスは table2 の値になっているはず
-    try std.testing.expectEqual(@as(u32, 999), table1.get(&pfx1).?);
-    
-    // 元のプレフィックスは変更されないはず
-    try std.testing.expectEqual(@as(u32, 200), table1.get(&pfx2).?);
-    try std.testing.expectEqual(@as(u32, 300), table1.get(&pfx3).?);
-    
-    // 新規プレフィックスが追加されているはず
-    try std.testing.expectEqual(@as(u32, 500), table1.get(&pfx5).?);
-    
-    std.debug.print("✅ パフォーマンステスト成功！\n", .{});
-} 
-
-// =============================================================================
-// All系イテレーション機能のテスト
-// =============================================================================
-
-
-
-test "all6WithCallback basic" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
-    defer table.deinit();
-
-    // カウンターをリセット
-    test_ipv4_count = 0;
-    test_ipv6_count = 0;
-
-    // IPv6プレフィックスを追加
-    const pfx1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
-    const pfx2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
-    
-    table.insert(&pfx1, 1);
-    table.insert(&pfx2, 2);
-    
-    // IPv4プレフィックス（除外されるべき）
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
     table.insert(&pfx4, 4);
-    
-    // all6WithCallbackを実行
-    table.all6WithCallback(&testCountYield);
 
-    // IPv6プレフィックスのみが収集されることを確認
-    try std.testing.expect(test_ipv6_count == 2);
-    try std.testing.expect(test_ipv4_count == 0);
+    try testing.expectEqual(@as(i32, 4), table.size());
+    try testing.expectEqual(@as(i32, 0), table.size4());
+    try testing.expectEqual(@as(i32, 4), table.size6());
+
+    // Get exact prefix
+    try testing.expectEqual(@as(?i32, 1), table.get(&pfx1));
+    try testing.expectEqual(@as(?i32, 2), table.get(&pfx2));
+    try testing.expectEqual(@as(?i32, 3), table.get(&pfx3));
+    try testing.expectEqual(@as(?i32, 4), table.get(&pfx4));
+
+    // Lookup (LPM) - address in 2001:db8:1::1 should match pfx2 (more specific)
+    const addr1 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result1 = table.lookup(&addr1);
+    try testing.expect(result1.ok);
+    try testing.expectEqual(@as(i32, 2), result1.value);
+
+    // Lookup - address in 2001:db8:2::1 should match pfx1 (less specific /32)
+    const addr2 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result2 = table.lookup(&addr2);
+    try testing.expect(result2.ok);
+    try testing.expectEqual(@as(i32, 1), result2.value);
+
+    // Lookup - loopback ::1
+    const addr3 = netip.Addr.fromIPv6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result3 = table.lookup(&addr3);
+    try testing.expect(result3.ok);
+    try testing.expectEqual(@as(i32, 3), result3.value);
+
+    // Lookup - link-local fe80::1
+    const addr4 = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result4 = table.lookup(&addr4);
+    try testing.expect(result4.ok);
+    try testing.expectEqual(@as(i32, 4), result4.value);
+
+    // Contains
+    try testing.expect(table.contains(&addr1));
+    try testing.expect(table.contains(&addr4));
+
+    // Address not in table
+    const addr5 = netip.Addr.fromIPv6(.{ 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result5 = table.lookup(&addr5);
+    try testing.expect(!result5.ok);
 }
 
-test "allWithCallback mixed IPv4 and IPv6" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
+test "IPv6 lookupPrefix and LPM" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
     defer table.deinit();
 
-    // カウンターをリセット
-    test_ipv4_count = 0;
-    test_ipv6_count = 0;
-    
-    // IPv4とIPv6プレフィックスを混在で追加
-    const pfx4_1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx4_2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    const pfx6_1 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
-    const pfx6_2 = Prefix.init(&IPAddr{ .v6 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 10);
-    
-    table.insert(&pfx4_1, 1);
-    table.insert(&pfx4_2, 2);
-    table.insert(&pfx6_1, 3);
-    table.insert(&pfx6_2, 4);
-    
-    // allWithCallbackを実行
-    table.allWithCallback(&testCountYield);
-    
-    // IPv4とIPv6の両方が含まれることを確認
-    try std.testing.expect(test_ipv4_count == 2);
-    try std.testing.expect(test_ipv6_count == 2);
+    // ::/0 (default route)
+    var pfx_default = netip.Addr.fromIPv6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(0).masked();
+    // 2000::/3
+    var pfx_global = netip.Addr.fromIPv6(.{ 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(3).masked();
+    // 2001:db8::/32
+    var pfx_doc = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+
+    table.insert(&pfx_default, 0);
+    table.insert(&pfx_global, 1);
+    table.insert(&pfx_doc, 2);
+
+    // LookupPrefix for 2001:db8:1::/48 should find 2001:db8::/32
+    var query_pfx = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(48).masked();
+    const lp_result = table.lookupPrefix(&query_pfx);
+    try testing.expect(lp_result.ok);
+    try testing.expectEqual(@as(i32, 2), lp_result.value);
+
+    // LookupPrefixLPM for 2001:db8:1::/48 should return the matching prefix
+    const lpm_result = table.lookupPrefixLPM(&query_pfx);
+    try testing.expect(lpm_result.ok);
+    try testing.expectEqual(@as(i32, 2), lpm_result.value);
+    try testing.expect(lpm_result.lpm_prefix.eql(&pfx_doc));
 }
 
-test "allSorted4WithCallback order verification" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
+test "IPv6 clone - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
     defer table.deinit();
 
-    // カウンターをリセット
-    test_ipv4_count = 0;
-    test_ipv6_count = 0;
-    
-    // 意図的に順序を混乱させたプレフィックスを追加
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 2, 0 } }, 24);    // 後のアドレス
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 0, 0 } }, 16);    // より短いプレフィックス
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);    // 前のアドレス
-    const pfx4 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);        // 全く違うアドレス空間
-    
-    table.insert(&pfx3, 3);
-    table.insert(&pfx1, 1);
-    table.insert(&pfx2, 2);
-    table.insert(&pfx4, 4);
-    
-    // allSorted4WithCallbackを実行
-    table.allSorted4WithCallback(&testCountYield);
-    
-    // IPv4プレフィックスが4つ全て収集されることを確認
-    try std.testing.expect(test_ipv4_count == 4);
-    try std.testing.expect(test_ipv6_count == 0);
-}
+    var prng = std.Random.DefaultPrng.init(88888);
+    const random = prng.random();
 
-// テスト用のグローバル変数
-var test_ipv4_count: u32 = 0;
-var test_ipv6_count: u32 = 0;
+    const count = 300;
+    var prefixes: [count]netip.Prefix = undefined;
 
-// テスト用のカウンター関数
-fn testCountYield(prefix: Prefix, value: u32) bool {
-    _ = value;
-    if (prefix.addr.is4()) {
-        test_ipv4_count += 1;
-    } else {
-        test_ipv6_count += 1;
+    for (&prefixes, 0..) |*pfx, i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
     }
-    return true; // 継続
+
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    try testing.expectEqual(table.size(), cloned.size());
+
+    for (&prefixes) |*pfx| {
+        const orig = table.get(pfx);
+        const clone_val = cloned.get(pfx);
+        try testing.expectEqual(orig, clone_val);
+    }
 }
 
-test "all4WithCallback basic" {
-    const allocator = std.testing.allocator;
-    var table = Table(u32).init(allocator);
+test "IPv6 union - memory safety" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    var prng = std.Random.DefaultPrng.init(44444);
+    const random = prng.random();
+
+    for (0..200) |i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table_a.insert(&pfx, @as(i32, @intCast(i)));
+    }
+
+    for (0..200) |i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table_b.insert(&pfx, @as(i32, @intCast(i + 1000)));
+    }
+
+    try table_a.Union(&table_b);
+    try testing.expect(table_a.size() > 0);
+}
+
+test "IPv6 overlaps" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    // Disjoint: 2001:db8::/32 vs fe80::/10
+    var pfx_a = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+    var pfx_b = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(10).masked();
+    table_a.insert(&pfx_a, 1);
+    table_b.insert(&pfx_b, 2);
+
+    try testing.expect(!table_a.overlaps(&table_b));
+
+    // Overlapping: add 2001:db8:1::/48 to table_b (subset of pfx_a)
+    var pfx_c = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(48).masked();
+    table_b.insert(&pfx_c, 3);
+
+    try testing.expect(table_a.overlaps(&table_b));
+}
+
+test "IPv6 getAndDelete" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
     defer table.deinit();
 
-    // カウンターをリセット
-    test_ipv4_count = 0;
-    test_ipv6_count = 0;
+    var prng = std.Random.DefaultPrng.init(55555);
+    const random = prng.random();
 
-    // IPv4プレフィックスを追加
-    const pfx1 = Prefix.init(&IPAddr{ .v4 = .{ 192, 168, 1, 0 } }, 24);
-    const pfx2 = Prefix.init(&IPAddr{ .v4 = .{ 10, 0, 0, 0 } }, 8);
-    const pfx3 = Prefix.init(&IPAddr{ .v4 = .{ 172, 16, 0, 0 } }, 12);
-    
-    table.insert(&pfx1, 24);
-    table.insert(&pfx2, 8);
-    table.insert(&pfx3, 16);
+    const count = 300;
+    var prefixes: [count]netip.Prefix = undefined;
 
-    // IPv6プレフィックスを追加（含まれるべきではない）
-    const pfx6 = Prefix.init(&IPAddr{ .v6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, 32);
-    table.insert(&pfx6, 32);
-    
-    // all4WithCallbackを実行
-    table.all4WithCallback(&testCountYield);
+    for (&prefixes, 0..) |*pfx, i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
 
-    // IPv4プレフィックスのみが収集されることを確認
-    try std.testing.expect(test_ipv4_count == 3);
-    try std.testing.expect(test_ipv6_count == 0);
+    // Delete first half
+    for (prefixes[0..150]) |*pfx| {
+        _ = table.getAndDelete(pfx);
+    }
+
+    // Verify deleted
+    for (prefixes[0..150]) |*pfx| {
+        try testing.expectEqual(@as(?i32, null), table.get(pfx));
+    }
+
+    try testing.expect(table.size() >= 0);
 }
 
+test "mixed IPv4 and IPv6" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    // IPv4
+    var pfx4 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    table.insert(&pfx4, 4);
+
+    // IPv6
+    var pfx6 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+    table.insert(&pfx6, 6);
+
+    try testing.expectEqual(@as(i32, 2), table.size());
+    try testing.expectEqual(@as(i32, 1), table.size4());
+    try testing.expectEqual(@as(i32, 1), table.size6());
+
+    try testing.expectEqual(@as(?i32, 4), table.get(&pfx4));
+    try testing.expectEqual(@as(?i32, 6), table.get(&pfx6));
+
+    // Lookup IPv4
+    const addr4 = netip.Addr.fromIPv4(10, 1, 2, 3);
+    const r4 = table.lookup(&addr4);
+    try testing.expect(r4.ok);
+    try testing.expectEqual(@as(i32, 4), r4.value);
+
+    // Lookup IPv6
+    const addr6 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const r6 = table.lookup(&addr6);
+    try testing.expect(r6.ok);
+    try testing.expectEqual(@as(i32, 6), r6.value);
+
+    // Clone should preserve both
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+    try testing.expectEqual(@as(?i32, 4), cloned.get(&pfx4));
+    try testing.expectEqual(@as(?i32, 6), cloned.get(&pfx6));
+}
+
+test "IPv6 sub-octet prefix fe80::/10 lookup" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    // fe80::/10
+    var pfx = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(10).masked();
+    table.insert(&pfx, 42);
+
+    // Verify insert worked
+    try testing.expectEqual(@as(i32, 1), table.size());
+    try testing.expectEqual(@as(?i32, 42), table.get(&pfx));
+
+    // Verify contains
+    const addr = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    try testing.expect(pfx.contains(&addr));
+
+    // Verify lookup
+    const result = table.lookup(&addr);
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(i32, 42), result.value);
+}

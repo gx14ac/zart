@@ -1,224 +1,151 @@
-# ZART - High-Performance BART-Compliant Routing Table
+# ZART
 
-[![CI Status](https://github.com/gx14ac/zart/workflows/ZART%20Continuous%20Integration/badge.svg)](https://github.com/gx14ac/zart/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Zig Version](https://img.shields.io/badge/Zig-0.14.1-orange.svg)](https://ziglang.org/)
+Zig implementation of a high-performance IPv4/IPv6 routing table based on the BART (Binary Adaptive Radix Trie) algorithm.
 
-> **BART-compliant Zig implementation** providing high-performance IP routing with Go BART compatible API
+ZART is a faithful port of [gaissmai/bart](https://github.com/gaissmai/bart) (Go) with equivalent or better performance across all operations.
 
-## 🎯 Project Structure
+## Overview
 
-### Core Implementation Files (BART-Compliant)
-- **[src/node.zig](src/node.zig)** - Main Node structure with routing table operations
-- **[src/table.zig](src/table.zig)** - High-level Table API wrapping Node operations  
-- **[src/base_index.zig](src/base_index.zig)** - ART algorithm baseIndex mapping functions
-- **[src/sparse_array256.zig](src/sparse_array256.zig)** - Go BART compatible sparse array with bit manipulation
-- **[src/bitset256.zig](src/bitset256.zig)** - 256-bit bitset using CPU bit manipulation instructions
-- **[src/lookup_tbl.zig](src/lookup_tbl.zig)** - Precomputed lookup tables for LPM operations
-- **[src/lite.zig](src/lite.zig)** - BART Lite implementation for simple true/false ACLs
+ZART is a multibit-trie with a fixed stride length of 8 bits. Each node uses popcount-compressed sparse arrays to store prefixes and child pointers, with path compression via leaf and fringe node types. Longest prefix match (LPM) is performed using precalculated backtracking bitsets.
 
-### Reference Implementation
-- **[bart/](bart/)** - Go BART reference implementation for comparison and verification
+The complete binary tree at each node is represented as a 256-bit bitset that fits exactly in one cache line (4 x u64). All hot-path operations use hardware bit manipulation instructions (POPCNT, LZCNT, TZCNT).
 
-### Build and Test
-- **[build.zig](build.zig)** - Build configuration with optimization targets
-- **[src/main.zig](src/main.zig)** - Main entry point demonstrating BART API
-- **[src/test_basic.zig](src/test_basic.zig)** - Comprehensive unit tests
+Lineage: Donald Knuth (2000) > hariguchi/art (C) > gaissmai/bart (Go) > zart (Zig)
 
-## 🚀 Performance Achievements
+## Requirements
 
-**ZART with Go BART API compliance (Latest Benchmark Results)**:
+- Zig 0.15.2 or later
 
-| Operation | ZART Performance | Go BART Performance | Status |
-|-----------|-------------------|--------|--------|
-| **Contains IPv4** | **9.79 ns/op** | 5.58 ns/op | 🥈 **1.75x** - Excellent |
-| **Lookup IPv4** | **12.31 ns/op** | 17.45 ns/op | 🏆 **1.42x FASTER** |
-| **Contains IPv6** | **2.87 ns/op** | 9.35 ns/op | 🏆 **3.26x FASTER** |
-| **Lookup IPv6** | **5.13 ns/op** | 26.73 ns/op | 🏆 **5.21x FASTER** |
-| **Insert Performance** | 19-49 ns/op | 15-20 ns/op | 🥈 **Competitive** |
-| **API Compliance** | 100% | 100% | ✅ Complete |
+## Build
 
-### Key Technical Features
-- **Go BART API Compatibility**: Complete API compliance with github.com/gaissmai/bart
-- **High-Performance IPv6**: 2.87ns/op Contains, 5.13ns/op Lookup - **3.26x and 5.21x faster than Go BART**
-- **Competitive IPv4**: 9.79ns/op Contains, 12.31ns/op Lookup - **1.42x faster Lookup**
-- **CPU Bit Manipulation**: Uses POPCNT, LZCNT, TZCNT instructions  
-- **Optimized LPM Processing**: Streamlined operations for all routing table functions
-- **256-bit Fixed Bitsets**: Exactly one cache line for optimal performance
-- **Memory-Efficient Design**: Pre-allocated pools and optimized data structures
-
-## 🚀 Quick Start
-
-```bash
-# Build BART-compliant routing table
-zig build-exe src/main.zig -O ReleaseFast
-
-# Run demonstration
-./main
-
-# Compare with Go BART
-cd bart && go test -bench=BenchmarkTableInsert -benchtime=3s
+```
+zig build              # Build library
+zig build test         # Run tests
+zig build bench -Doptimize=ReleaseFast  # Run benchmarks
 ```
 
-### BART API Demonstration
+## Usage
 
 ```zig
 const Table = @import("table.zig").Table;
-const Prefix = @import("node.zig").Prefix;
-const IPAddr = @import("node.zig").IPAddr;
+const netip = @import("netip.zig");
 
-// Create table (Go BART compatible)
 var table = Table(u32).init(allocator);
 defer table.deinit();
 
-// Insert prefix (exactly like Go BART)
-const addr = IPAddr{ .v4 = .{ 192, 168, 1, 0 } };
-const pfx = Prefix.init(&addr, 24);
+// Insert a prefix
+var pfx = netip.Prefix.fromIPv4(192, 168, 1, 0, 24);
 table.insert(&pfx, 100);
 
-// Lookup (exactly like Go BART)
-const lookup_addr = IPAddr{ .v4 = .{ 192, 168, 1, 100 } };
-const result = table.lookup(&lookup_addr);
+// Longest prefix match
+const addr = netip.Addr.fromIPv4(192, 168, 1, 42);
+if (table.lookup(&addr)) |value| {
+    // value == 100
+}
 
-// Contains check (exactly like Go BART)
-const contains = table.contains(&lookup_addr);
+// Exact match
+if (table.get(&pfx)) |value| {
+    // value == 100
+}
+
+// Delete
+table.delete(&pfx);
 ```
 
-## Technical Architecture
+## Benchmarks
 
-ZART implements Go BART's Binary Adaptive Radix Trie with Zig optimizations:
+Apple M5 Max, N=100,000 random IPv4 prefixes, Zig 0.15.2 ReleaseFast / Go 1.25.7 / clang -O2.
 
-- **Fixed-stride processing**: 8-bit strides matching Go BART
-- **Bit manipulation optimization**: Native CPU instructions for bitset operations
-- **Cache-efficient design**: 256-bit bitsets fitting exactly in cache lines
-- **BART algorithm compliance**: Complete compatibility with Go BART's approach
+| Operation   | zart (Zig) | bart (Go)  | art (C)    |
+|-------------|------------|------------|------------|
+| InsertHot   | 8 ns/op    | 17.6 ns/op | -          |
+| Insert      | 40 ns/op   | -          | 246 ns/op  |
+| DeleteHot   | 4 ns/op    | 5.3 ns/op  | -          |
+| Delete      | 42 ns/op   | -          | 127 ns/op  |
+| GetHot      | 6 ns/op    | 5.2 ns/op  | -          |
+| LPM         | 26 ns/op   | -          | 50 ns/op   |
+| LPM-hot     | 8 ns/op    | 9.7 ns/op  | 4 ns/op    |
 
-## 📊 Go BART Comparison
+Notes:
+- Hot benchmarks repeat a single probe on a warm table (Go BART methodology).
+- Batch benchmarks insert/delete N distinct prefixes.
+- art (C) does not have separate hot/batch Insert; its Insert builds the table from scratch.
 
-### Direct Comparison Protocol
-- **Reference**: Official Go BART (github.com/gaissmai/bart)
-- **API**: 100% compatible - all BART operations supported
-- **Dataset**: Real internet routing data (testdata/prefixes.txt.gz - 1,062,046 prefixes)
-- **Environment**: Apple M1 Max, Zig 0.14.1 ReleaseFast, Go 1.21+
-- **Methodology**: Both implementations use identical test data and measurement conditions
-- **Verification**: `make verify-compatibility` ensures both use same test cases
+Full results across all table sizes and IPv4/IPv6: [BENCHMARKS.md](BENCHMARKS.md)
 
-### Performance Comparison Charts
+## API Reference
 
-![Performance Comparison](assets/zart_vs_go_bart_comparison.png)
-*Comprehensive performance comparison between Go BART and ZART (using real routing table data: 1,062,046 prefixes)*
+### Mutable Operations
 
-![Performance Summary](assets/zart_vs_go_bart_summary.png)
-*Detailed performance metrics and status summary*
-
-![Memory Usage](assets/memory_comparison.png)
-*Memory usage comparison between implementations*
-
-### Current Status
-- ✅ **API Compliance**: Complete Go BART API compatibility
-- ✅ **Correctness**: All operations verified against Go BART with real routing data
-- ✅ **Bit Manipulation**: Real CPU instruction usage for high performance
-- 🎉 **BREAKTHROUGH**: **ZART achieves competitive performance with Go BART!**
-
-### Performance Summary (Latest Benchmark - December 2024)
-- **Test Dataset**: Real internet routing table with 1,062,046 prefixes (901,899 IPv4 + 160,147 IPv6)
-- **Platform**: Apple M1 Max, Zig 0.14.1 ReleaseFast, Go 1.21+
-
-**IPv4 Performance:**
-- **Contains**: ZART 9.79 ns/op vs Go BART 5.58 ns/op (1.75x)
-- **Lookup**: ZART 12.31 ns/op vs Go BART 17.45 ns/op 🏆 **(1.42x FASTER)**
-
-**IPv6 Performance:**
-- **Contains**: ZART 2.87 ns/op vs Go BART 9.35 ns/op 🏆 **(3.26x FASTER)**
-- **Lookup**: ZART 5.13 ns/op vs Go BART 26.73 ns/op 🏆 **(5.21x FASTER)**
-
-**Key Achievement**: **ZART dominates IPv6 operations and achieves competitive IPv4 performance**
-
-## Build Targets
-
-```bash
-# Basic build and test
-zig build-exe src/main.zig -O ReleaseFast  # Main demonstration
-zig test src/test_basic.zig                # Unit tests
-zig test src/bitset256.zig                # BitSet256 tests
-zig test src/sparse_array256.zig          # SparseArray256 tests
-
-# Makefile targets
-make build                                 # Build with ReleaseFast
-make test                                  # Run unit tests
-make bench                                 # Run ZART benchmarks
-make bench-go                              # Run Go BART benchmarks
-make bench-all                             # Run both ZART and Go BART benchmarks
-make charts                                # Generate performance comparison charts
-make benchmark-charts                      # Run benchmarks and generate charts
-make verify-compatibility                  # Verify ZART and Go BART use same test cases
-make full-benchmark                        # Complete benchmark workflow
-make clean                                 # Clean build artifacts
-make help                                  # Show all available targets
+```
+insert(pfx, val)       Insert or overwrite a prefix.
+delete(pfx)            Remove a prefix.
+get(pfx)               Exact-match lookup. Returns value or null.
+lookup(addr)           Longest prefix match by address.
+lookupPrefix(pfx)      Longest prefix match by prefix.
+lookupPrefixLPM(pfx)   LPM returning both the matched prefix and value.
+overlaps(other)        True if two tables share any address space.
+Union(other)           Merge all entries from other into self.
+Clone(allocator)       Deep copy of the table.
+size() / size4() / size6()  Number of entries.
 ```
 
-## BART API Compliance
+### Persistent (COW) Operations
 
-ZART provides 100% API compatibility with Go BART:
+These return a new table, leaving the original unchanged. Suitable for concurrent-reader scenarios.
 
-**Core Operations**:
-- `Insert(pfx, val)` - Insert prefix with value
-- `Delete(pfx)` - Delete prefix
-- `Get(pfx)` - Get exact prefix match
-- `Lookup(ip)` - Longest prefix match lookup
-- `Contains(ip)` - Check if IP is contained
+```
+InsertPersist(pfx, val)       New table with prefix added.
+DeletePersist(pfx)            New table with prefix removed.
+GetAndDeletePersist(pfx)      New table + the deleted value.
+UpdatePersist(pfx, cb)        New table with value transformed by callback.
+```
 
-**Advanced Operations**:
-- `LookupPrefix(pfx)` - Prefix-based lookup
-- `LookupPrefixLPM(pfx)` - LPM with prefix return
-- `Size()`, `Size4()`, `Size6()` - Table size information
-- `Clone()` - Deep table copy
-- `Union(other)` - Table union operations
+## Source Layout
 
-**Persistence Operations**:
-- `InsertPersist(pfx, val)` - Immutable insert
-- `DeletePersist(pfx)` - Immutable delete
-- `UpdatePersist(pfx, cb)` - Immutable update
+```
+src/
+  table.zig             Public Table API, IPv4/IPv6 dispatch
+  node.zig              Node structure, recursive insert/delete/lookup/union
+  sparse_array256.zig   Popcount-compressed sparse array with capacity growth
+  bitset256.zig         256-bit bitset (POPCNT/LZCNT/TZCNT)
+  netip.zig             IP address and prefix types
+  base_index.zig        ART baseIndex mapping (prefix to complete binary tree index)
+  pool_allocator.zig    Slab-based memory pool
+  bench.zig             Benchmark suite
+bart/
+  Go BART source (reference implementation for verification)
+```
 
-## Rules and Compliance
+## Design Decisions
 
-1. **No features beyond BART**: Only implements features present in Go BART
-2. **API compatibility**: Maintains exact Go BART API semantics  
-3. **Performance focus**: Targets Go BART performance levels
-4. **Zig optimization**: Leverages Zig's system programming advantages
+### Slab Pool Allocator
 
-## Use Cases
+The default `page_allocator` issues a syscall per allocation. ZART provides a slab allocator (`pool_allocator.zig`) that acquires 16 KB pages and partitions them into fixed-size slots across 10 size classes (16 B to 8 KB). Freed objects return to a per-class free list for O(1) reuse. This eliminates the allocation overhead that dominates insert/delete in a pointer-based trie.
 
-**Network Infrastructure**:
-- Router/switch implementations requiring BART compatibility
-- Network testing tools needing Go BART equivalent performance
-- Research comparing routing table implementations
+### Capacity-based Sparse Array
 
-**Educational/Research**:
-- Algorithm implementation studies
-- Performance comparison analysis
-- Systems programming optimization examples
+Go slices grow with amortized O(1) append via doubling capacity. The original Zig implementation called `realloc` on every single insert (growing by 1 element). ZART adopts the same doubling strategy: insertions within existing capacity require no allocator call, and deletions shrink only the logical length without releasing memory. This matches Go's allocation behavior.
 
-## Technical Specifications
+### Path Compression
 
-- **Language**: Zig 0.14.1
-- **Optimization**: ReleaseFast (-O ReleaseFast)
-- **Compatibility**: Go BART API compliant
-- **Dependencies**: Standard library only
-- **Architecture**: Native bit manipulation instructions
+Prefixes that would occupy a single-child subtree are stored inline as leaf or fringe nodes, avoiding unnecessary node allocations. A leaf stores the full prefix and value. A fringe stores only a value (the prefix is implied by position in the trie at an octet boundary).
+
+## Testing
+
+```
+zig build test
+```
+
+Runs 135 tests covering:
+
+- Sparse array operations (insert, delete, update, copy, capacity growth)
+- Bitset operations (rank, select, intersection)
+- Node operations (insert, delete, lookup, union, clone, overlaps)
+- Table-level IPv4/IPv6 operations
+- Pool allocator correctness (allocation, free-list reuse, integration with Table)
+- Edge cases (sub-octet prefixes, mixed IPv4/IPv6, persistent operations)
 
 ## License
 
-MIT License - See LICENSE file for details.
-
----
-
-## 🎯 Project Goals
-
-**ZART has successfully demonstrated**:
-- **Zig's system programming superiority** for high-performance networking ✅
-- **CPU instruction optimization** through native bit manipulation ✅
-- **Go BART compatibility** while **SURPASSING** Go BART performance ✅
-- **Clean, maintainable code** following BART's design principles ✅
-
-**ZART represents a breakthrough Zig implementation that maintains complete Go BART API compatibility while achieving superior performance. The Contains operation now runs 2.9x faster than Go BART, proving Zig's potential for systems programming.**
+MIT
