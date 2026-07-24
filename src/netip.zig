@@ -101,38 +101,169 @@ pub const Addr = struct {
         return Addr.fromIPv4(parts[0], parts[1], parts[2], parts[3]);
     }
 
-    /// Parse IPv6 address from string (simplified implementation)
+    /// Parse IPv6 address from string (RFC 5952 compliant).
+    /// Supports full form (8 groups), compressed (::), and IPv4-mapped (::ffff:1.2.3.4).
+    /// Zone identifiers (%eth0) are stripped and ignored.
     fn parseIPv6(s: []const u8) !Addr {
-        // Simplified IPv6 parsing for common test cases
-        if (std.mem.eql(u8, s, "2001:db8::1")) {
-            return Addr.fromIPv6([16]u8{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
-        } else if (std.mem.eql(u8, s, "::1")) {
-            return Addr.fromIPv6([16]u8{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
-        } else if (std.mem.eql(u8, s, "::")) {
-            return Addr.fromIPv6([16]u8{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-        } else if (std.mem.eql(u8, s, "ff:aaaa::1")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xaa, 0xaa, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
-        } else if (std.mem.eql(u8, s, "ff:aaaa::2")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xaa, 0xaa, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2});
-        } else if (std.mem.eql(u8, s, "ff:aaaa::3")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xaa, 0xaa, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3});
-        } else if (std.mem.eql(u8, s, "ff:aaaa::255")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xaa, 0xaa, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff});
-        } else if (std.mem.eql(u8, s, "ff:aaaa:aaaa::1")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xaa, 0xaa, 0xaa, 0xaa, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
-        } else if (std.mem.eql(u8, s, "ff:aaaa:aaaa:bbbb::1")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xaa, 0xaa, 0xaa, 0xaa, 0xbb, 0xbb, 0, 0, 0, 0, 0, 0, 0, 1});
-        } else if (std.mem.eql(u8, s, "ff:cccc::1")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xcc, 0xcc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
-        } else if (std.mem.eql(u8, s, "ff:cccc::ff")) {
-            return Addr.fromIPv6([16]u8{0xff, 0, 0xcc, 0xcc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff});
-        } else if (std.mem.eql(u8, s, "ffff:bbbb::5")) {
-            return Addr.fromIPv6([16]u8{0xff, 0xff, 0xbb, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5});
-        } else if (std.mem.eql(u8, s, "ffff:bbbb::15")) {
-            return Addr.fromIPv6([16]u8{0xff, 0xff, 0xbb, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15});
+        // Strip zone identifier if present
+        var input = s;
+        for (s, 0..) |c, i| {
+            if (c == '%') {
+                input = s[0..i];
+                break;
+            }
         }
-        // For now, return error for unsupported IPv6 addresses
-        return error.UnsupportedIPv6Format;
+
+        if (input.len == 0) return error.InvalidIPv6;
+
+        var octets = [_]u8{0} ** 16;
+        var group_count: usize = 0; // number of groups parsed before ::
+        var post_groups: usize = 0; // number of groups parsed after ::
+        var expand_pos: ?usize = null; // byte position where :: expansion goes
+        var pos: usize = 0; // current byte write position (0..16, step 2)
+        var i: usize = 0;
+
+        // Handle leading ::
+        if (input.len >= 2 and input[0] == ':' and input[1] == ':') {
+            expand_pos = 0;
+            i = 2;
+            if (i == input.len) {
+                // "::" = all zeros
+                return Addr.fromIPv6(octets);
+            }
+        }
+
+        while (i < input.len) {
+            // Check for IPv4-mapped suffix (can appear after :: or after at least one group)
+            if (pos <= 12 and (expand_pos != null or group_count >= 1)) {
+                if (parseIPv4Tail(input[i..])) |ipv4_bytes| {
+                    if (pos > 12) return error.InvalidIPv6;
+                    // Write IPv4 bytes at current position (they take 4 bytes = 2 groups)
+                    octets[pos] = ipv4_bytes[0];
+                    octets[pos + 1] = ipv4_bytes[1];
+                    octets[pos + 2] = ipv4_bytes[2];
+                    octets[pos + 3] = ipv4_bytes[3];
+                    pos += 4;
+                    if (expand_pos != null) {
+                        post_groups += 2;
+                    } else {
+                        group_count += 2;
+                    }
+                    i = input.len; // consumed rest
+                    break;
+                }
+            }
+
+            // Parse one hex group (1-4 hex digits)
+            const group_start = i;
+            var value: u16 = 0;
+            var digits: usize = 0;
+            while (i < input.len) : (i += 1) {
+                const c = input[i];
+                const digit = switch (c) {
+                    '0'...'9' => c - '0',
+                    'a'...'f' => c - 'a' + 10,
+                    'A'...'F' => c - 'A' + 10,
+                    else => break,
+                };
+                if (digits >= 4) return error.InvalidIPv6;
+                value = (value << 4) | @as(u16, digit);
+                digits += 1;
+            }
+
+            if (digits == 0) {
+                // No digits found — only valid if we just processed :: at start
+                if (group_start == 0 and expand_pos != null) break;
+                return error.InvalidIPv6;
+            }
+
+            if (pos >= 16) return error.InvalidIPv6;
+            octets[pos] = @intCast(value >> 8);
+            octets[pos + 1] = @intCast(value & 0xFF);
+            pos += 2;
+            if (expand_pos != null) {
+                post_groups += 1;
+            } else {
+                group_count += 1;
+            }
+
+            // Check what follows
+            if (i >= input.len) break;
+
+            if (input[i] == ':') {
+                i += 1;
+                if (i < input.len and input[i] == ':') {
+                    // Found ::
+                    if (expand_pos != null) return error.InvalidIPv6; // double ::
+                    expand_pos = pos;
+                    i += 1;
+                    if (i == input.len) break;
+                } else {
+                    // Single colon — next group follows
+                    if (i == input.len) return error.InvalidIPv6; // trailing :
+                }
+            } else {
+                return error.InvalidIPv6; // unexpected character
+            }
+        }
+
+        // Expand :: into zeros
+        if (expand_pos) |ep| {
+            const total_groups = group_count + post_groups;
+            if (total_groups > 8) return error.InvalidIPv6;
+            const missing_bytes = 16 - (total_groups * 2);
+            // Shift post-:: groups to the right
+            const post_bytes = post_groups * 2;
+            if (post_bytes > 0) {
+                // Move bytes from [ep..ep+post_bytes] to [ep+missing_bytes..ep+missing_bytes+post_bytes]
+                var j: usize = post_bytes;
+                while (j > 0) {
+                    j -= 1;
+                    octets[ep + missing_bytes + j] = octets[ep + j];
+                }
+            }
+            // Zero-fill the gap
+            @memset(octets[ep .. ep + missing_bytes], 0);
+        } else {
+            // No :: : must have exactly 8 groups (16 bytes)
+            if (pos != 16) return error.InvalidIPv6;
+        }
+
+        return Addr.fromIPv6(octets);
+    }
+
+    /// Try to parse an IPv4 address at the tail of an IPv6 string.
+    /// Returns null if the string does not look like an IPv4 address.
+    fn parseIPv4Tail(s: []const u8) ?[4]u8 {
+        // Quick check: must contain a dot
+        var has_dot = false;
+        for (s) |c| {
+            if (c == '.') {
+                has_dot = true;
+                break;
+            }
+        }
+        if (!has_dot) return null;
+
+        var parts: [4]u8 = undefined;
+        var part_index: usize = 0;
+        var start: usize = 0;
+
+        for (s, 0..) |c, idx| {
+            if (c == '.' or idx == s.len - 1) {
+                if (part_index >= 4) return null;
+                const end = if (c == '.') idx else idx + 1;
+                const part_str = s[start..end];
+                if (part_str.len == 0 or part_str.len > 3) return null;
+                parts[part_index] = std.fmt.parseInt(u8, part_str, 10) catch return null;
+                part_index += 1;
+                start = idx + 1;
+            } else if (c < '0' or c > '9') {
+                return null;
+            }
+        }
+        if (part_index != 4) return null;
+        return parts;
     }
 };
 
@@ -164,34 +295,31 @@ pub const Prefix = struct {
     /// Go BART: func (p Prefix) Masked() netip.Prefix
     pub fn masked(self: *const Prefix) Prefix {
         var masked_addr = self.address;
-        
-        // Determine starting offset for IPv4 vs IPv6
-        const start_offset: u8 = if (self.is4()) 12 else 0; // IPv4 starts at octet 12
+
+        const start_offset: u8 = if (self.is4()) 12 else 0;
         const addr_len: u8 = if (self.is4()) 4 else 16;
-        
-        // Apply mask to clear bits beyond prefix length
+
         const full_bytes = self.prefix_len / 8;
         const remaining_bits = self.prefix_len % 8;
-        
-        // Clear complete bytes beyond prefix length
+
         if (full_bytes < addr_len) {
-            // Clear all bytes after full_bytes (adjusted for start offset)
-            const clear_start = start_offset + full_bytes;
-            const clear_end = start_offset + addr_len;
-            if (clear_start < clear_end) {
-                @memset(masked_addr.octets[clear_start..clear_end], 0);
-            }
-            
-            // If there are remaining bits in the last byte, apply partial mask
-            if (remaining_bits > 0 and full_bytes < addr_len) {
+            // Apply partial mask to the boundary byte first
+            if (remaining_bits > 0) {
                 const byte_idx = start_offset + full_bytes;
                 if (byte_idx < 16) {
                     const mask = (@as(u8, 0xFF) << @intCast(8 - remaining_bits));
                     masked_addr.octets[byte_idx] &= mask;
                 }
             }
+
+            // Clear all bytes strictly after the boundary byte
+            const clear_start = start_offset + full_bytes + @as(u8, if (remaining_bits > 0) 1 else 0);
+            const clear_end = start_offset + addr_len;
+            if (clear_start < clear_end) {
+                @memset(masked_addr.octets[clear_start..clear_end], 0);
+            }
         }
-        
+
         return Prefix{
             .address = masked_addr,
             .prefix_len = self.prefix_len,
@@ -354,3 +482,98 @@ pub const Prefix = struct {
         };
     }
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+const testing = std.testing;
+
+test "parseIPv6: loopback ::1" {
+    const addr = try Addr.parseAddr("::1");
+    const expected = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: all zeros ::" {
+    const addr = try Addr.parseAddr("::");
+    const expected = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: full form 2001:0db8:0000:0000:0000:0000:0000:0001" {
+    const addr = try Addr.parseAddr("2001:0db8:0000:0000:0000:0000:0000:0001");
+    const expected = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: compressed 2001:db8::1" {
+    const addr = try Addr.parseAddr("2001:db8::1");
+    const expected = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: ff:aaaa::1 (single-byte groups)" {
+    const addr = try Addr.parseAddr("ff:aaaa::1");
+    // ff = 0x00ff, aaaa = 0xaaaa
+    const expected = [16]u8{ 0x00, 0xff, 0xaa, 0xaa, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: ffff:bbbb::5" {
+    const addr = try Addr.parseAddr("ffff:bbbb::5");
+    const expected = [16]u8{ 0xff, 0xff, 0xbb, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: fe80::1%eth0 (zone ID stripped)" {
+    const addr = try Addr.parseAddr("fe80::1%eth0");
+    const expected = [16]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: all ones ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" {
+    const addr = try Addr.parseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
+    const expected = [_]u8{0xff} ** 16;
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: middle compression 2001:db8::ff00:42:8329" {
+    const addr = try Addr.parseAddr("2001:db8::ff00:42:8329");
+    const expected = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0x00, 0x42, 0x83, 0x29 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: IPv4-mapped ::ffff:192.168.1.1" {
+    const addr = try Addr.parseAddr("::ffff:192.168.1.1");
+    const expected = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 1 };
+    try testing.expectEqualSlices(u8, &expected, &addr.octets);
+}
+
+test "parseIPv6: rejects double ::" {
+    const result = Addr.parseAddr("2001::db8::1");
+    try testing.expectError(error.InvalidIPv6, result);
+}
+
+test "parseIPv6: rejects too many groups" {
+    const result = Addr.parseAddr("1:2:3:4:5:6:7:8:9");
+    try testing.expectError(error.InvalidIPv6, result);
+}
+
+test "parseIPv4: basic" {
+    const addr = try Addr.parseAddr("10.0.0.1");
+    try testing.expect(addr.is4());
+    try testing.expectEqual(@as(u8, 10), addr.octets[12]);
+    try testing.expectEqual(@as(u8, 0), addr.octets[13]);
+    try testing.expectEqual(@as(u8, 0), addr.octets[14]);
+    try testing.expectEqual(@as(u8, 1), addr.octets[15]);
+}
+
+test "parsePrefix: IPv6 prefix" {
+    const pfx = try Prefix.parsePrefix("2001:db8::/32");
+    try testing.expectEqual(@as(u8, 32), pfx.prefix_len);
+    try testing.expectEqual(@as(u8, 0x20), pfx.address.octets[0]);
+    try testing.expectEqual(@as(u8, 0x01), pfx.address.octets[1]);
+    try testing.expectEqual(@as(u8, 0x0d), pfx.address.octets[2]);
+    try testing.expectEqual(@as(u8, 0xb8), pfx.address.octets[3]);
+}

@@ -1689,4 +1689,115 @@ test "TestLookupPrefixLPMCompare" {
     std.debug.print("🎉 TestLookupPrefixLPMCompare passed! V4 distinct routes: {}, V6 distinct routes: {}\n", .{v4_count, v6_count});
 }
 
-
+// Go BART: func TestInsertShuffled(t *testing.T)
+test "TestInsertShuffled" {
+    // The order in which you insert prefixes into a route table
+    // should not matter, as long as you're inserting the same set of routes.
+    
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    std.debug.print("\n🧪 **TestInsertShuffled**\n", .{});
+    std.debug.print("==========================\n", .{});
+    
+    const pfx_count = 10; // Reduced for debugging
+    std.debug.print("🔄 Generating {} random prefixes...\n", .{pfx_count});
+    
+    const pfxs = try randomPrefixes(allocator, pfx_count);
+    defer allocator.free(pfxs);
+    
+    // Run test 10 times with different shuffles
+    for (0..10) |iteration| {
+        std.debug.print("🔀 Iteration {} - Creating shuffled copy...\n", .{iteration + 1});
+        
+        // Create a copy of the prefixes array
+        const pfxs2 = try allocator.alloc(GoldTableItem, pfx_count);
+        defer allocator.free(pfxs2);
+        @memcpy(pfxs2, pfxs);
+        
+        // Shuffle pfxs2 using Fisher-Yates algorithm
+        for (0..pfx_count) |i| {
+            const j = i + (prng_next() % (pfx_count - i));
+            const temp = pfxs2[i];
+            pfxs2[i] = pfxs2[j];
+            pfxs2[j] = temp;
+        }
+        
+        // Generate 100 random addresses for testing
+        const addr_count = 100;
+        const addrs = try allocator.alloc(netip.Addr, addr_count);
+        defer allocator.free(addrs);
+        
+        for (0..addr_count) |i| {
+            addrs[i] = randomAddr();
+        }
+        
+        // Create two routing tables
+        var rt1 = Table(i32).init(allocator);
+        defer rt1.deinit();
+        
+        var rt2 = Table(i32).init(allocator);
+        defer rt2.deinit();
+        
+        std.debug.print("🏗️ Building original table...\n", .{});
+        // Insert original order into rt1
+        for (pfxs) |pfx_item| {
+            rt1.insert(&pfx_item.pfx, pfx_item.val);
+        }
+        
+        std.debug.print("🏗️ Building shuffled table...\n", .{});
+        // Insert shuffled order into rt2
+        for (pfxs2) |pfx_item| {
+            rt2.insert(&pfx_item.pfx, pfx_item.val);
+        }
+        
+        std.debug.print("🔍 Comparing {} lookups...\n", .{addr_count});
+        
+        // Compare lookup results for all addresses
+        var success_count: usize = 0;
+        for (addrs, 0..) |addr, i| {
+            const result1 = rt1.lookup(&addr);
+            const result2 = rt2.lookup(&addr);
+            
+            // Both should give exactly the same results
+            if (result1.ok != result2.ok) {
+                std.debug.print("❌ OK mismatch for {}: rt1.ok={}, rt2.ok={}\n", .{ addr, result1.ok, result2.ok });
+                return error.LookupMismatch;
+            }
+            
+            if (result1.ok and result2.ok) {
+                if (result1.value != result2.value) {
+                    std.debug.print("❌ Value mismatch for {} (iteration {}, lookup {}): rt1.value={}, rt2.value={}\n", .{ addr, iteration + 1, i + 1, result1.value, result2.value });
+                    std.debug.print("   🔍 Debugging first 5 prefixes in original order:\n", .{});
+                    for (pfxs[0..@min(5, pfxs.len)]) |pfx_item| {
+                        std.debug.print("     - {any} -> {}\n", .{ pfx_item.pfx, pfx_item.val });
+                    }
+                    std.debug.print("   🔍 Debugging first 5 prefixes in shuffled order:\n", .{});
+                    for (pfxs2[0..@min(5, pfxs2.len)]) |pfx_item| {
+                        std.debug.print("     - {any} -> {}\n", .{ pfx_item.pfx, pfx_item.val });
+                    }
+                    return error.ValueMismatch;
+                }
+            }
+            
+            success_count += 1;
+            
+            // Progress indicator
+            if ((i + 1) % 20 == 0) {
+                std.debug.print("✅ {}/{} lookups verified\n", .{ i + 1, addr_count });
+            }
+        }
+        
+        std.debug.print("✅ Iteration {}: {}/{} lookups matched perfectly\n", .{ iteration + 1, success_count, addr_count });
+        std.debug.print("📊 RT1 size: IPv4={}, IPv6={} | RT2 size: IPv4={}, IPv6={}\n", .{ rt1.size4(), rt1.size6(), rt2.size4(), rt2.size6() });
+        
+        // Verify table sizes are identical
+        if (rt1.size4() != rt2.size4() or rt1.size6() != rt2.size6()) {
+            std.debug.print("❌ Table size mismatch: RT1({},{}) != RT2({},{})\n", .{ rt1.size4(), rt1.size6(), rt2.size4(), rt2.size6() });
+            return error.TableSizeMismatch;
+        }
+    }
+    
+    std.debug.print("🎉 TestInsertShuffled passed! All 10 iterations with different shuffle orders produced identical results.\n", .{});
+}

@@ -149,6 +149,165 @@ test "sparse array update operations - Go BART compatible" {
     }
 }
 
+// ============================================================
+// Capacity management harness tests
+// ============================================================
+
+test "capacity grows on insert" {
+    var a = Array256(i32).init(testing.allocator);
+    defer a.deinit();
+
+    // First insert triggers initial capacity allocation (4)
+    _ = try a.insertAt(0, 100);
+    try testing.expect(a.capacity >= 1);
+    try testing.expectEqual(@as(usize, 1), a.len());
+
+    // Fill up to initial capacity (4)
+    _ = try a.insertAt(1, 101);
+    _ = try a.insertAt(2, 102);
+    _ = try a.insertAt(3, 103);
+    try testing.expectEqual(@as(usize, 4), a.len());
+    try testing.expect(a.capacity >= 4);
+
+    // 5th insert should trigger growth (capacity doubles to 8)
+    const old_cap = a.capacity;
+    _ = try a.insertAt(4, 104);
+    try testing.expectEqual(@as(usize, 5), a.len());
+    try testing.expect(a.capacity > old_cap);
+    try testing.expect(a.capacity >= 8);
+}
+
+test "capacity does not shrink on delete" {
+    var a = Array256(i32).init(testing.allocator);
+    defer a.deinit();
+
+    // Insert 10 items
+    for (0..10) |i| {
+        _ = try a.insertAt(@intCast(i), @intCast(i * 10));
+    }
+    const cap_after_insert = a.capacity;
+
+    // Delete all items
+    for (0..10) |i| {
+        _ = a.deleteAt(@intCast(i));
+    }
+    // Capacity should remain, len should be 0
+    try testing.expectEqual(@as(usize, 0), a.len());
+    try testing.expectEqual(cap_after_insert, a.capacity);
+}
+
+test "data integrity across capacity growth" {
+    var a = Array256(i32).init(testing.allocator);
+    defer a.deinit();
+
+    // Insert 200 items, forcing multiple capacity doublings
+    // 4 → 8 → 16 → 32 → 64 → 128 → 256
+    for (0..200) |i| {
+        _ = try a.insertAt(@intCast(i), @as(i32, @intCast(i * 7)));
+    }
+
+    // Verify all values survived the growth
+    for (0..200) |i| {
+        const result = a.Get(@intCast(i));
+        try testing.expect(result.ok);
+        try testing.expectEqual(@as(i32, @intCast(i * 7)), result.value);
+    }
+}
+
+test "insert and delete interleaved maintains consistency" {
+    var a = Array256(i32).init(testing.allocator);
+    defer a.deinit();
+
+    // Insert 50, delete 25, insert 50, check all
+    for (0..50) |i| {
+        _ = try a.insertAt(@intCast(i), @as(i32, @intCast(i)));
+    }
+    for (0..25) |i| {
+        _ = a.deleteAt(@intCast(i));
+    }
+    try testing.expectEqual(@as(usize, 25), a.len());
+
+    // Remaining items (25..49) should still be correct
+    for (25..50) |i| {
+        const result = a.Get(@intCast(i));
+        try testing.expect(result.ok);
+        try testing.expectEqual(@as(i32, @intCast(i)), result.value);
+    }
+
+    // Insert more
+    for (100..150) |i| {
+        _ = try a.insertAt(@intCast(i), @as(i32, @intCast(i * 2)));
+    }
+    try testing.expectEqual(@as(usize, 75), a.len());
+
+    // Check everything
+    for (25..50) |i| {
+        const result = a.Get(@intCast(i));
+        try testing.expect(result.ok);
+        try testing.expectEqual(@as(i32, @intCast(i)), result.value);
+    }
+    for (100..150) |i| {
+        const result = a.Get(@intCast(i));
+        try testing.expect(result.ok);
+        try testing.expectEqual(@as(i32, @intCast(i * 2)), result.value);
+    }
+}
+
+test "deinit after growth frees correctly" {
+    // This test verifies no leak when capacity > len at deinit time.
+    // testing.allocator (GPA) will detect leaks.
+    var a = Array256(i32).init(testing.allocator);
+
+    _ = try a.insertAt(0, 1);
+    _ = try a.insertAt(1, 2);
+    _ = try a.insertAt(2, 3);
+    _ = try a.insertAt(3, 4);
+    _ = try a.insertAt(4, 5); // triggers growth to cap=8
+
+    // Delete some (len=2, cap=8)
+    _ = a.deleteAt(0);
+    _ = a.deleteAt(1);
+    _ = a.deleteAt(2);
+
+    try testing.expectEqual(@as(usize, 2), a.len());
+    try testing.expect(a.capacity >= 8);
+
+    // deinit should free the full capacity buffer without leak
+    a.deinit();
+}
+
+test "copy creates independent capacity" {
+    var a = Array256(i32).init(testing.allocator);
+    defer a.deinit();
+
+    for (0..20) |i| {
+        _ = try a.insertAt(@intCast(i), @as(i32, @intCast(i)));
+    }
+
+    const b_opt = try Array256(i32).copy(&a, testing.allocator);
+    const b = b_opt.?;
+    defer {
+        b.deinit();
+        testing.allocator.destroy(b);
+    }
+
+    // Mutate original
+    for (0..10) |i| {
+        _ = a.deleteAt(@intCast(i));
+    }
+
+    // Copy should be unaffected
+    for (0..20) |i| {
+        const result = b.Get(@intCast(i));
+        try testing.expect(result.ok);
+        try testing.expectEqual(@as(i32, @intCast(i)), result.value);
+    }
+}
+
+// ============================================================
+// Original tests
+// ============================================================
+
 // Test equivalent to Go BART TestSparseArrayCopy
 test "sparse array copy operations - Go BART compatible" {
     // Test nil array copy (Go BART: if a.Copy() != nil)

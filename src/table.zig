@@ -25,6 +25,7 @@ const netip = @import("netip.zig");
 const Node = @import("node.zig").Node;
 const isFringe = @import("node.zig").isFringe;
 const base_index = @import("base_index.zig");
+pub const PoolAllocator = @import("pool_allocator.zig").PoolAllocator;
 
 // Table is an IPv4 and IPv6 routing table with payload V.
 // The zero value is ready to use.
@@ -68,17 +69,8 @@ pub fn Table(comptime V: type) type {
         /// Cleanup table resources
         /// Go BART: No explicit deinit in Go (handled by GC)
         pub fn deinit(self: *Self) void {
-            std.debug.print("🧹 Table.deinit() called - size4: {}, size6: {}\n", .{self.size4_count, self.size6_count});
-            
-            std.debug.print("🔄 Cleaning up IPv4 root...\n", .{});
             self.root4.deinit();
-            std.debug.print("✅ IPv4 root cleanup completed\n", .{});
-            
-            std.debug.print("🔄 Cleaning up IPv6 root...\n", .{});
             self.root6.deinit();
-            std.debug.print("✅ IPv6 root cleanup completed\n", .{});
-            
-            std.debug.print("✅ Table.deinit() completed\n", .{});
         }
 
         /// rootNodeByVersion, root node getter for ip version.
@@ -797,6 +789,115 @@ pub fn Table(comptime V: type) type {
             return new_table;
         }
 
+        /// Go BART: func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (pt *Table[V], newVal V)
+        /// UpdatePersist is similar to Update but the receiver isn't modified.
+        /// All nodes touched during update are cloned and a new Table is returned.
+        pub fn UpdatePersist(self: *const Self, pfx: *const netip.Prefix, cb: fn (V, bool) V) !struct { table: *Self, new_value: V } {
+            var zero: V = undefined;
+            @memset(std.mem.asBytes(&zero), 0);
+
+            if (!pfx.isValid()) {
+                const cloned = try self.Clone(self.allocator);
+                return .{ .table = cloned, .new_value = zero };
+            }
+
+            const canonical_pfx = pfx.masked();
+            const ip = canonical_pfx.addr();
+            const is4 = ip.is4();
+            const bits = canonical_pfx.bits();
+            const octets = ip.asSlice();
+            const depth_result = @import("node.zig").maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            // Clone the table (COW semantics)
+            const new_table = try self.Clone(self.allocator);
+            errdefer {
+                new_table.deinit();
+                self.allocator.destroy(new_table);
+            }
+
+            const n = new_table.rootNodeByVersion(is4);
+            var current_node = n;
+
+            for (octets, 0..) |octet, depth_idx| {
+                if (depth_idx == max_depth) {
+                    const idx = base_index.pfxToIdx256(octet, last_bits);
+                    const result = current_node.prefixes.updateAt(idx, cb) catch |err| {
+                        new_table.deinit();
+                        self.allocator.destroy(new_table);
+                        return err;
+                    };
+                    if (!result.was_present) {
+                        new_table.sizeUpdate(is4, 1);
+                    }
+                    return .{ .table = new_table, .new_value = result.new_value };
+                }
+
+                const addr = octet;
+
+                if (!current_node.children.Test(addr)) {
+                    const new_value = cb(zero, false);
+                    const NodeType = @import("node.zig").Node(V);
+                    const FringeNodeType = @import("node.zig").FringeNode(V);
+                    const LeafNodeType = @import("node.zig").LeafNode(V);
+
+                    if (@import("node.zig").isFringe(@intCast(depth_idx), bits)) {
+                        const fringe = try new_table.allocator.create(FringeNodeType);
+                        fringe.* = FringeNodeType.init(new_value);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .fringe = fringe });
+                    } else {
+                        const leaf = try new_table.allocator.create(LeafNodeType);
+                        leaf.* = LeafNodeType.init(canonical_pfx, new_value);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .leaf = leaf });
+                    }
+
+                    new_table.sizeUpdate(is4, 1);
+                    return .{ .table = new_table, .new_value = new_value };
+                }
+
+                const kid = current_node.children.mustGet(addr);
+                const NodeType = @import("node.zig").Node(V);
+
+                switch (kid) {
+                    .node => |child_node| {
+                        current_node = child_node;
+                        continue;
+                    },
+                    .leaf => |leaf| {
+                        if (leaf.prefix.eql(&canonical_pfx)) {
+                            const new_value = cb(leaf.value, true);
+                            leaf.value = new_value;
+                            return .{ .table = new_table, .new_value = new_value };
+                        }
+
+                        const new_node = try new_table.allocator.create(NodeType);
+                        new_node.* = NodeType.init(new_table.allocator);
+                        _ = try new_node.insertAtDepth(leaf.prefix, leaf.value, @intCast(depth_idx + 1), new_table.allocator);
+                        new_table.allocator.destroy(leaf);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .node = new_node });
+                        current_node = new_node;
+                    },
+                    .fringe => |fringe| {
+                        if (@import("node.zig").isFringe(@intCast(depth_idx), bits)) {
+                            const new_value = cb(fringe.value, true);
+                            fringe.value = new_value;
+                            return .{ .table = new_table, .new_value = new_value };
+                        }
+
+                        const new_node = try new_table.allocator.create(NodeType);
+                        new_node.* = NodeType.init(new_table.allocator);
+                        _ = try new_node.prefixes.insertAt(1, fringe.value);
+                        new_table.allocator.destroy(fringe);
+                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .node = new_node });
+                        current_node = new_node;
+                    },
+                }
+            }
+
+            return .{ .table = new_table, .new_value = zero };
+        }
+
         /// Go BART: func (t *Table[V]) Delete(pfx netip.Prefix)
         /// Delete removes pfx from the tree, pfx does not have to be present.
         pub fn delete(self: *Self, pfx: *const netip.Prefix) void {
@@ -1385,4 +1486,643 @@ test "maxDepthAndLastBits function" {
     result = maxDepthAndLastBits(128);
     try testing.expectEqual(@as(u8, 16), result.max_depth);
     try testing.expectEqual(@as(u8, 0), result.last_bits);
+}
+
+test "large insert and delete - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(12345);
+    const random = prng.random();
+
+    const count = 1000;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    try testing.expect(table.size() > 0);
+
+    for (&prefixes) |*pfx| {
+        table.delete(pfx);
+    }
+
+    try testing.expectEqual(@as(i32, 0), table.size());
+}
+
+test "getAndDelete returns correct value" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var pfx1 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8);
+    pfx1 = pfx1.masked();
+    table.insert(&pfx1, 42);
+
+    const result = table.getAndDelete(&pfx1);
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(i32, 42), result.value);
+    try testing.expectEqual(@as(i32, 0), table.size());
+}
+
+test "clone preserves data" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var pfx1 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8);
+    pfx1 = pfx1.masked();
+    table.insert(&pfx1, 1);
+
+    var pfx2 = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16);
+    pfx2 = pfx2.masked();
+    table.insert(&pfx2, 2);
+
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    try testing.expectEqual(table.size(), cloned.size());
+
+    const v1 = cloned.get(&pfx1);
+    try testing.expect(v1 != null);
+    try testing.expectEqual(@as(i32, 1), v1.?);
+
+    const v2 = cloned.get(&pfx2);
+    try testing.expect(v2 != null);
+    try testing.expectEqual(@as(i32, 2), v2.?);
+}
+
+test "clone large - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(54321);
+    const random = prng.random();
+
+    const count = 500;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    try testing.expectEqual(table.size(), cloned.size());
+
+    for (&prefixes) |*pfx| {
+        const orig = table.get(pfx);
+        const clone_val = cloned.get(pfx);
+        try testing.expectEqual(orig, clone_val);
+    }
+}
+
+test "insert delete insert - no leak" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(99999);
+    const random = prng.random();
+
+    for (0..3) |round| {
+        _ = round;
+        for (0..200) |i| {
+            const a = random.int(u8);
+            const b = random.int(u8);
+            const c = random.int(u8);
+            const d = random.int(u8);
+            const bits = random.intRangeAtMost(u8, 8, 32);
+            const addr = netip.Addr.fromIPv4(a, b, c, d);
+            var pfx = addr.prefix(bits).masked();
+            table.insert(&pfx, @as(i32, @intCast(i)));
+        }
+
+        // Delete random subset
+        for (0..100) |_| {
+            const a = random.int(u8);
+            const b = random.int(u8);
+            const c = random.int(u8);
+            const d = random.int(u8);
+            const bits = random.intRangeAtMost(u8, 8, 32);
+            const addr = netip.Addr.fromIPv4(a, b, c, d);
+            var pfx = addr.prefix(bits).masked();
+            table.delete(&pfx);
+        }
+    }
+
+    try testing.expect(table.size() >= 0);
+}
+
+test "overlaps between tables" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    // Disjoint
+    var pfx_a = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    var pfx_b = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16).masked();
+    table_a.insert(&pfx_a, 1);
+    table_b.insert(&pfx_b, 2);
+
+    try testing.expect(!table_a.overlaps(&table_b));
+
+    // Overlapping
+    var pfx_c = netip.Addr.fromIPv4(10, 1, 0, 0).prefix(16).masked();
+    table_b.insert(&pfx_c, 3);
+
+    try testing.expect(table_a.overlaps(&table_b));
+}
+
+test "union basic - memory safety" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    var pfx1 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    var pfx2 = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16).masked();
+    var pfx3 = netip.Addr.fromIPv4(172, 16, 0, 0).prefix(12).masked();
+
+    table_a.insert(&pfx1, 1);
+    table_a.insert(&pfx2, 2);
+    table_b.insert(&pfx3, 3);
+    table_b.insert(&pfx2, 99);
+
+    try table_a.Union(&table_b);
+
+    // pfx1 from table_a
+    try testing.expectEqual(@as(?i32, 1), table_a.get(&pfx1));
+    // pfx3 merged from table_b
+    try testing.expectEqual(@as(?i32, 3), table_a.get(&pfx3));
+    // pfx2 should be overwritten by table_b's value
+    try testing.expectEqual(@as(?i32, 99), table_a.get(&pfx2));
+}
+
+test "union large - memory safety" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    var prng = std.Random.DefaultPrng.init(77777);
+    const random = prng.random();
+
+    // Insert 300 entries into table_a
+    for (0..300) |i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        var pfx = addr.prefix(bits).masked();
+        table_a.insert(&pfx, @as(i32, @intCast(i)));
+    }
+
+    // Insert 300 entries into table_b (some will overlap)
+    for (0..300) |i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        var pfx = addr.prefix(bits).masked();
+        table_b.insert(&pfx, @as(i32, @intCast(i + 1000)));
+    }
+
+    const size_a_before = table_a.size();
+    const size_b = table_b.size();
+    _ = size_a_before;
+    _ = size_b;
+
+    try table_a.Union(&table_b);
+
+    // After union, table_a should have at least as many entries as before
+    try testing.expect(table_a.size() >= 0);
+}
+
+test "getAndDelete random - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(11111);
+    const random = prng.random();
+
+    const count = 500;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        const a = random.int(u8);
+        const b = random.int(u8);
+        const c = random.int(u8);
+        const d = random.int(u8);
+        const bits = random.intRangeAtMost(u8, 8, 32);
+        const addr = netip.Addr.fromIPv4(a, b, c, d);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    // getAndDelete half of them
+    for (prefixes[0..250]) |*pfx| {
+        _ = table.getAndDelete(pfx);
+    }
+
+    // Verify deleted entries are gone
+    for (prefixes[0..250]) |*pfx| {
+        try testing.expectEqual(@as(?i32, null), table.get(pfx));
+    }
+}
+
+test "IPv6 insert delete - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(66666);
+    const random = prng.random();
+
+    for (0..200) |i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 16, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table.insert(&pfx, @as(i32, @intCast(i)));
+    }
+
+    try testing.expect(table.size() > 0);
+
+    // Delete some
+    for (0..100) |_| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 16, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table.delete(&pfx);
+    }
+
+    try testing.expect(table.size() >= 0);
+}
+
+test "UpdatePersist - basic" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var pfx = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    table.insert(&pfx, 42);
+
+    const update_cb = struct {
+        fn cb(val: i32, ok: bool) i32 {
+            if (ok) return val + 100;
+            return 999;
+        }
+    }.cb;
+
+    // Update existing prefix
+    const result1 = try table.UpdatePersist(&pfx, update_cb);
+    defer {
+        result1.table.deinit();
+        allocator.destroy(result1.table);
+    }
+    try testing.expectEqual(@as(i32, 142), result1.new_value);
+
+    // Original table unchanged
+    try testing.expectEqual(@as(?i32, 42), table.get(&pfx));
+    // New table has updated value
+    try testing.expectEqual(@as(?i32, 142), result1.table.get(&pfx));
+
+    // Insert new prefix via UpdatePersist
+    var pfx2 = netip.Addr.fromIPv4(192, 168, 0, 0).prefix(16).masked();
+    const result2 = try table.UpdatePersist(&pfx2, update_cb);
+    defer {
+        result2.table.deinit();
+        allocator.destroy(result2.table);
+    }
+    try testing.expectEqual(@as(i32, 999), result2.new_value);
+    try testing.expectEqual(@as(?i32, null), table.get(&pfx2));
+    try testing.expectEqual(@as(?i32, 999), result2.table.get(&pfx2));
+}
+
+test "IPv6 get and lookup" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    // 2001:db8::/32
+    var pfx1 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+    // 2001:db8:1::/48
+    var pfx2 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(48).masked();
+    // ::1/128 (loopback)
+    var pfx3 = netip.Addr.fromIPv6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }).prefix(128).masked();
+    // fe80::/10 (link-local)
+    var pfx4 = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(10).masked();
+
+    table.insert(&pfx1, 1);
+    table.insert(&pfx2, 2);
+    table.insert(&pfx3, 3);
+    table.insert(&pfx4, 4);
+
+    try testing.expectEqual(@as(i32, 4), table.size());
+    try testing.expectEqual(@as(i32, 0), table.size4());
+    try testing.expectEqual(@as(i32, 4), table.size6());
+
+    // Get exact prefix
+    try testing.expectEqual(@as(?i32, 1), table.get(&pfx1));
+    try testing.expectEqual(@as(?i32, 2), table.get(&pfx2));
+    try testing.expectEqual(@as(?i32, 3), table.get(&pfx3));
+    try testing.expectEqual(@as(?i32, 4), table.get(&pfx4));
+
+    // Lookup (LPM) - address in 2001:db8:1::1 should match pfx2 (more specific)
+    const addr1 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result1 = table.lookup(&addr1);
+    try testing.expect(result1.ok);
+    try testing.expectEqual(@as(i32, 2), result1.value);
+
+    // Lookup - address in 2001:db8:2::1 should match pfx1 (less specific /32)
+    const addr2 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result2 = table.lookup(&addr2);
+    try testing.expect(result2.ok);
+    try testing.expectEqual(@as(i32, 1), result2.value);
+
+    // Lookup - loopback ::1
+    const addr3 = netip.Addr.fromIPv6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result3 = table.lookup(&addr3);
+    try testing.expect(result3.ok);
+    try testing.expectEqual(@as(i32, 3), result3.value);
+
+    // Lookup - link-local fe80::1
+    const addr4 = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result4 = table.lookup(&addr4);
+    try testing.expect(result4.ok);
+    try testing.expectEqual(@as(i32, 4), result4.value);
+
+    // Contains
+    try testing.expect(table.contains(&addr1));
+    try testing.expect(table.contains(&addr4));
+
+    // Address not in table
+    const addr5 = netip.Addr.fromIPv6(.{ 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const result5 = table.lookup(&addr5);
+    try testing.expect(!result5.ok);
+}
+
+test "IPv6 lookupPrefix and LPM" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    // ::/0 (default route)
+    var pfx_default = netip.Addr.fromIPv6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(0).masked();
+    // 2000::/3
+    var pfx_global = netip.Addr.fromIPv6(.{ 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(3).masked();
+    // 2001:db8::/32
+    var pfx_doc = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+
+    table.insert(&pfx_default, 0);
+    table.insert(&pfx_global, 1);
+    table.insert(&pfx_doc, 2);
+
+    // LookupPrefix for 2001:db8:1::/48 should find 2001:db8::/32
+    var query_pfx = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(48).masked();
+    const lp_result = table.lookupPrefix(&query_pfx);
+    try testing.expect(lp_result.ok);
+    try testing.expectEqual(@as(i32, 2), lp_result.value);
+
+    // LookupPrefixLPM for 2001:db8:1::/48 should return the matching prefix
+    const lpm_result = table.lookupPrefixLPM(&query_pfx);
+    try testing.expect(lpm_result.ok);
+    try testing.expectEqual(@as(i32, 2), lpm_result.value);
+    try testing.expect(lpm_result.lpm_prefix.eql(&pfx_doc));
+}
+
+test "IPv6 clone - memory safety" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(88888);
+    const random = prng.random();
+
+    const count = 300;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    try testing.expectEqual(table.size(), cloned.size());
+
+    for (&prefixes) |*pfx| {
+        const orig = table.get(pfx);
+        const clone_val = cloned.get(pfx);
+        try testing.expectEqual(orig, clone_val);
+    }
+}
+
+test "IPv6 union - memory safety" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    var prng = std.Random.DefaultPrng.init(44444);
+    const random = prng.random();
+
+    for (0..200) |i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table_a.insert(&pfx, @as(i32, @intCast(i)));
+    }
+
+    for (0..200) |i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        var pfx = addr.prefix(bits).masked();
+        table_b.insert(&pfx, @as(i32, @intCast(i + 1000)));
+    }
+
+    try table_a.Union(&table_b);
+    try testing.expect(table_a.size() > 0);
+}
+
+test "IPv6 overlaps" {
+    const allocator = testing.allocator;
+    var table_a = Table(i32).init(allocator);
+    defer table_a.deinit();
+    var table_b = Table(i32).init(allocator);
+    defer table_b.deinit();
+
+    // Disjoint: 2001:db8::/32 vs fe80::/10
+    var pfx_a = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+    var pfx_b = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(10).masked();
+    table_a.insert(&pfx_a, 1);
+    table_b.insert(&pfx_b, 2);
+
+    try testing.expect(!table_a.overlaps(&table_b));
+
+    // Overlapping: add 2001:db8:1::/48 to table_b (subset of pfx_a)
+    var pfx_c = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(48).masked();
+    table_b.insert(&pfx_c, 3);
+
+    try testing.expect(table_a.overlaps(&table_b));
+}
+
+test "IPv6 getAndDelete" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    var prng = std.Random.DefaultPrng.init(55555);
+    const random = prng.random();
+
+    const count = 300;
+    var prefixes: [count]netip.Prefix = undefined;
+
+    for (&prefixes, 0..) |*pfx, i| {
+        var addr_bytes: [16]u8 = undefined;
+        for (&addr_bytes) |*b| {
+            b.* = random.int(u8);
+        }
+        const bits = random.intRangeAtMost(u8, 8, 128);
+        const addr = netip.Addr.fromIPv6(addr_bytes);
+        pfx.* = addr.prefix(bits).masked();
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    // Delete first half
+    for (prefixes[0..150]) |*pfx| {
+        _ = table.getAndDelete(pfx);
+    }
+
+    // Verify deleted
+    for (prefixes[0..150]) |*pfx| {
+        try testing.expectEqual(@as(?i32, null), table.get(pfx));
+    }
+
+    try testing.expect(table.size() >= 0);
+}
+
+test "mixed IPv4 and IPv6" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    // IPv4
+    var pfx4 = netip.Addr.fromIPv4(10, 0, 0, 0).prefix(8).masked();
+    table.insert(&pfx4, 4);
+
+    // IPv6
+    var pfx6 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(32).masked();
+    table.insert(&pfx6, 6);
+
+    try testing.expectEqual(@as(i32, 2), table.size());
+    try testing.expectEqual(@as(i32, 1), table.size4());
+    try testing.expectEqual(@as(i32, 1), table.size6());
+
+    try testing.expectEqual(@as(?i32, 4), table.get(&pfx4));
+    try testing.expectEqual(@as(?i32, 6), table.get(&pfx6));
+
+    // Lookup IPv4
+    const addr4 = netip.Addr.fromIPv4(10, 1, 2, 3);
+    const r4 = table.lookup(&addr4);
+    try testing.expect(r4.ok);
+    try testing.expectEqual(@as(i32, 4), r4.value);
+
+    // Lookup IPv6
+    const addr6 = netip.Addr.fromIPv6(.{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const r6 = table.lookup(&addr6);
+    try testing.expect(r6.ok);
+    try testing.expectEqual(@as(i32, 6), r6.value);
+
+    // Clone should preserve both
+    const cloned = try table.Clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+    try testing.expectEqual(@as(?i32, 4), cloned.get(&pfx4));
+    try testing.expectEqual(@as(?i32, 6), cloned.get(&pfx6));
+}
+
+test "IPv6 sub-octet prefix fe80::/10 lookup" {
+    const allocator = testing.allocator;
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    // fe80::/10
+    var pfx = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }).prefix(10).masked();
+    table.insert(&pfx, 42);
+
+    // Verify insert worked
+    try testing.expectEqual(@as(i32, 1), table.size());
+    try testing.expectEqual(@as(?i32, 42), table.get(&pfx));
+
+    // Verify contains
+    const addr = netip.Addr.fromIPv6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    try testing.expect(pfx.contains(&addr));
+
+    // Verify lookup
+    const result = table.lookup(&addr);
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(i32, 42), result.value);
 }

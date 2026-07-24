@@ -18,9 +18,10 @@ pub fn Array256(comptime T: type) type {
         /// Underlying bitset (Go BART: embedded BitSet256)
         bitset: BitSet256,
 
-        /// Simple slice of items (Go BART: Items []T)
+        /// Items buffer with capacity (Go BART: Items []T, but with Go's cap semantics)
         items: []T,
-        
+        capacity: usize,
+
         /// Allocator for memory management (Go BART style)
         allocator: std.mem.Allocator,
 
@@ -29,15 +30,22 @@ pub fn Array256(comptime T: type) type {
             return Self{
                 .bitset = BitSet256{ .data = [4]u64{ 0, 0, 0, 0 } },
                 .items = &[_]T{}, // Empty slice
+                .capacity = 0,
                 .allocator = allocator,
             };
         }
 
         /// Cleanup (Go BART: automatic GC)
         pub fn deinit(self: *Self) void {
-            if (self.items.len > 0) {
-                self.allocator.free(self.items);
+            if (self.capacity > 0) {
+                self.allocator.free(self.allocatedSlice());
             }
+        }
+
+        /// Get the full allocated slice (items.ptr[0..capacity])
+        fn allocatedSlice(self: *Self) []T {
+            if (self.capacity == 0) return &[_]T{};
+            return self.items.ptr[0..self.capacity];
         }
 
         /// Test if bit i is set (Go BART: a.Test(i))
@@ -50,15 +58,15 @@ pub fn Array256(comptime T: type) type {
             return self.bitset.testBitSet256(i);
         }
 
-            /// Get rank of bit i (Go BART: a.Rank(i))
-    pub fn rank(self: *const Self, i: u8) u16 {
-        return self.bitset.rank(i);
-    }
+        /// Get rank of bit i (Go BART: a.Rank(i))
+        pub fn rank(self: *const Self, i: u8) u16 {
+            return self.bitset.rank(i);
+        }
 
-    /// Rank - Go BART compatible version (Go BART: a.Rank(i))
-    pub fn Rank(self: *const Self, i: u8) u16 {
-        return self.bitset.rank(i);
-    }
+        /// Rank - Go BART compatible version (Go BART: a.Rank(i))
+        pub fn Rank(self: *const Self, i: u8) u16 {
+            return self.bitset.rank(i);
+        }
 
         /// Get the value at i from sparse array with optional return (convenience method)
         pub fn get(self: *const Self, i: u8) ?T {
@@ -170,16 +178,26 @@ pub fn Array256(comptime T: type) type {
             }
 
             const new_array = try allocator.create(Self);
-            
-            // Copy slice data (Go BART style)
-            const copied_items = try allocator.alloc(T, self.?.items.len);
-            @memcpy(copied_items, self.?.items);
-            
-            new_array.* = Self{
-                .bitset = self.?.bitset,
-                .items = copied_items,
-                .allocator = allocator,
-            };
+            const item_len = self.?.items.len;
+
+            if (item_len > 0) {
+                const copied_items = try allocator.alloc(T, item_len);
+                @memcpy(copied_items, self.?.items);
+
+                new_array.* = Self{
+                    .bitset = self.?.bitset,
+                    .items = copied_items,
+                    .capacity = item_len,
+                    .allocator = allocator,
+                };
+            } else {
+                new_array.* = Self{
+                    .bitset = self.?.bitset,
+                    .items = &[_]T{},
+                    .capacity = 0,
+                    .allocator = allocator,
+                };
+            }
 
             return new_array;
         }
@@ -237,14 +255,33 @@ pub fn Array256(comptime T: type) type {
         ///
         /// It panics if i is out of range.
         fn insertItem(self: *Self, i: usize, item: T) !void {
-            // Go BART style: reallocate slice to accommodate new item
             const old_len = self.items.len;
             const new_len = old_len + 1;
-            
-            // Reallocate slice (Go BART: a.Items = append(a.Items, zero))
-            const new_items = try self.allocator.realloc(self.items, new_len);
-            self.items = new_items;
-            
+
+            // Grow capacity if needed (Go-style doubling)
+            if (new_len > self.capacity) {
+                const new_cap = if (self.capacity == 0) 4 else self.capacity * 2;
+                if (self.capacity > 0) {
+                    if (self.allocator.resize(self.allocatedSlice(), new_cap)) {
+                        self.capacity = new_cap;
+                    } else {
+                        const new_buf = try self.allocator.alloc(T, new_cap);
+                        if (old_len > 0) {
+                            @memcpy(new_buf[0..old_len], self.items);
+                        }
+                        self.allocator.free(self.allocatedSlice());
+                        self.items.ptr = new_buf.ptr;
+                        self.capacity = new_cap;
+                    }
+                } else {
+                    const new_buf = try self.allocator.alloc(T, new_cap);
+                    self.items.ptr = new_buf.ptr;
+                    self.capacity = new_cap;
+                }
+            }
+
+            self.items.len = new_len;
+
             // BCE (Bounds Check Elimination)
             std.debug.assert(i <= old_len);
 
@@ -267,17 +304,11 @@ pub fn Array256(comptime T: type) type {
 
             // shift left, overwrite item at [i] (Go BART: copy(a.Items[i:], a.Items[i+1:]))
             if (i < self.items.len - 1) {
-                @memcpy(self.items[i .. self.items.len - 1], self.items[i + 1 ..]);
+                std.mem.copyForwards(T, self.items[i .. self.items.len - 1], self.items[i + 1 ..]);
             }
 
-            // Go BART style: reallocate slice to shrink
-            const new_len = self.items.len - 1;
-            if (new_len > 0) {
-                self.items = self.allocator.realloc(self.items, new_len) catch self.items[0..new_len];
-            } else {
-                self.allocator.free(self.items);
-                self.items = &[_]T{};
-            }
+            // Just shrink len, keep capacity (like Go slice[:len-1])
+            self.items.len -= 1;
         }
 
         /// Debug: print array state

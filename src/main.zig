@@ -252,7 +252,6 @@ pub fn main() !void {
     std.debug.print("📚 All operations use standard BART API only.\n", .{});
 
     // Display memory statistics before cleanup
-    node_mod.printMemoryStats();
 
     // Clean up tables
     std.debug.print("\n🧹 **Cleaning up tables**\n", .{});
@@ -260,12 +259,10 @@ pub fn main() !void {
     tbl.deinit();
     
     std.debug.print("Final memory statistics after main table cleanup:\n", .{});
-    node_mod.printMemoryStats();
     
     std.debug.print("Cleaning up remaining tables...\n", .{});
     
     std.debug.print("Final memory statistics after all cleanup:\n", .{});
-    node_mod.printMemoryStats();
 
     // ベンチマーク実行（時間があるなら）
     // std.debug.print("\n🚀 **Running benchmarks**\n", .{});
@@ -309,7 +306,6 @@ pub fn main() !void {
     std.debug.print("All memory will be cleaned up by standard deinit()...\n", .{});
     
     std.debug.print("\n📊 **FINAL Memory Statistics After Simple deinit()**\n", .{});
-    node_mod.printMemoryStats();
     
     std.debug.print("\n🎉 **ZART Demonstration Completed Successfully!**\n", .{});
     std.debug.print("✅ Complete memory safety achieved\n", .{});
