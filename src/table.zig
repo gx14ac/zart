@@ -21,7 +21,7 @@
 // that loops in hot paths (4x uint64 = 256) can be accelerated by loop unrolling.
 
 const std = @import("std");
-const netip = @import("netip.zig");
+pub const netip = @import("netip.zig");
 const Node = @import("node.zig").Node;
 const isFringe = @import("node.zig").isFringe;
 const base_index = @import("base_index.zig");
