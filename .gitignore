@@ -6,3 +6,6 @@ zig-out/
 .cursor/
 art/
 bart/
+openbsd/*.img
+openbsd/*.iso
+openbsd/*.qcow2

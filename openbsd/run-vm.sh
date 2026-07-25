@@ -24,7 +24,6 @@ qemu-system-x86_64 \
     -smp 2 \
     -drive file="${DISK}",format=qcow2 \
     -boot c \
-    -net nic \
+    -net nic,model=virtio \
     -net user,hostfwd=tcp::2222-:22 \
-    -display none \
-    -serial mon:stdio
+    -nographic
