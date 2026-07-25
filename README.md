@@ -10,8 +10,6 @@ ZART is a multibit-trie with a fixed stride length of 8 bits. Each node uses pop
 
 The complete binary tree at each node is represented as a 256-bit bitset that fits exactly in one cache line (4 x u64). All hot-path operations use hardware bit manipulation instructions (POPCNT, LZCNT, TZCNT).
 
-Lineage: Donald Knuth (2000) > hariguchi/art (C) > gaissmai/bart (Go) > zart (Zig)
-
 ## Requirements
 
 - Zig 0.15.2 or later
