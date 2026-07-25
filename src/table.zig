@@ -39,35 +39,75 @@ pub const PoolAllocator = @import("pool_allocator.zig").PoolAllocator;
 pub fn Table(comptime V: type) type {
     return struct {
         const Self = @This();
-        
+
+        const NodeType = Node(V);
+
         // the root nodes, implemented as popcount compressed multibit tries
-        // Go BART: root4 node[V]
-        // Go BART: root6 node[V]
-        root4: Node(V),
-        root6: Node(V),
-        
+        root4: NodeType,
+        root6: NodeType,
+
         // the number of prefixes in the routing table
-        // Go BART: size4 int
-        // Go BART: size6 int
         size4_count: i32,
         size6_count: i32,
-        
+
         allocator: std.mem.Allocator,
 
+        /// Create a persistent table via path-copy (O(1) setup).
+        /// Both roots are shallow-copied with children refcounts incremented.
+        /// The caller then mutates the affected root's path via insertAtDepthPersist.
+        fn createPersistTable(self: *const Self, is4: bool) !*Self {
+            const pt = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(pt);
+
+            // Shallow copy of table metadata
+            pt.* = Self{
+                .root4 = NodeType.init(self.allocator),
+                .root6 = NodeType.init(self.allocator),
+                .size4_count = self.size4_count,
+                .size6_count = self.size6_count,
+                .allocator = self.allocator,
+            };
+
+            // cloneFlat the affected root (copies arrays, increments children refcounts)
+            const affected_src = if (is4) &self.root4 else &self.root6;
+            const affected_dst = pt.rootNodeByVersion(is4);
+            const cloned = try affected_src.cloneFlat(self.allocator);
+            affected_dst.deinit();
+            affected_dst.prefixes = cloned.prefixes;
+            affected_dst.children = cloned.children;
+            affected_dst.allocator = cloned.allocator;
+            affected_dst.node_id = cloned.node_id;
+            affected_dst.rc = 1;
+            self.allocator.destroy(cloned);
+
+            // cloneFlat the unaffected root (shared, children get incRef'd)
+            const unaffected_src = if (is4) &self.root6 else &self.root4;
+            const unaffected_dst = if (is4) &pt.root6 else &pt.root4;
+            const cloned_other = try unaffected_src.cloneFlat(self.allocator);
+            unaffected_dst.deinit();
+            unaffected_dst.prefixes = cloned_other.prefixes;
+            unaffected_dst.children = cloned_other.children;
+            unaffected_dst.allocator = cloned_other.allocator;
+            unaffected_dst.node_id = cloned_other.node_id;
+            unaffected_dst.rc = 1;
+            self.allocator.destroy(cloned_other);
+
+            return pt;
+        }
+
         /// Initialize a new Table
-        /// Go BART equivalent: var table Table[V] (zero value ready to use)
         pub fn init(allocator: std.mem.Allocator) Self {
             return Self{
-                .root4 = Node(V).init(allocator),
-                .root6 = Node(V).init(allocator),
+                .root4 = NodeType.init(allocator),
+                .root6 = NodeType.init(allocator),
                 .size4_count = 0,
                 .size6_count = 0,
                 .allocator = allocator,
             };
         }
 
-        /// Cleanup table resources
-        /// Go BART: No explicit deinit in Go (handled by GC)
+        /// Cleanup table resources.
+        /// With refcounting, shared children survive (rc > 0) until all owners deinit.
         pub fn deinit(self: *Self) void {
             self.root4.deinit();
             self.root6.deinit();
@@ -760,142 +800,65 @@ pub fn Table(comptime V: type) type {
 
         /// Go BART: func (t *Table[V]) InsertPersist(pfx netip.Prefix, val V) *Table[V]
         /// InsertPersist inserts prefix into the table and returns a new table,
-        /// leaving the original table unchanged.
+        /// leaving the original table unchanged. Only the affected root (IPv4 or IPv6)
+        /// is deep-cloned; the other root is shared.
         pub fn InsertPersist(self: *const Self, pfx: *const netip.Prefix, val: V) !*Self {
             if (!pfx.isValid()) {
-                // Return clone of original table if prefix is invalid
                 return try self.Clone(self.allocator);
             }
 
-            // canonicalize prefix
             const canonical_pfx = pfx.masked();
-
-            // Clone the table
-            const new_table = try self.Clone(self.allocator);
-            
             const is4 = canonical_pfx.is4();
-            const n = new_table.rootNodeByVersion(is4);
 
-            const exists = n.insertAtDepth(canonical_pfx, val, 0, new_table.allocator) catch |err| {
-                new_table.deinit();
-                return err;
-            };
-
-            if (!exists) {
-                // true insert, update size
-                new_table.sizeUpdate(is4, 1);
+            const pt = try self.createPersistTable(is4);
+            errdefer {
+                pt.deinit();
+                self.allocator.destroy(pt);
             }
 
-            return new_table;
+            const n = pt.rootNodeByVersion(is4);
+            const exists = try n.insertAtDepthPersist(canonical_pfx, val, 0, self.allocator);
+
+            if (!exists) {
+                pt.sizeUpdate(is4, 1);
+            }
+
+            return pt;
         }
 
         /// Go BART: func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (pt *Table[V], newVal V)
         /// UpdatePersist is similar to Update but the receiver isn't modified.
-        /// All nodes touched during update are cloned and a new Table is returned.
+        /// Uses O(depth) path-copy: only nodes on the modification path are cloned.
         pub fn UpdatePersist(self: *const Self, pfx: *const netip.Prefix, cb: fn (V, bool) V) !struct { table: *Self, new_value: V } {
             var zero: V = undefined;
             @memset(std.mem.asBytes(&zero), 0);
 
             if (!pfx.isValid()) {
-                const cloned = try self.Clone(self.allocator);
-                return .{ .table = cloned, .new_value = zero };
+                return .{ .table = try self.Clone(self.allocator), .new_value = zero };
             }
 
             const canonical_pfx = pfx.masked();
-            const ip = canonical_pfx.addr();
-            const is4 = ip.is4();
-            const bits = canonical_pfx.bits();
-            const octets = ip.asSlice();
-            const depth_result = @import("node.zig").maxDepthAndLastBits(bits);
-            const max_depth = depth_result.max_depth;
-            const last_bits = depth_result.last_bits;
+            const is4 = canonical_pfx.is4();
 
-            // Clone the table (COW semantics)
-            const new_table = try self.Clone(self.allocator);
+            // Look up existing value in the original table
+            const existing = self.get(pfx);
+            const old_val = existing orelse zero;
+            const new_value = cb(old_val, existing != null);
+
+            const pt = try self.createPersistTable(is4);
             errdefer {
-                new_table.deinit();
-                self.allocator.destroy(new_table);
+                pt.deinit();
+                self.allocator.destroy(pt);
             }
 
-            const n = new_table.rootNodeByVersion(is4);
-            var current_node = n;
+            const n = pt.rootNodeByVersion(is4);
+            const exists = try n.insertAtDepthPersist(canonical_pfx, new_value, 0, self.allocator);
 
-            for (octets, 0..) |octet, depth_idx| {
-                if (depth_idx == max_depth) {
-                    const idx = base_index.pfxToIdx256(octet, last_bits);
-                    const result = current_node.prefixes.updateAt(idx, cb) catch |err| {
-                        new_table.deinit();
-                        self.allocator.destroy(new_table);
-                        return err;
-                    };
-                    if (!result.was_present) {
-                        new_table.sizeUpdate(is4, 1);
-                    }
-                    return .{ .table = new_table, .new_value = result.new_value };
-                }
-
-                const addr = octet;
-
-                if (!current_node.children.Test(addr)) {
-                    const new_value = cb(zero, false);
-                    const NodeType = @import("node.zig").Node(V);
-                    const FringeNodeType = @import("node.zig").FringeNode(V);
-                    const LeafNodeType = @import("node.zig").LeafNode(V);
-
-                    if (@import("node.zig").isFringe(@intCast(depth_idx), bits)) {
-                        const fringe = try new_table.allocator.create(FringeNodeType);
-                        fringe.* = FringeNodeType.init(new_value);
-                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .fringe = fringe });
-                    } else {
-                        const leaf = try new_table.allocator.create(LeafNodeType);
-                        leaf.* = LeafNodeType.init(canonical_pfx, new_value);
-                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .leaf = leaf });
-                    }
-
-                    new_table.sizeUpdate(is4, 1);
-                    return .{ .table = new_table, .new_value = new_value };
-                }
-
-                const kid = current_node.children.mustGet(addr);
-                const NodeType = @import("node.zig").Node(V);
-
-                switch (kid) {
-                    .node => |child_node| {
-                        current_node = child_node;
-                        continue;
-                    },
-                    .leaf => |leaf| {
-                        if (leaf.prefix.eql(&canonical_pfx)) {
-                            const new_value = cb(leaf.value, true);
-                            leaf.value = new_value;
-                            return .{ .table = new_table, .new_value = new_value };
-                        }
-
-                        const new_node = try new_table.allocator.create(NodeType);
-                        new_node.* = NodeType.init(new_table.allocator);
-                        _ = try new_node.insertAtDepth(leaf.prefix, leaf.value, @intCast(depth_idx + 1), new_table.allocator);
-                        new_table.allocator.destroy(leaf);
-                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .node = new_node });
-                        current_node = new_node;
-                    },
-                    .fringe => |fringe| {
-                        if (@import("node.zig").isFringe(@intCast(depth_idx), bits)) {
-                            const new_value = cb(fringe.value, true);
-                            fringe.value = new_value;
-                            return .{ .table = new_table, .new_value = new_value };
-                        }
-
-                        const new_node = try new_table.allocator.create(NodeType);
-                        new_node.* = NodeType.init(new_table.allocator);
-                        _ = try new_node.prefixes.insertAt(1, fringe.value);
-                        new_table.allocator.destroy(fringe);
-                        _ = try current_node.children.insertAt(addr, NodeType.ChildNode{ .node = new_node });
-                        current_node = new_node;
-                    },
-                }
+            if (!exists) {
+                pt.sizeUpdate(is4, 1);
             }
 
-            return .{ .table = new_table, .new_value = zero };
+            return .{ .table = pt, .new_value = new_value };
         }
 
         /// Go BART: func (t *Table[V]) Delete(pfx netip.Prefix)
@@ -987,29 +950,19 @@ pub fn Table(comptime V: type) type {
                             return .{ .value = zero, .ok = false };
                         };
 
-                        // Clean up the deleted fringe
                         if (deleted.ok) {
-                            switch (deleted.value) {
-                                .fringe => |fringe_node| {
-                                    self.allocator.destroy(fringe_node);
-                                },
-                                else => {}, // Should not happen
-                            }
+                            NodeType.decRefChild(deleted.value, self.allocator);
                         }
 
                         return .{ .value = saved_value, .ok = true };
                     },
 
                     .leaf => |leaf_ptr| {
-                        // Attention: pfx must be masked to be comparable!
                         if (!leaf_ptr.prefix.eql(&canonical_pfx)) {
                             return .{ .value = zero, .ok = false };
                         }
 
-                        // Save the value before deleting
                         const saved_value = leaf_ptr.value;
-
-                        // prefix is equal leaf, delete leaf
                         const deleted = current_node.children.deleteAt(octet);
 
                         self.sizeUpdate(is4, -1);
@@ -1017,14 +970,8 @@ pub fn Table(comptime V: type) type {
                             return .{ .value = zero, .ok = false };
                         };
 
-                        // Clean up the deleted leaf
                         if (deleted.ok) {
-                            switch (deleted.value) {
-                                .leaf => |leaf_node| {
-                                    self.allocator.destroy(leaf_node);
-                                },
-                                else => {}, // Should not happen
-                            }
+                            NodeType.decRefChild(deleted.value, self.allocator);
                         }
 
                         return .{ .value = saved_value, .ok = true };
@@ -1045,8 +992,7 @@ pub fn Table(comptime V: type) type {
 
         /// Go BART: func (t *Table[V]) GetAndDeletePersist(pfx netip.Prefix) (pt *Table[V], val V, ok bool)
         /// GetAndDeletePersist is similar to GetAndDelete but the receiver isn't modified.
-        /// All nodes touched during delete are cloned and a new Table is returned.
-        /// Note: For memory safety in Zig, we use full clone approach instead of shallow copy
+        /// Uses O(depth) path-copy: only nodes on the deletion path are cloned.
         pub fn GetAndDeletePersist(self: *const Self, pfx: *const netip.Prefix) !struct { table: *Self, value: V, ok: bool } {
             var zero: V = undefined;
             @memset(std.mem.asBytes(&zero), 0);
@@ -1059,18 +1005,106 @@ pub fn Table(comptime V: type) type {
                 };
             }
 
-            // For now, use a simple approach: clone the table and perform delete on the clone
-            // This avoids complex memory management issues with shallow copying
-            const pt = try self.Clone(self.allocator);
-            
-            // Perform the delete operation on the cloned table
-            const result = pt.getAndDelete(pfx);
-            
-            return .{
-                .table = pt,
-                .value = result.value,
-                .ok = result.ok,
-            };
+            const canonical_pfx = pfx.masked();
+            const is4 = canonical_pfx.is4();
+
+            const pt = try self.createPersistTable(is4);
+            errdefer {
+                pt.deinit();
+                self.allocator.destroy(pt);
+            }
+
+            // Path-copy delete: clone each node on the path before modifying
+            const ip = canonical_pfx.addr();
+            const bits = canonical_pfx.bits();
+            const octets = ip.asSlice();
+            const depth_result = @import("node.zig").maxDepthAndLastBits(bits);
+            const max_depth = depth_result.max_depth;
+            const last_bits = depth_result.last_bits;
+
+            const n = pt.rootNodeByVersion(is4);
+            const maxTreeDepth = @import("node.zig").maxTreeDepth;
+            var stack: [maxTreeDepth]*NodeType = undefined;
+
+            var current_depth: usize = 0;
+            var current_node = n;
+
+            for (octets, 0..) |octet, depth_idx| {
+                current_depth = depth_idx & 0xf;
+                stack[current_depth] = current_node;
+
+                if (current_depth == max_depth) {
+                    const result = current_node.prefixes.deleteAt(base_index.pfxToIdx256(octet, last_bits));
+                    if (!result.ok) {
+                        return .{ .table = pt, .value = zero, .ok = false };
+                    }
+
+                    pt.sizeUpdate(is4, -1);
+                    current_node.purgeAndCompress(stack[0..current_depth], octets, is4, self.allocator) catch {};
+                    return .{ .table = pt, .value = result.value, .ok = true };
+                }
+
+                if (!current_node.children.Test(octet)) {
+                    return .{ .table = pt, .value = zero, .ok = false };
+                }
+
+                const kid = current_node.children.mustGet(octet);
+
+                switch (kid) {
+                    .node => |node_ptr| {
+                        // Path-copy: clone before descending
+                        const cloned_node = try node_ptr.cloneFlat(self.allocator);
+                        _ = try current_node.children.insertAt(octet, NodeType.ChildNode{ .node = cloned_node });
+                        NodeType.decRefChild(NodeType.ChildNode{ .node = node_ptr }, self.allocator);
+                        current_node = cloned_node;
+                        continue;
+                    },
+
+                    .fringe => |fringe_ptr| {
+                        if (!@import("node.zig").isFringe(@intCast(current_depth), bits)) {
+                            return .{ .table = pt, .value = zero, .ok = false };
+                        }
+
+                        const saved_value = fringe_ptr.value;
+                        const deleted = current_node.children.deleteAt(octet);
+
+                        pt.sizeUpdate(is4, -1);
+                        current_node.purgeAndCompress(stack[0..current_depth], octets, is4, self.allocator) catch {};
+
+                        if (deleted.ok) {
+                            switch (deleted.value) {
+                                .fringe => |fp| NodeType.decRefChild(NodeType.ChildNode{ .fringe = fp }, self.allocator),
+                                else => {},
+                            }
+                        }
+
+                        return .{ .table = pt, .value = saved_value, .ok = true };
+                    },
+
+                    .leaf => |leaf_ptr| {
+                        if (!leaf_ptr.prefix.eql(&canonical_pfx)) {
+                            return .{ .table = pt, .value = zero, .ok = false };
+                        }
+
+                        const saved_value = leaf_ptr.value;
+                        const deleted = current_node.children.deleteAt(octet);
+
+                        pt.sizeUpdate(is4, -1);
+                        current_node.purgeAndCompress(stack[0..current_depth], octets, is4, self.allocator) catch {};
+
+                        if (deleted.ok) {
+                            switch (deleted.value) {
+                                .leaf => |lp| NodeType.decRefChild(NodeType.ChildNode{ .leaf = lp }, self.allocator),
+                                else => {},
+                            }
+                        }
+
+                        return .{ .table = pt, .value = saved_value, .ok = true };
+                    },
+                }
+            }
+
+            return .{ .table = pt, .value = zero, .ok = false };
         }
 
         /// Update or set the value at pfx with a callback function.
