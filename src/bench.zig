@@ -297,6 +297,79 @@ fn benchGetHot(allocator: std.mem.Allocator, count: usize, is4: bool) !u64 {
     return timer.read();
 }
 
+fn benchInsertPersist(allocator: std.mem.Allocator, count: usize, is4: bool) !u64 {
+    const prefixes = try generateRandomPrefixes(allocator, count, 12345, is4);
+    defer allocator.free(prefixes);
+
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    for (prefixes, 0..) |*pfx, i| {
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    // Benchmark: InsertPersist a single prefix into a populated table
+    const probe = prefixes[count / 2];
+
+    var timer = std.time.Timer.start() catch unreachable;
+
+    for (0..count) |i| {
+        const pt = try table.InsertPersist(&probe, @as(i32, @intCast(i)));
+        pt.deinit();
+        allocator.destroy(pt);
+    }
+
+    return timer.read();
+}
+
+fn benchInsertPersistHot(allocator: std.mem.Allocator, count: usize, is4: bool) !u64 {
+    const prefixes = try generateRandomPrefixes(allocator, count, 12345, is4);
+    defer allocator.free(prefixes);
+
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    for (prefixes, 0..) |*pfx, i| {
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    const probe = prefixes[count / 2];
+
+    var timer = std.time.Timer.start() catch unreachable;
+
+    for (0..count * 10) |i| {
+        const pt = try table.InsertPersist(&probe, @as(i32, @intCast(i)));
+        pt.deinit();
+        allocator.destroy(pt);
+    }
+
+    return timer.read();
+}
+
+fn benchDeletePersist(allocator: std.mem.Allocator, count: usize, is4: bool) !u64 {
+    const prefixes = try generateRandomPrefixes(allocator, count, 12345, is4);
+    defer allocator.free(prefixes);
+
+    var table = Table(i32).init(allocator);
+    defer table.deinit();
+
+    for (prefixes, 0..) |*pfx, i| {
+        table.insert(pfx, @as(i32, @intCast(i)));
+    }
+
+    const probe = prefixes[count / 2];
+
+    var timer = std.time.Timer.start() catch unreachable;
+
+    for (0..count * 10) |_| {
+        const pt = try table.DeletePersist(&probe);
+        pt.deinit();
+        allocator.destroy(pt);
+    }
+
+    return timer.read();
+}
+
 const BenchResult = struct {
     name: []const u8,
     ns_total: u64,
@@ -358,6 +431,10 @@ pub fn main() !void {
         printResult(try runBench("Clone/IPv4", count, iterations, &benchClone, true));
         printResult(try runBench("Union/IPv4", count, iterations, &benchUnion, true));
         printResult(try runBench("Overlaps/IPv4", count, iterations, &benchOverlaps, true));
+        printResult(try runBench("InsertPersist/IPv4", count, iterations, &benchInsertPersist, true));
+        printResult(try runBenchWithOps("InsertPersistHot/IPv4", count, iterations, count * 10 * iterations, &benchInsertPersistHot, true));
+
+        printResult(try runBenchWithOps("DeletePersist/IPv4", count, iterations, count * 10 * iterations, &benchDeletePersist, true));
 
         // IPv6
         printResult(try runBench("Insert/IPv6", count, iterations, &benchInsert, false));
@@ -371,6 +448,10 @@ pub fn main() !void {
         printResult(try runBench("Clone/IPv6", count, iterations, &benchClone, false));
         printResult(try runBench("Union/IPv6", count, iterations, &benchUnion, false));
         printResult(try runBench("Overlaps/IPv6", count, iterations, &benchOverlaps, false));
+        printResult(try runBench("InsertPersist/IPv6", count, iterations, &benchInsertPersist, false));
+        printResult(try runBenchWithOps("InsertPersistHot/IPv6", count, iterations, count * 10 * iterations, &benchInsertPersistHot, false));
+
+        printResult(try runBenchWithOps("DeletePersist/IPv6", count, iterations, count * 10 * iterations, &benchDeletePersist, false));
 
         std.debug.print("\n", .{});
     }
