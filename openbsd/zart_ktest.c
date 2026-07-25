@@ -26,12 +26,7 @@ extern void zart_table_delete4(void *, const uint8_t *, uint8_t);
 extern void zart_table_delete6(void *, const uint8_t *, uint8_t);
 extern int  zart_table_size(const void *);
 
-/* kernel_panic binding for zart's panic handler */
-void
-kernel_panic(const char *msg)
-{
-	panic("zart: %s", msg);
-}
+/* kernel_panic is defined in art.c (zart_glue) */
 
 static void *
 zart_alloc(size_t size, size_t alignment)

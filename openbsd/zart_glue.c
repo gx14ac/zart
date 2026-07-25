@@ -68,6 +68,9 @@ zart_kern_free(void *ptr, size_t size)
  * Pool and GC infrastructure - kept from original art.c for node
  * lifecycle compatibility.
  */
+void		 art_table_gc(void *);
+void		 art_gc(void *);
+
 static struct pool	 an_pool, at_pool, at_heap_4_pool, at_heap_8_pool;
 
 static struct art_table	*art_table_gc_list = NULL;
@@ -127,7 +130,7 @@ zart_set_table(struct art *a, void *zt)
 	panic("zart: map full");
 }
 
-static void
+static void __attribute__((unused))
 zart_clear_table(struct art *a)
 {
 	unsigned int i;
@@ -153,8 +156,12 @@ struct art_table	*art_table_get(struct art *, struct art_table *,
 struct art_table	*art_table_put(struct art *, struct art_table *);
 struct art_table	*art_table_ref(struct art *, struct art_table *);
 int			 art_table_free(struct art *, struct art_table *);
-void			 art_table_gc(void *);
-void			 art_gc(void *);
+static struct art_node	*art_insert_art(struct art *, struct art_node *);
+static struct art_node	*art_delete_art(struct art *, const void *, unsigned int);
+static struct art_node	*art_match_art(struct art *, const void *);
+static unsigned int	 art_bindex(unsigned int, unsigned int, const uint8_t *);
+static struct art_node	*art_iter_descend(struct art_iter *, art_heap_entry *,
+			     art_heap_entry);
 
 /*
  * Level configurations - same as original.
