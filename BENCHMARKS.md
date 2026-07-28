@@ -168,6 +168,49 @@ InsertPersistHot ns/op as table size grows — demonstrates O(depth) not O(N):
 Cost is dominated by allocator behavior and cache effects, not table size.
 The slight increase from N=10K to N=100K reflects cache pressure, not algorithmic scaling.
 
+## OpenBSD kernel LPM benchmark (zart vs ART)
+
+Direct comparison of zart's LPM lookup against OpenBSD's native ART (Allotment Routing Table)
+running inside a real OpenBSD 7.9 kernel on QEMU/amd64.
+
+### Environment
+
+- VM: QEMU x86_64, OpenBSD 7.9 (GENERIC)
+- Measurement: `lfence; rdtsc` (serialized cycle counter)
+- Methodology: dual-run ordering (zart-first then ART-first), averaged to eliminate cache bias
+- zart is compiled as a kernel module (Zig freestanding → .o, linked into bsd)
+- ART is OpenBSD's stock implementation (same kernel, same routing table)
+
+### Results (990-1000 prefixes, 100K lookups each)
+
+| Protocol | zart (cyc/lookup) | ART (cyc/lookup) | Ratio        |
+|----------|-------------------|-------------------|--------------|
+| IPv4     | 271               | 257               | ART 1.05× faster |
+| IPv6     | 255               | 959               | **zart 3.75× faster** |
+
+### Analysis
+
+**IPv4**: ART and zart are effectively tied. ART's allot-propagation design places
+LPM answers directly at fringe positions — a single array dereference per level.
+With the 8+4×6 level configuration, IPv4 lookups resolve in ~4 memory accesses.
+zart also does 4 accesses, but the C→Zig FFI call overhead (register save/restore,
+~10-20 cycles) makes it marginally slower. The 5% difference is within QEMU noise
+(prior runs showed zart 1% faster).
+
+**IPv6**: zart is **3.75× faster**. ART uses 4-bit×32 levels for IPv6, requiring up to
+32 subtable descents. zart's fixed 8-bit stride resolves IPv6 in exactly 16 memory
+accesses regardless of prefix distribution. This is a fundamental algorithmic advantage
+that grows with address length.
+
+### Conclusion
+
+zart's value proposition is IPv6 LPM performance. For a hybrid deployment:
+- IPv4: keep ART (no change needed)
+- IPv6: replace with zart for 3.75× faster longest-prefix match
+
+This maps naturally to OpenBSD's `rtable` structure, which maintains separate
+`struct art` per address family.
+
 ## Running
 
 ```

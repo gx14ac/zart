@@ -84,67 +84,18 @@ static struct task	 art_node_gc_task = TASK_INITIALIZER(art_gc, NULL);
 
 static int zart_initialized = 0;
 
-/*
- * We store the zart opaque table pointer in a per-art structure.
- * Since struct art has limited fields, we use a simple mapping.
- * For simplicity, store it as a tagged pointer in art_root when
- * the ART tree is empty, or maintain a parallel side table.
- *
- * Better approach: extend struct art with a void* via a wrapper.
- * But to avoid modifying art.h, we use a fixed-size hash table.
- */
-#define ZART_MAP_SIZE	64
-static struct {
-	struct art	*art;
-	void		*zt;
-} zart_map[ZART_MAP_SIZE];
-
-static void *
+static inline void *
 zart_get_table(struct art *a)
 {
-	unsigned int i;
-	uintptr_t h = ((uintptr_t)a >> 4) & (ZART_MAP_SIZE - 1);
-
-	for (i = 0; i < ZART_MAP_SIZE; i++) {
-		unsigned int idx = (h + i) & (ZART_MAP_SIZE - 1);
-		if (zart_map[idx].art == a)
-			return zart_map[idx].zt;
-	}
-	return NULL;
+	return a->art_zt;
 }
 
-static void
+static inline void
 zart_set_table(struct art *a, void *zt)
 {
-	unsigned int i;
-	uintptr_t h = ((uintptr_t)a >> 4) & (ZART_MAP_SIZE - 1);
-
-	for (i = 0; i < ZART_MAP_SIZE; i++) {
-		unsigned int idx = (h + i) & (ZART_MAP_SIZE - 1);
-		if (zart_map[idx].art == NULL || zart_map[idx].art == a) {
-			zart_map[idx].art = a;
-			zart_map[idx].zt = zt;
-			return;
-		}
-	}
-	panic("zart: map full");
+	a->art_zt = zt;
 }
 
-static void __attribute__((unused))
-zart_clear_table(struct art *a)
-{
-	unsigned int i;
-	uintptr_t h = ((uintptr_t)a >> 4) & (ZART_MAP_SIZE - 1);
-
-	for (i = 0; i < ZART_MAP_SIZE; i++) {
-		unsigned int idx = (h + i) & (ZART_MAP_SIZE - 1);
-		if (zart_map[idx].art == a) {
-			zart_map[idx].art = NULL;
-			zart_map[idx].zt = NULL;
-			return;
-		}
-	}
-}
 
 /*
  * Forward declarations for original ART internals we still use.
@@ -202,7 +153,6 @@ art_boot(void)
 	if (!zart_initialized) {
 		zart_init(zart_kern_alloc, zart_kern_free);
 		zart_initialized = 1;
-		memset(zart_map, 0, sizeof(zart_map));
 		printf("zart: initialized (hybrid ART+zart mode)\n");
 	}
 }
