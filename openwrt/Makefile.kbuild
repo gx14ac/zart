@@ -1,0 +1,9 @@
+# Kbuild Makefile (copied into PKG_BUILD_DIR by OpenWrt build)
+obj-m := zart_fib6.o
+zart_fib6-objs := zart_fib6_mod.o zart_kernel.o
+
+EXTRA_CFLAGS += -I$(src)
+
+# zart_kernel.o is pre-built from Zig; skip kbuild compile
+$(obj)/zart_kernel.o: $(src)/zart_kernel.o
+	cp $< $@

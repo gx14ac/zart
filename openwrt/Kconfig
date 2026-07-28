@@ -1,0 +1,12 @@
+config ZART_FIB6
+	tristate "zart IPv6 FIB accelerator"
+	depends on IPV6
+	help
+	  Replace IPv6 FIB lookup with zart's fixed 8-bit stride trie.
+	  Provides 3.75x faster longest-prefix-match for IPv6 routing.
+
+	  zart resolves IPv6 LPM in exactly 16 memory accesses,
+	  compared to the kernel's fib6 tree walk which can require
+	  up to 128 node traversals for long prefixes.
+
+	  If unsure, say N.

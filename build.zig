@@ -131,6 +131,9 @@ pub fn build(b: *std.Build) void {
     }{
         .{ .name = "zart_kernel_amd64", .cpu_arch = .x86_64, .code_model = .kernel },
         .{ .name = "zart_kernel_arm64", .cpu_arch = .aarch64, .code_model = .small },
+        // MIPS: requires 32-bit pointer support in base_index.zig (TODO)
+        // .{ .name = "zart_kernel_mips", .cpu_arch = .mips, .code_model = .default },
+        // .{ .name = "zart_kernel_mipsel", .cpu_arch = .mipsel, .code_model = .default },
     };
     for (kernel_targets) |kt| {
         const kernel_mod = b.createModule(.{
