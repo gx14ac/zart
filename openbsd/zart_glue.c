@@ -160,6 +160,8 @@ static struct art_node	*art_insert_art(struct art *, struct art_node *);
 static struct art_node	*art_delete_art(struct art *, const void *, unsigned int);
 static struct art_node	*art_match_art(struct art *, const void *);
 static unsigned int	 art_bindex(unsigned int, unsigned int, const uint8_t *);
+static unsigned int	 art_bindex_orig(unsigned int, unsigned int,
+			     const uint8_t *, unsigned int);
 static struct art_node	*art_iter_descend(struct art_iter *, art_heap_entry *,
 			     art_heap_entry);
 
@@ -306,57 +308,41 @@ fallback:
 static struct art_node *
 art_match_art(struct art *art, const void *addr)
 {
+	unsigned int offset = 0;
+	unsigned int level = 0;
 	art_heap_entry *heap;
-	struct art_node *dflt = NULL;
-	const uint8_t *k = addr;
-	unsigned int j, offset = 0;
+	art_heap_entry ahe, dahe = 0;
+	struct art_node *an;
+	int j;
 
 	heap = SMR_PTR_GET(&art->art_root);
 	if (heap == NULL)
 		return NULL;
 
-	for (j = 0; j < art->art_nlevels; j++) {
-		art_heap_entry ahe;
-		unsigned int bits = art->art_levels[j];
-		unsigned int minfringe = (1 << bits);
-		unsigned int i;
+	for (;;) {
+		unsigned int bits = art->art_levels[level];
+		unsigned int p = offset + bits;
 
-		/* Compute index */
-		i = art_bindex(offset, bits, k);
-		offset += bits;
+		ahe = SMR_PTR_GET(&heap[ART_HEAP_IDX_DEFAULT]);
+		if (ahe != 0)
+			dahe = ahe;
 
-		/* Walk up from fringe to find best match */
-		i += minfringe;
-		while (i > 1) {
-			ahe = SMR_PTR_GET_LOCKED(&heap[i]);
-			if (art_heap_entry_is_node(ahe)) {
-				struct art_node *an;
-				an = art_heap_entry_to_node(ahe);
-				if (an != NULL)
-					dflt = an;
-			}
-			i >>= 1;
-		}
+		j = art_bindex_orig(offset, bits, addr, p);
+		ahe = SMR_PTR_GET(&heap[j]);
 
-		/* Check default */
-		ahe = SMR_PTR_GET_LOCKED(&heap[ART_HEAP_IDX_DEFAULT]);
-		if (ahe != 0) {
-			struct art_node *an = art_heap_entry_to_node(ahe);
-			if (an != NULL)
-				dflt = an;
-		}
-
-		/* Descend if fringe points to subtable */
-		i = art_bindex(offset - bits, bits, k) + minfringe;
-		ahe = SMR_PTR_GET_LOCKED(&heap[i]);
-		if (!art_heap_entry_is_node(ahe) && ahe != 0) {
-			heap = art_heap_entry_to_heap(ahe);
-		} else {
+		if (art_heap_entry_is_node(ahe))
 			break;
-		}
+
+		heap = art_heap_entry_to_heap(ahe);
+		offset = p;
+		level++;
 	}
 
-	return dflt;
+	an = art_heap_entry_to_node(ahe);
+	if (an != NULL)
+		return an;
+
+	return art_heap_entry_to_node(dahe);
 }
 
 static unsigned int
@@ -687,59 +673,82 @@ art_walk(struct art *art, int (*f)(struct art_node *, void *), void *arg)
 static struct art_node *
 art_insert_art(struct art *art, struct art_node *an)
 {
+	unsigned int p;
+	art_heap_entry ahe, oahe, *ahep;
 	art_heap_entry *heap;
+	struct art_node *oan;
 	struct art_table *at;
-	const uint8_t *k = an->an_addr;
-	unsigned int plen = an->an_plen;
-	unsigned int j, offset = 0;
+	unsigned int i, j;
 
-	if (art->art_root == NULL) {
+	heap = SMR_PTR_GET_LOCKED(&art->art_root);
+	if (heap == NULL) {
 		at = art_table_get(art, NULL, -1);
 		if (at == NULL)
 			return NULL;
-		art->art_root = at->at_heap;
+
+		heap = at->at_heap;
+		SMR_PTR_SET_LOCKED(&art->art_root, heap);
+	} else
+		at = art_heap_to_table(heap);
+
+	/* Default route */
+	if (an->an_plen == 0) {
+		ahep = &heap[ART_HEAP_IDX_DEFAULT];
+		oahe = SMR_PTR_GET_LOCKED(ahep);
+		oan = art_heap_entry_to_node(oahe);
+		if (oan != NULL)
+			return oan;
+
+		art_table_ref(art, at);
+		SMR_PTR_SET_LOCKED(ahep, art_node_to_heap_entry(an));
+		return an;
 	}
 
-	heap = art->art_root;
+	/* Descend until prefix fits in current table */
+	while ((p = at->at_offset + at->at_bits) < an->an_plen) {
+		j = art_bindex_orig(at->at_offset, at->at_bits, an->an_addr, p);
+		ahep = &heap[j];
+		ahe = SMR_PTR_GET_LOCKED(ahep);
 
-	for (j = 0; j < art->art_nlevels; j++) {
-		unsigned int bits = art->art_levels[j];
-		unsigned int minfringe = (1 << bits);
-		unsigned int i;
-
-		if (plen <= offset + bits) {
-			unsigned int consumed = plen - offset;
-			i = art_bindex(offset, consumed, k);
-			i += (1 << consumed);
-
-			art_heap_entry ahe;
-			ahe = SMR_PTR_GET_LOCKED(&heap[i]);
-			if (art_heap_entry_is_node(ahe) && ahe != 0) {
-				return art_heap_entry_to_node(ahe);
-			}
-
-			art_allot(art_heap_to_table(heap), i,
-			    heap[i], art_node_to_heap_entry(an));
-			return an;
-		}
-
-		i = art_bindex(offset, bits, k) + minfringe;
-		offset += bits;
-
-		art_heap_entry ahe;
-		ahe = SMR_PTR_GET_LOCKED(&heap[i]);
-		if (art_heap_entry_is_node(ahe) || ahe == 0) {
-			at = art_table_get(art, art_heap_to_table(heap), i);
-			if (at == NULL)
+		if (art_heap_entry_is_node(ahe)) {
+			struct art_table *child = art_table_get(art, at, j);
+			if (child == NULL)
 				return NULL;
-			heap[i] = art_heap_to_heap_entry(at->at_heap);
+
+			art_table_ref(art, at);
+
+			at = child;
 			heap = at->at_heap;
+			SMR_PTR_SET_LOCKED(&heap[ART_HEAP_IDX_DEFAULT], ahe);
+			SMR_PTR_SET_LOCKED(ahep, art_heap_to_heap_entry(heap));
 		} else {
 			heap = art_heap_entry_to_heap(ahe);
+			at = art_heap_to_table(heap);
 		}
 	}
 
-	return NULL;
+	i = art_bindex_orig(at->at_offset, at->at_bits, an->an_addr, an->an_plen);
+	ahep = &heap[i];
+	oahe = SMR_PTR_GET_LOCKED(ahep);
+	if (!art_heap_entry_is_node(oahe)) {
+		heap = art_heap_entry_to_heap(oahe);
+		ahep = &heap[ART_HEAP_IDX_DEFAULT];
+		oahe = SMR_PTR_GET_LOCKED(ahep);
+	}
+
+	/* Check if there's an existing node with same addr/plen */
+	oan = art_heap_entry_to_node(oahe);
+	if (oan != NULL && oan->an_plen == an->an_plen)
+		return oan;
+
+	art_table_ref(art, at);
+	ahe = art_node_to_heap_entry(an);
+	if (i < at->at_minfringe)
+		art_allot(at, i, oahe, ahe);
+	else
+		SMR_PTR_SET_LOCKED(ahep, ahe);
+
+	return an;
 }
 
 static struct art_node *
@@ -812,7 +821,7 @@ art_table_get(struct art *art, struct art_table *parent, unsigned int j)
 	} else {
 		level = parent->at_level + 1;
 		bits = art->art_levels[level];
-		dflt = parent->at_heap[j >> 1];
+		dflt = parent->at_heap[j];
 	}
 
 	at = pool_get(&at_pool, PR_NOWAIT | PR_ZERO);
@@ -842,13 +851,6 @@ art_table_get(struct art *art, struct art_table *parent, unsigned int j)
 
 	heap[ART_HEAP_IDX_TABLE] = (art_heap_entry)at;
 	heap[ART_HEAP_IDX_DEFAULT] = dflt;
-
-	/* Fill all fringe entries with default */
-	{
-		unsigned int i;
-		for (i = 2; i < (at->at_minfringe << 1); i++)
-			heap[i] = dflt;
-	}
 
 	return at;
 }
@@ -925,4 +927,86 @@ art_allot(struct art_table *at, unsigned int i,
 			art_allot(at, r, old, new);
 		}
 	}
+}
+
+/*
+ * Benchmark wrapper: expose ART tree-walk LPM for direct comparison
+ * with zart lookup. Called from zart_bench.c.
+ */
+/*
+ * Exact copy of OpenBSD art_bindex (4-arg version) for benchmark.
+ */
+static unsigned int
+art_bindex_orig(unsigned int offset, unsigned int bits,
+    const uint8_t *addr, unsigned int plen)
+{
+	unsigned int boff, bend;
+	uint32_t k;
+
+	plen -= offset;
+	addr += (offset / 8);
+	boff = (offset % 8);
+	bend = (bits + boff);
+
+	if (bend > 24) {
+		k = (addr[0] & ((1 << (8 - boff)) - 1)) << (bend - 8);
+		k |= addr[1] << (bend - 16);
+		k |= addr[2] << (bend - 24);
+		k |= addr[3] >> (32 - bend);
+	} else if (bend > 16) {
+		k = (addr[0] & ((1 << (8 - boff)) - 1)) << (bend - 8);
+		k |= addr[1] << (bend - 16);
+		k |= addr[2] >> (24 - bend);
+	} else if (bend > 8) {
+		k = (addr[0] & ((1 << (8 - boff)) - 1)) << (bend - 8);
+		k |= addr[1] >> (16 - bend);
+	} else {
+		k = (addr[0] >> (8 - bend)) & ((1 << bits) - 1);
+	}
+
+	return ((k >> (bits - plen)) + (1 << plen));
+}
+
+/*
+ * Exact copy of OpenBSD art_match for benchmark comparison.
+ * This is the real ART lookup — 1 fringe read per level, default fallback.
+ */
+struct art_node *
+art_match_art_only(struct art *art, const void *addr)
+{
+	unsigned int offset = 0;
+	unsigned int level = 0;
+	art_heap_entry *heap;
+	art_heap_entry ahe, dahe = 0;
+	struct art_node *an;
+	int j;
+
+	heap = SMR_PTR_GET(&art->art_root);
+	if (heap == NULL)
+		return NULL;
+
+	for (;;) {
+		unsigned int bits = art->art_levels[level];
+		unsigned int p = offset + bits;
+
+		ahe = SMR_PTR_GET(&heap[ART_HEAP_IDX_DEFAULT]);
+		if (ahe != 0)
+			dahe = ahe;
+
+		j = art_bindex_orig(offset, bits, addr, p);
+		ahe = SMR_PTR_GET(&heap[j]);
+
+		if (art_heap_entry_is_node(ahe))
+			break;
+
+		heap = art_heap_entry_to_heap(ahe);
+		offset = p;
+		level++;
+	}
+
+	an = art_heap_entry_to_node(ahe);
+	if (an != NULL)
+		return an;
+
+	return art_heap_entry_to_node(dahe);
 }
