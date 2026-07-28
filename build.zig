@@ -121,4 +121,49 @@ pub fn build(b: *std.Build) void {
     });
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&b.addRunArtifact(bench_exe).step);
+
+    // Freestanding kernel object (for OpenBSD integration)
+    const kernel_step = b.step("kernel", "Build freestanding kernel object");
+    const kernel_targets = [_]struct {
+        name: []const u8,
+        cpu_arch: std.Target.Cpu.Arch,
+        code_model: std.builtin.CodeModel,
+    }{
+        .{ .name = "zart_kernel_amd64", .cpu_arch = .x86_64, .code_model = .kernel },
+        .{ .name = "zart_kernel_arm64", .cpu_arch = .aarch64, .code_model = .small },
+    };
+    for (kernel_targets) |kt| {
+        const kernel_mod = b.createModule(.{
+            .root_source_file = b.path("src/kernel/root.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = kt.cpu_arch,
+                .os_tag = .freestanding,
+                .abi = .none,
+            }),
+            .optimize = .ReleaseFast,
+            .code_model = kt.code_model,
+            .red_zone = false,
+            .omit_frame_pointer = false,
+        });
+        kernel_mod.addImport("zart_table", b.createModule(.{
+            .root_source_file = b.path("src/table.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = kt.cpu_arch,
+                .os_tag = .freestanding,
+                .abi = .none,
+            }),
+            .optimize = .ReleaseFast,
+            .code_model = kt.code_model,
+            .red_zone = false,
+            .omit_frame_pointer = false,
+        }));
+        const kernel_obj = b.addObject(.{
+            .name = kt.name,
+            .root_module = kernel_mod,
+        });
+        kernel_step.dependOn(&kernel_obj.step);
+
+        const install = b.addInstallFile(kernel_obj.getEmittedBin(), b.fmt("kernel/{s}.o", .{kt.name}));
+        kernel_step.dependOn(&install.step);
+    }
 }
