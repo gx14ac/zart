@@ -201,6 +201,8 @@ art_init(struct art *art, unsigned int alen)
 	zt = zart_table_create();
 	if (zt != NULL)
 		zart_set_table(art, zt);
+	else
+		printf("zart: table creation failed for alen %u, using ART fallback\n", alen);
 }
 
 struct art *
