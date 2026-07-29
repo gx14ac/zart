@@ -136,13 +136,26 @@ pub fn build(b: *std.Build) void {
         // .{ .name = "zart_kernel_mipsel", .cpu_arch = .mipsel, .code_model = .default },
     };
     for (kernel_targets) |kt| {
+        var query: std.Target.Query = .{
+            .cpu_arch = kt.cpu_arch,
+            .os_tag = .freestanding,
+            .abi = .none,
+        };
+        if (kt.cpu_arch == .x86_64) {
+            query.cpu_features_sub = std.Target.x86.featureSet(&.{
+                .sse,
+                .sse2,
+                .mmx,
+                .x87,
+            });
+            query.cpu_features_add = std.Target.x86.featureSet(&.{
+                .soft_float,
+            });
+        }
+        const resolved_target = b.resolveTargetQuery(query);
         const kernel_mod = b.createModule(.{
             .root_source_file = b.path("src/kernel/root.zig"),
-            .target = b.resolveTargetQuery(.{
-                .cpu_arch = kt.cpu_arch,
-                .os_tag = .freestanding,
-                .abi = .none,
-            }),
+            .target = resolved_target,
             .optimize = .ReleaseFast,
             .code_model = kt.code_model,
             .red_zone = false,
@@ -150,11 +163,7 @@ pub fn build(b: *std.Build) void {
         });
         kernel_mod.addImport("zart_table", b.createModule(.{
             .root_source_file = b.path("src/table.zig"),
-            .target = b.resolveTargetQuery(.{
-                .cpu_arch = kt.cpu_arch,
-                .os_tag = .freestanding,
-                .abi = .none,
-            }),
+            .target = resolved_target,
             .optimize = .ReleaseFast,
             .code_model = kt.code_model,
             .red_zone = false,

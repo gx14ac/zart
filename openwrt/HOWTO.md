@@ -54,14 +54,25 @@ make menuconfig  # Enable: Kernel modules -> Network Support -> kmod-zart-fib6
 make package/kmod-zart-fib6/compile V=s
 ```
 
-### 3. Manual build (against kernel headers)
+### 3. Manual cross-build (with build.sh)
 
 ```sh
-cd openwrt/
-cp ../zig-out/kernel/zart_kernel_amd64.o zart_kernel.o
-make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
-insmod zart_fib6.ko
+# Download OpenWrt SDK
+wget https://downloads.openwrt.org/releases/24.10.1/targets/x86/64/openwrt-sdk-24.10.1-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+tar xf openwrt-sdk-*.tar.zst
+
+# Build both modules (zart_test.ko + zart_fib6.ko)
+SDK=/path/to/openwrt-sdk-24.10.1-x86-64_gcc-13.3.0_musl.Linux-x86_64 ./build.sh
+
+# Deploy to router
+scp -O /tmp/zart_fib6.ko root@router:/tmp/
+ssh root@router insmod /tmp/zart_fib6.ko
 ```
+
+Key flags (required for Linux kernel modules):
+- `-mno-sse -mno-sse2 -mno-mmx -mno-80387`: kernel cannot use FPU/SSE
+- `-mcmodel=kernel -mno-red-zone`: standard kernel code model
+- `-fno-PIE -fno-stack-protector`: no userspace features
 
 ### 4. Verify
 
